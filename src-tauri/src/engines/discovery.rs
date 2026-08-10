@@ -1,4 +1,7 @@
-use crate::models::{EngineId, EngineInfo};
+use crate::{
+    engines::ytdlp::detect_runtime_capabilities,
+    models::{EngineCapability, EngineId, EngineInfo},
+};
 use std::path::Path;
 use tokio::process::Command;
 
@@ -54,11 +57,37 @@ async fn detect(definition: EngineDefinition) -> EngineInfo {
                 version: None,
                 required: definition.required,
                 status_message: format!("{} was not found in PATH", definition.executable),
+                capabilities: Vec::new(),
             };
         }
     };
 
     let version = read_version(&path, definition.version_arg).await;
+    let capabilities = match definition.id {
+        EngineId::YtDlp => {
+            let runtime = detect_runtime_capabilities(&path).await;
+            vec![
+                EngineCapability {
+                    id: "browserCookies".to_owned(),
+                    display_name: "Browser cookies".to_owned(),
+                    available: true,
+                    status_message: "Supported when a browser source is selected below".to_owned(),
+                },
+                EngineCapability {
+                    id: "browserImpersonation".to_owned(),
+                    display_name: "Browser impersonation".to_owned(),
+                    available: runtime.impersonation_available(),
+                    status_message: runtime
+                        .preferred_impersonation_target
+                        .map(|target| format!("Available through {target}"))
+                        .unwrap_or_else(|| {
+                            "No compatible curl_cffi target is available".to_owned()
+                        }),
+                },
+            ]
+        }
+        EngineId::Ffmpeg | EngineId::Ffprobe => Vec::new(),
+    };
     EngineInfo {
         id: definition.id,
         display_name: definition.display_name.to_owned(),
@@ -71,6 +100,7 @@ async fn detect(definition: EngineDefinition) -> EngineInfo {
         } else {
             "Executable found, but its version could not be read".to_owned()
         },
+        capabilities,
     }
 }
 

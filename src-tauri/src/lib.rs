@@ -37,6 +37,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::detect_engines,
             commands::analyze_url,
+            commands::get_engine_preferences,
+            commands::update_engine_preferences,
             commands::get_default_destination,
             commands::start_download,
             commands::cancel_download,

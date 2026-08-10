@@ -29,10 +29,20 @@ export default function App() {
   return (
     <AppShell>
       {error ? (
-        <div className="sticky top-0 z-20 flex items-center gap-3 border-b border-red-500/30 bg-red-950/95 px-8 py-3 text-sm text-red-100 backdrop-blur">
-          <AlertTriangle size={17} className="shrink-0 text-red-400" />
-          <span className="flex-1">{error}</span>
-          <button className="text-red-300 hover:text-white" onClick={() => setError(null)} aria-label="Dismiss error"><X size={17} /></button>
+        <div className="sticky top-0 z-20 border-b border-red-500/30 bg-red-950/95 px-8 py-3 text-sm text-red-100 backdrop-blur">
+          <div className="flex items-start gap-3">
+            <AlertTriangle size={17} className="mt-0.5 shrink-0 text-red-400" />
+            <div className="min-w-0 flex-1">
+              <p>{error.message}</p>
+              {error.details ? (
+                <details className="mt-2 text-xs text-red-200/80">
+                  <summary className="cursor-pointer select-none font-medium text-red-200">Technical details</summary>
+                  <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap border border-red-500/20 bg-black/20 p-3 font-mono leading-5">{error.details}</pre>
+                </details>
+              ) : null}
+            </div>
+            <button className="text-red-300 hover:text-white" onClick={() => setError(null)} aria-label="Dismiss error"><X size={17} /></button>
+          </div>
         </div>
       ) : null}
       {view === "new" ? <NewDownloadPage /> : null}

@@ -20,6 +20,29 @@ export interface EngineInfo {
   version?: string | null;
   required: boolean;
   statusMessage: string;
+  capabilities: EngineCapability[];
+}
+
+export interface EngineCapability {
+  id: string;
+  displayName: string;
+  available: boolean;
+  statusMessage: string;
+}
+
+export type BrowserCookieSource =
+  | "none"
+  | "firefox"
+  | "chromium"
+  | "chrome"
+  | "brave"
+  | "vivaldi"
+  | "edge"
+  | "opera";
+
+export interface EnginePreferences {
+  browserCookieSource: BrowserCookieSource;
+  enableImpersonation: boolean;
 }
 
 export interface MediaFormat {

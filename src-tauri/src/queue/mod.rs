@@ -5,7 +5,9 @@ use crate::{
         DownloadEngine,
     },
     errors::AppError,
-    models::{DownloadJob, DownloadOptions, DownloadState, StartDownloadRequest},
+    models::{
+        DownloadJob, DownloadOptions, DownloadState, EnginePreferences, StartDownloadRequest,
+    },
     utils::validation::{validate_destination, validate_media_url},
 };
 use chrono::Utc;
@@ -53,11 +55,18 @@ impl QueueManager {
         &self,
         app: AppHandle,
         request: StartDownloadRequest,
+        preferences: EnginePreferences,
     ) -> Result<DownloadJob, AppError> {
         validate_media_url(&request.url)?;
         let destination = validate_destination(&request.options.destination)?;
         let engine = YtDlpEngine::discover()?;
-        let args = engine.build_download_args(&request.url, &request.options)?;
+        let capabilities = engine.runtime_capabilities().await;
+        let args = engine.build_download_args(
+            &request.url,
+            &request.options,
+            &preferences,
+            &capabilities,
+        )?;
 
         let id = Uuid::new_v4().to_string();
         let job = DownloadJob::from_request(id.clone(), &request);

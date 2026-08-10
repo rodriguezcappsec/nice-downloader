@@ -3,6 +3,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   DownloadJob,
   EngineInfo,
+  EnginePreferences,
   HistoryEntry,
   MediaAnalysis,
   StartDownloadRequest,
@@ -10,6 +11,9 @@ import type {
 
 export const api = {
   detectEngines: () => invoke<EngineInfo[]>("detect_engines"),
+  getEnginePreferences: () => invoke<EnginePreferences>("get_engine_preferences"),
+  updateEnginePreferences: (preferences: EnginePreferences) =>
+    invoke<EnginePreferences>("update_engine_preferences", { preferences }),
   analyzeUrl: (url: string) => invoke<MediaAnalysis>("analyze_url", { url }),
   getDefaultDestination: () => invoke<string>("get_default_destination"),
   startDownload: (request: StartDownloadRequest) =>
@@ -21,11 +25,19 @@ export const api = {
     listen<DownloadJob>("download-job-updated", (event) => handler(event.payload)),
 };
 
-export function errorMessage(error: unknown): string {
-  if (typeof error === "string") return error;
-  if (error && typeof error === "object") {
-    const candidate = error as { message?: unknown; details?: unknown };
-    if (typeof candidate.message === "string") return candidate.message;
+export function normalizeError(error: unknown): import("../types").AppError {
+  if (typeof error === "string") {
+    return { code: "unknown_error", message: error };
   }
-  return "An unexpected error occurred.";
+  if (error && typeof error === "object") {
+    const candidate = error as { code?: unknown; message?: unknown; details?: unknown };
+    if (typeof candidate.message === "string") {
+      return {
+        code: typeof candidate.code === "string" ? candidate.code : "unknown_error",
+        message: candidate.message,
+        details: typeof candidate.details === "string" ? candidate.details : null,
+      };
+    }
+  }
+  return { code: "unknown_error", message: "An unexpected error occurred." };
 }

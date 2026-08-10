@@ -3,7 +3,11 @@ pub mod discovery;
 pub mod gallery_dl;
 pub mod ytdlp;
 
-use crate::{errors::AppError, models::DownloadOptions};
+use crate::{
+    engines::ytdlp::YtDlpRuntimeCapabilities,
+    errors::AppError,
+    models::{DownloadOptions, EnginePreferences},
+};
 
 pub trait DownloadEngine {
     fn executable_name(&self) -> &'static str;
@@ -11,5 +15,7 @@ pub trait DownloadEngine {
         &self,
         url: &str,
         options: &DownloadOptions,
+        preferences: &EnginePreferences,
+        capabilities: &YtDlpRuntimeCapabilities,
     ) -> Result<Vec<String>, AppError>;
 }
