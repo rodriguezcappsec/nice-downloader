@@ -22,6 +22,7 @@ pub struct PreparedDownload {
     pub kind: PreparedEngineKind,
     pub args: Vec<String>,
     pub output_relative_path: Option<String>,
+    pub expected_item_count: Option<u32>,
 }
 
 pub async fn analyze(
@@ -50,6 +51,12 @@ pub async fn prepare_download(
                 kind: PreparedEngineKind::GalleryDl,
                 args: prepared.args,
                 output_relative_path: Some(prepared.output_directory),
+                expected_item_count: request
+                    .options
+                    .gallery_selection
+                    .as_ref()
+                    .and_then(|items| u32::try_from(items.len()).ok())
+                    .or(request.analysis.item_count),
             })
         }
         DownloadEngineKind::GalleryDl => Err(AppError::new(
@@ -61,6 +68,12 @@ pub async fn prepare_download(
             "Analyze this Bunkr album again so it can be downloaded with gallery-dl.",
         )),
         DownloadEngineKind::YtDlp => {
+            if request.options.gallery_selection.is_some() {
+                return Err(AppError::new(
+                    "engine_route_mismatch",
+                    "Gallery item selections can only be used with a gallery download.",
+                ));
+            }
             let engine = YtDlpEngine::discover()?;
             let capabilities = engine.runtime_capabilities().await;
             let args = engine.build_download_args(
@@ -77,6 +90,7 @@ pub async fn prepare_download(
                 kind: PreparedEngineKind::YtDlp,
                 args,
                 output_relative_path: None,
+                expected_item_count: None,
             })
         }
     }

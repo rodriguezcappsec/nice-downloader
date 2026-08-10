@@ -1,10 +1,10 @@
 use crate::{
     database::Database,
-    engines::{discovery, router, ytdlp::YtDlpEngine},
+    engines::{discovery, gallery_dl::GalleryDlEngine, router, ytdlp::YtDlpEngine},
     errors::AppError,
     models::{
         BatchAnalysisItem, BatchAnalysisResponse, DownloadJob, EngineInfo, EnginePreferences,
-        MediaAnalysis, StartDownloadRequest,
+        GalleryItemList, MediaAnalysis, StartDownloadRequest,
     },
     queue::QueueManager,
     utils::validation::{normalize_engine_preferences, validate_engine_preferences},
@@ -28,6 +28,17 @@ pub async fn analyze_url(
 ) -> Result<MediaAnalysis, AppError> {
     let preferences = database.load_engine_preferences()?;
     router::analyze(&url, &preferences).await
+}
+
+#[tauri::command]
+pub async fn list_gallery_items(
+    database: State<'_, Database>,
+    url: String,
+) -> Result<GalleryItemList, AppError> {
+    let preferences = database.load_engine_preferences()?;
+    GalleryDlEngine::discover()?
+        .list_items(&url, &preferences)
+        .await
 }
 
 #[tauri::command]

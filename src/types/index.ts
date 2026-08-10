@@ -89,6 +89,27 @@ export interface MediaAnalysis {
   totalSizeBytes?: number | null;
 }
 
+export interface GalleryItem {
+  index: number;
+  id: string;
+  filename: string;
+  extension?: string | null;
+  sizeBytes?: number | null;
+  thumbnail?: string | null;
+  isVideo: boolean;
+}
+
+export interface GalleryItemList {
+  items: GalleryItem[];
+  totalCount: number;
+  truncated: boolean;
+}
+
+export interface GalleryItemSelection {
+  index: number;
+  sizeBytes?: number | null;
+}
+
 export interface BatchAnalysisItem {
   inputUrl: string;
   analysis?: MediaAnalysis | null;
@@ -115,6 +136,7 @@ export interface DownloadOptions {
   destination: string;
   filenameTemplate: string;
   outputConflictPolicy: "skip" | "overwrite";
+  gallerySelection?: GalleryItemSelection[] | null;
 }
 
 export type DownloadState =

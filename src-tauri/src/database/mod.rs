@@ -350,6 +350,7 @@ mod tests {
             destination: job.destination.clone(),
             filename_template: "%(title)s.%(ext)s".to_owned(),
             output_conflict_policy: OutputConflictPolicy::Skip,
+            gallery_selection: None,
         };
         let request = StartDownloadRequest {
             url: job.url.clone(),

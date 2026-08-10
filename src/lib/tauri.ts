@@ -5,6 +5,7 @@ import type {
   DownloadJob,
   EngineInfo,
   EnginePreferences,
+  GalleryItemList,
   HistoryEntry,
   MediaAnalysis,
   StartDownloadRequest,
@@ -16,6 +17,7 @@ export const api = {
   updateEnginePreferences: (preferences: EnginePreferences) =>
     invoke<EnginePreferences>("update_engine_preferences", { preferences }),
   analyzeUrl: (url: string) => invoke<MediaAnalysis>("analyze_url", { url }),
+  listGalleryItems: (url: string) => invoke<GalleryItemList>("list_gallery_items", { url }),
   analyzeUrls: (urls: string[]) => invoke<BatchAnalysisResponse>("analyze_urls", { urls }),
   analyzePlaylist: (url: string) => invoke<BatchAnalysisResponse>("analyze_playlist", { url }),
   getDefaultDestination: () => invoke<string>("get_default_destination"),

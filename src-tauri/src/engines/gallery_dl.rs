@@ -2,17 +2,20 @@ use crate::{
     engines::ytdlp::sanitize_diagnostic,
     errors::AppError,
     models::{
-        DownloadEngineKind, EnginePreferences, MediaAnalysis, OutputConflictPolicy, QualityKind,
-        QualityOption, StartDownloadRequest,
+        DownloadEngineKind, EnginePreferences, GalleryItem, GalleryItemList, MediaAnalysis,
+        OutputConflictPolicy, QualityKind, QualityOption, StartDownloadRequest,
     },
     utils::validation::validate_media_url,
 };
+use serde::Deserialize;
 use serde_json::Value;
-use std::{path::PathBuf, time::Duration};
+use std::{collections::HashSet, path::PathBuf, time::Duration};
 use tokio::{process::Command, time::timeout};
 use url::Url;
 
 const MAX_ANALYSIS_BYTES: usize = 1_000_000;
+const MAX_ITEM_LIST_BYTES: usize = 5_000_000;
+const MAX_SELECTABLE_ITEMS: u32 = 1_000;
 
 #[derive(Debug, Clone)]
 pub struct GalleryDlEngine {
@@ -93,6 +96,60 @@ impl GalleryDlEngine {
         parse_album_metadata(value, validated.as_str())
     }
 
+    pub async fn list_items(
+        &self,
+        url: &str,
+        preferences: &EnginePreferences,
+    ) -> Result<GalleryItemList, AppError> {
+        let validated = validate_bunkr_album_url(url)?;
+        let mut command = Command::new(&self.executable);
+        command.kill_on_drop(true).args([
+            "--config-ignore",
+            "--no-colors",
+            "--no-input",
+            "--no-download",
+            "--range",
+            "1-1000",
+            "--option",
+            r#"output.mode="null""#,
+            "--Print",
+            r#"prepare:{{"index":{num!j},"count":{count!j},"id":{id!j},"filename":{filename!j},"extension":{extension!j},"size":{size!j},"thumbnail":{thumbnail!j}}}"#,
+        ]);
+        command.args(access_args(preferences));
+        command.arg("--").arg(validated.as_str());
+
+        tracing::info!(
+            engine = "gallery-dl",
+            operation = "list_items",
+            site = "bunkr",
+            "starting engine operation"
+        );
+        let output = timeout(Duration::from_secs(120), command.output())
+            .await
+            .map_err(|_| {
+                AppError::new(
+                    "gallery_items_timeout",
+                    "Loading Bunkr album contents timed out after 120 seconds.",
+                )
+            })?
+            .map_err(|error| AppError::internal("could not start gallery-dl", error))?;
+        if !output.status.success() {
+            let details = sanitize_diagnostic(&String::from_utf8_lossy(&output.stderr));
+            return Err(AppError::with_details(
+                "gallery_items_failed",
+                friendly_error(&details),
+                details,
+            ));
+        }
+        if output.stdout.len() > MAX_ITEM_LIST_BYTES {
+            return Err(AppError::new(
+                "gallery_items_too_large",
+                "This album contains more item metadata than the application can safely display.",
+            ));
+        }
+        parse_item_list(&String::from_utf8_lossy(&output.stdout))
+    }
+
     pub fn build_download(
         &self,
         request: &StartDownloadRequest,
@@ -125,6 +182,13 @@ impl GalleryDlEngine {
             "--option".to_owned(),
             "output.shorten=false".to_owned(),
         ];
+        if let Some(selection) = &request.options.gallery_selection {
+            let range = build_range(
+                selection.iter().map(|item| item.index),
+                request.analysis.item_count,
+            )?;
+            args.extend(["--range".to_owned(), range]);
+        }
         if request.options.output_conflict_policy == OutputConflictPolicy::Overwrite {
             args.push("--no-skip".to_owned());
         }
@@ -136,6 +200,132 @@ impl GalleryDlEngine {
             output_directory,
         })
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct RawGalleryItem {
+    index: u32,
+    count: u32,
+    id: Option<String>,
+    filename: Option<String>,
+    extension: Option<String>,
+    size: Option<u64>,
+    thumbnail: Option<String>,
+}
+
+fn parse_item_list(value: &str) -> Result<GalleryItemList, AppError> {
+    let mut items = Vec::new();
+    let mut seen = HashSet::new();
+    let mut total_count = 0;
+    for line in value.lines().filter(|line| !line.trim().is_empty()) {
+        if line.len() > 32_000 {
+            return Err(AppError::new(
+                "invalid_gallery_items",
+                "gallery-dl returned an oversized album item.",
+            ));
+        }
+        let raw: RawGalleryItem = serde_json::from_str(line).map_err(|error| {
+            AppError::internal("gallery-dl returned invalid album item JSON", error)
+        })?;
+        total_count = total_count.max(raw.count);
+        if raw.index == 0 || !seen.insert(raw.index) {
+            continue;
+        }
+        let extension = raw.extension.and_then(clean_extension);
+        let filename = raw
+            .filename
+            .as_deref()
+            .map(clean_title)
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| format!("Album item {}", raw.index));
+        let thumbnail = raw.thumbnail.filter(|url| validate_media_url(url).is_ok());
+        items.push(GalleryItem {
+            index: raw.index,
+            id: raw.id.as_deref().map(clean_title).unwrap_or_default(),
+            filename,
+            is_video: extension.as_deref().is_some_and(is_video_extension),
+            extension,
+            size_bytes: raw.size,
+            thumbnail,
+        });
+    }
+    if items.is_empty() {
+        return Err(AppError::new(
+            "empty_gallery",
+            "No selectable files were found in this Bunkr album.",
+        ));
+    }
+    items.sort_by_key(|item| item.index);
+    if total_count == 0 {
+        total_count = u32::try_from(items.len()).unwrap_or(u32::MAX);
+    }
+    Ok(GalleryItemList {
+        truncated: total_count > u32::try_from(items.len()).unwrap_or(u32::MAX),
+        total_count,
+        items,
+    })
+}
+
+fn build_range(
+    indices: impl Iterator<Item = u32>,
+    album_count: Option<u32>,
+) -> Result<String, AppError> {
+    let mut indices = indices.collect::<Vec<_>>();
+    let submitted_count = indices.len();
+    indices.sort_unstable();
+    indices.dedup();
+    if indices.is_empty()
+        || indices.len() != submitted_count
+        || indices.len() > MAX_SELECTABLE_ITEMS as usize
+    {
+        return Err(AppError::new(
+            "invalid_gallery_selection",
+            "Select between 1 and 1000 album files.",
+        ));
+    }
+    if indices
+        .iter()
+        .any(|index| *index == 0 || album_count.is_some_and(|count| *index > count))
+    {
+        return Err(AppError::new(
+            "invalid_gallery_selection",
+            "The selected album files are outside this album's item range.",
+        ));
+    }
+    Ok(indices
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(","))
+}
+
+fn clean_extension(value: String) -> Option<String> {
+    let value = value.trim().trim_start_matches('.').to_ascii_lowercase();
+    (!value.is_empty()
+        && value.len() <= 12
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric()))
+    .then_some(value)
+}
+
+fn is_video_extension(value: &str) -> bool {
+    matches!(
+        value,
+        "mp4"
+            | "mkv"
+            | "webm"
+            | "mov"
+            | "m4v"
+            | "avi"
+            | "flv"
+            | "wmv"
+            | "mpg"
+            | "mpeg"
+            | "ts"
+            | "m2ts"
+            | "3gp"
+    )
 }
 
 pub fn is_bunkr_album_url(value: &str) -> bool {
@@ -341,7 +531,9 @@ fn friendly_error(details: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{AudioQuality, DownloadOptions, OutputContainer, VideoCodecPreference};
+    use crate::models::{
+        AudioQuality, DownloadOptions, GalleryItemSelection, OutputContainer, VideoCodecPreference,
+    };
     use serde_json::json;
 
     #[test]
@@ -369,6 +561,29 @@ mod tests {
         assert_eq!(analysis.total_size_bytes, Some(12_590_000_000));
         assert_eq!(analysis.download_url, "https://bunkr.cr/a/ul3n82nu");
         assert!(!serde_json::to_string(&analysis).unwrap().contains("secret"));
+    }
+
+    #[test]
+    fn parses_sanitized_item_lines_and_classifies_videos() {
+        let items = parse_item_list(
+            r#"{"index":1,"count":2,"id":"one","filename":"First video","extension":"MP4","size":42,"thumbnail":"https://i.example/one.png"}
+{"index":2,"count":2,"id":"two","filename":"Poster","extension":"jpg","size":12,"thumbnail":null}"#,
+        )
+        .unwrap();
+        assert_eq!(items.total_count, 2);
+        assert!(!items.truncated);
+        assert!(items.items[0].is_video);
+        assert!(!items.items[1].is_video);
+        assert_eq!(items.items[0].extension.as_deref(), Some("mp4"));
+    }
+
+    #[test]
+    fn creates_safe_numeric_gallery_ranges() {
+        assert_eq!(build_range([3, 1].into_iter(), Some(4)).unwrap(), "1,3");
+        assert!(build_range([3, 3].into_iter(), Some(4)).is_err());
+        assert!(build_range([0].into_iter(), Some(4)).is_err());
+        assert!(build_range([5].into_iter(), Some(4)).is_err());
+        assert!(build_range([].into_iter(), Some(4)).is_err());
     }
 
     #[test]
@@ -405,6 +620,7 @@ mod tests {
                 destination: "/tmp".into(),
                 filename_template: "ignored".into(),
                 output_conflict_policy: OutputConflictPolicy::Skip,
+                gallery_selection: None,
             },
         };
         let prepared = engine
@@ -434,6 +650,22 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires gallery-dl and public Bunkr network access"]
+    async fn lists_public_bunkr_album_items_without_media_urls() {
+        let items = GalleryDlEngine::discover()
+            .unwrap()
+            .list_items("https://bunkr.cr/a/ul3n82nu", &EnginePreferences::default())
+            .await
+            .unwrap();
+        assert!(items.items.len() > 1);
+        assert!(items
+            .items
+            .iter()
+            .all(|item| !item.filename.contains("token=")));
+        assert!(items.items.iter().any(|item| item.is_video));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires gallery-dl and public Bunkr network access"]
     async fn validates_public_bunkr_download_templates_without_downloading() {
         let engine = GalleryDlEngine::discover().unwrap();
         let analysis = engine
@@ -457,6 +689,16 @@ mod tests {
                 destination: "/tmp".into(),
                 filename_template: "ignored".into(),
                 output_conflict_policy: OutputConflictPolicy::Skip,
+                gallery_selection: Some(vec![
+                    GalleryItemSelection {
+                        index: 1,
+                        size_bytes: Some(215_914_671),
+                    },
+                    GalleryItemSelection {
+                        index: 3,
+                        size_bytes: Some(200_188_175),
+                    },
+                ]),
             },
             analysis,
         };
@@ -464,14 +706,9 @@ mod tests {
             .build_download(&request, &EnginePreferences::default())
             .unwrap();
         let separator = prepared.args.iter().position(|arg| arg == "--").unwrap();
-        prepared.args.splice(
-            separator..separator,
-            [
-                "--no-download".to_owned(),
-                "--range".to_owned(),
-                "1".to_owned(),
-            ],
-        );
+        prepared
+            .args
+            .splice(separator..separator, ["--no-download".to_owned()]);
         let output = Command::new(engine.executable())
             .args(prepared.args)
             .output()
@@ -482,6 +719,9 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        assert!(String::from_utf8_lossy(&output.stdout).contains("nicedl:gallery:item:1|"));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("nicedl:gallery:item:1|"));
+        assert!(stdout.contains("nicedl:gallery:item:3|"));
+        assert!(!stdout.contains("nicedl:gallery:item:2|"));
     }
 }

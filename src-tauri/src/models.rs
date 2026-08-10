@@ -148,6 +148,33 @@ pub struct MediaAnalysis {
     pub total_size_bytes: Option<u64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GalleryItem {
+    pub index: u32,
+    pub id: String,
+    pub filename: String,
+    pub extension: Option<String>,
+    pub size_bytes: Option<u64>,
+    pub thumbnail: Option<String>,
+    pub is_video: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GalleryItemList {
+    pub items: Vec<GalleryItem>,
+    pub total_count: u32,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GalleryItemSelection {
+    pub index: u32,
+    pub size_bytes: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BatchAnalysisItem {
@@ -181,6 +208,8 @@ pub struct DownloadOptions {
     pub filename_template: String,
     #[serde(default)]
     pub output_conflict_policy: OutputConflictPolicy,
+    #[serde(default)]
+    pub gallery_selection: Option<Vec<GalleryItemSelection>>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -308,6 +337,18 @@ impl DownloadJob {
     pub fn from_request(id: String, request: &StartDownloadRequest) -> Self {
         let now = Utc::now();
         let gallery_download = request.analysis.engine == DownloadEngineKind::GalleryDl;
+        let selected_gallery_total = request
+            .options
+            .gallery_selection
+            .as_ref()
+            .and_then(|items| {
+                items
+                    .iter()
+                    .try_fold(0_u64, |total, item| total.checked_add(item.size_bytes?))
+            });
+        let selected_gallery_count = gallery_download
+            .then(|| request.options.gallery_selection.as_ref().map(Vec::len))
+            .flatten();
         Self {
             id,
             url: request.url.clone(),
@@ -316,10 +357,16 @@ impl DownloadJob {
             state: DownloadState::Queued,
             progress_percent: 0.0,
             downloaded_bytes: None,
-            total_bytes: request.analysis.total_size_bytes,
+            total_bytes: if gallery_download && request.options.gallery_selection.is_some() {
+                selected_gallery_total
+            } else {
+                request.analysis.total_size_bytes
+            },
             speed_bytes_per_second: None,
             eta_seconds: None,
-            selected_quality: request.options.quality.label.clone(),
+            selected_quality: selected_gallery_count
+                .map(|count| format!("{count} selected files"))
+                .unwrap_or_else(|| request.options.quality.label.clone()),
             output_format: if gallery_download {
                 "album".to_owned()
             } else {
@@ -368,5 +415,27 @@ mod tests {
         assert_eq!(analysis.engine, DownloadEngineKind::YtDlp);
         assert_eq!(analysis.item_count, None);
         assert_eq!(analysis.total_size_bytes, None);
+    }
+
+    #[test]
+    fn older_download_options_default_to_a_full_gallery() {
+        let options: DownloadOptions = serde_json::from_value(json!({
+            "quality": {"id":"best","label":"Best","description":"","kind":"best","maxHeight":null},
+            "container": "mp4",
+            "videoCodecPreference": "any",
+            "audioQuality": "best",
+            "audioOnly": false,
+            "subtitles": false,
+            "subtitleLanguages": [],
+            "embedThumbnail": false,
+            "embedMetadata": true,
+            "chapters": false,
+            "sponsorblock": false,
+            "destination": "/tmp",
+            "filenameTemplate": "%(title)s.%(ext)s"
+        }))
+        .unwrap();
+        assert_eq!(options.gallery_selection, None);
+        assert_eq!(options.output_conflict_policy, OutputConflictPolicy::Skip);
     }
 }

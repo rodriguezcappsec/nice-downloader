@@ -332,7 +332,10 @@ impl QueueManager {
         drop(line_tx);
 
         let mut diagnostics = VecDeque::with_capacity(MAX_JOB_DIAGNOSTIC_LINES);
-        let mut gallery_progress = GalleryProgressTracker::default();
+        let mut gallery_progress = GalleryProgressTracker {
+            item_count: prepared.expected_item_count.unwrap_or_default(),
+            ..GalleryProgressTracker::default()
+        };
         let exit_status = loop {
             if cancellation.is_cancelled() {
                 tracing::info!(job_id = %id, "cancelling download process group");
@@ -510,15 +513,20 @@ impl QueueManager {
             ) else {
                 return true;
             };
-            tracker.current_index = index;
-            tracker.item_count = count;
+            if tracker.current_index != index {
+                tracker.current_ordinal = tracker.current_ordinal.saturating_add(1);
+                tracker.current_index = index;
+            }
+            if tracker.item_count == 0 {
+                tracker.item_count = count;
+            }
             tracker.current_size = size;
             tracker.current_name = filename.chars().take(180).collect();
             self.update_job(app, id, |job| {
                 job.state = DownloadState::Downloading;
                 job.current_operation = format!(
-                    "Downloading item {index} of {count}: {}",
-                    tracker.current_name
+                    "Downloading item {} of {}: {}",
+                    tracker.current_ordinal, tracker.item_count, tracker.current_name
                 );
                 job.downloaded_bytes = Some(tracker.completed_bytes);
                 job.progress_percent =
@@ -546,7 +554,7 @@ impl QueueManager {
                 job.state = DownloadState::Downloading;
                 job.current_operation = format!(
                     "Downloading item {} of {}: {}",
-                    tracker.current_index, tracker.item_count, tracker.current_name
+                    tracker.current_ordinal, tracker.item_count, tracker.current_name
                 );
                 job.progress_percent = gallery_album_percent(
                     tracker,
@@ -576,11 +584,19 @@ impl QueueManager {
                         tracker.completed_bytes = tracker.completed_bytes.saturating_add(size);
                         tracker.last_completed_index = Some(index);
                     }
-                    tracker.current_index = index;
-                    tracker.item_count = count;
+                    if tracker.current_index != index {
+                        tracker.current_ordinal = tracker.current_ordinal.saturating_add(1);
+                        tracker.current_index = index;
+                    }
+                    if tracker.item_count == 0 {
+                        tracker.item_count = count;
+                    }
                     self.update_job(app, id, |job| {
                         job.state = DownloadState::Downloading;
-                        job.current_operation = format!("Processed item {index} of {count}");
+                        job.current_operation = format!(
+                            "Processed item {} of {}",
+                            tracker.current_ordinal, tracker.item_count
+                        );
                         job.downloaded_bytes = Some(tracker.completed_bytes);
                         job.progress_percent = gallery_album_percent(
                             tracker,
@@ -704,6 +720,7 @@ struct ParsedProgress {
 #[derive(Debug, Default)]
 struct GalleryProgressTracker {
     current_index: u32,
+    current_ordinal: u32,
     item_count: u32,
     current_size: u64,
     current_name: String,
@@ -746,10 +763,10 @@ fn gallery_album_percent(
     if let Some(total) = total_bytes.filter(|total| *total > 0) {
         return (downloaded_bytes as f64 * 100.0 / total as f64).clamp(0.0, 100.0);
     }
-    if tracker.item_count == 0 || tracker.current_index == 0 {
+    if tracker.item_count == 0 || tracker.current_ordinal == 0 {
         return 0.0;
     }
-    (((tracker.current_index - 1) as f64 + item_percent / 100.0) * 100.0
+    (((tracker.current_ordinal - 1) as f64 + item_percent / 100.0) * 100.0
         / tracker.item_count as f64)
         .clamp(0.0, 100.0)
 }
@@ -880,6 +897,7 @@ mod tests {
         );
         let tracker = GalleryProgressTracker {
             current_index: 2,
+            current_ordinal: 2,
             item_count: 4,
             ..GalleryProgressTracker::default()
         };
@@ -935,6 +953,7 @@ mod tests {
                 destination: directory.path().to_string_lossy().into_owned(),
                 filename_template: "%(title)s.%(ext)s".to_owned(),
                 output_conflict_policy: OutputConflictPolicy::Skip,
+                gallery_selection: None,
             },
         };
         let mut job = DownloadJob::from_request("recover-me".to_owned(), &request);
