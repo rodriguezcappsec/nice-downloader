@@ -64,6 +64,8 @@ impl QueueManager {
         let args = engine.build_download_args(
             &request.url,
             &request.options,
+            (request.analysis.download_url != request.analysis.webpage_url)
+                .then_some(request.analysis.title.as_str()),
             &preferences,
             &capabilities,
         )?;

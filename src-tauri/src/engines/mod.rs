@@ -15,6 +15,7 @@ pub trait DownloadEngine {
         &self,
         url: &str,
         options: &DownloadOptions,
+        metadata_title_override: Option<&str>,
         preferences: &EnginePreferences,
         capabilities: &YtDlpRuntimeCapabilities,
     ) -> Result<Vec<String>, AppError>;
