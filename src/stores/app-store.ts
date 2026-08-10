@@ -6,6 +6,7 @@ import type {
   DownloadJob,
   EngineInfo,
   EnginePreferences,
+  GalleryItemList,
   HistoryEntry,
   MediaAnalysis,
   StartDownloadRequest,
@@ -19,8 +20,10 @@ interface AppStore {
   jobs: Record<string, DownloadJob>;
   history: HistoryEntry[];
   analysis: MediaAnalysis | null;
+  galleryItems: GalleryItemList | null;
   batchAnalysis: BatchAnalysisResponse | null;
   analyzing: boolean;
+  galleryItemsLoading: boolean;
   engineLoading: boolean;
   historyLoading: boolean;
   error: AppError | null;
@@ -30,6 +33,7 @@ interface AppStore {
   setEnginePreferences: (preferences: EnginePreferences) => void;
   saveEnginePreferences: () => Promise<boolean>;
   analyze: (url: string) => Promise<MediaAnalysis | null>;
+  loadGalleryItems: (url: string) => Promise<GalleryItemList | null>;
   analyzeBatch: (urls: string[]) => Promise<BatchAnalysisResponse | null>;
   analyzePlaylist: (url: string) => Promise<BatchAnalysisResponse | null>;
   clearAnalysis: () => void;
@@ -54,8 +58,10 @@ export const useAppStore = create<AppStore>((set, get) => ({
   jobs: {},
   history: [],
   analysis: null,
+  galleryItems: null,
   batchAnalysis: null,
   analyzing: false,
+  galleryItemsLoading: false,
   engineLoading: false,
   historyLoading: false,
   error: null,
@@ -77,7 +83,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   },
 
   analyze: async (url) => {
-    set({ analyzing: true, error: null, analysis: null, batchAnalysis: null });
+    set({ analyzing: true, error: null, analysis: null, batchAnalysis: null, galleryItems: null });
     try {
       const analysis = await api.analyzeUrl(url);
       set({ analysis });
@@ -90,8 +96,22 @@ export const useAppStore = create<AppStore>((set, get) => ({
     }
   },
 
+  loadGalleryItems: async (url) => {
+    set({ galleryItemsLoading: true, error: null });
+    try {
+      const galleryItems = await api.listGalleryItems(url);
+      set({ galleryItems });
+      return galleryItems;
+    } catch (error) {
+      set({ error: normalizeError(error) });
+      return null;
+    } finally {
+      set({ galleryItemsLoading: false });
+    }
+  },
+
   analyzeBatch: async (urls) => {
-    set({ analyzing: true, error: null, analysis: null, batchAnalysis: null });
+    set({ analyzing: true, error: null, analysis: null, batchAnalysis: null, galleryItems: null });
     try {
       const batchAnalysis = await api.analyzeUrls(urls);
       set({ batchAnalysis });
@@ -105,7 +125,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   },
 
   analyzePlaylist: async (url) => {
-    set({ analyzing: true, error: null, analysis: null, batchAnalysis: null });
+    set({ analyzing: true, error: null, analysis: null, batchAnalysis: null, galleryItems: null });
     try {
       const batchAnalysis = await api.analyzePlaylist(url);
       set({ batchAnalysis });
@@ -118,7 +138,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
     }
   },
 
-  clearAnalysis: () => set({ analysis: null, batchAnalysis: null, error: null }),
+  clearAnalysis: () => set({ analysis: null, batchAnalysis: null, galleryItems: null, error: null }),
 
   detectEngines: async () => {
     set({ engineLoading: true });

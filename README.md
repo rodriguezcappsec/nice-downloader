@@ -4,6 +4,8 @@ Nice Downloader is a Linux-first desktop media download manager built with Tauri
 
 Milestone 1 supports structured URL analysis, simplified quality selection, real downloads, live progress/speed/ETA, cancellation, PATH-based engine discovery, and completed-download History. Settings also provides opt-in browser cookies and conditional browser impersonation for sites such as Reddit, Instagram, TikTok, and X that may reject anonymous engine requests.
 
+Bunkr album URLs can be inspected through gallery-dl, then downloaded in full or narrowed to individually selected files without exposing signed media URLs to the frontend.
+
 ## Prerequisites
 
 - Node.js 20 or newer

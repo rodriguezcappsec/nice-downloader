@@ -3,6 +3,7 @@ import {
   ChevronDown,
   Clock3,
   Download,
+  Film,
   FolderOpen,
   Link2,
   LoaderCircle,
@@ -14,15 +15,18 @@ import { useEffect, useMemo, useState } from "react";
 import { Button, Field, Input, Select, Textarea } from "../../components/ui";
 import { formatBytes, formatDuration } from "../../lib/format";
 import { useAppStore } from "../../stores/app-store";
-import type { DownloadOptions, MediaAnalysis, StartDownloadRequest } from "../../types";
+import type { DownloadOptions, GalleryItem, MediaAnalysis, StartDownloadRequest } from "../../types";
 
 export function NewDownloadPage() {
   const analysis = useAppStore((state) => state.analysis);
   const analyzing = useAppStore((state) => state.analyzing);
   const batchAnalysis = useAppStore((state) => state.batchAnalysis);
+  const galleryItems = useAppStore((state) => state.galleryItems);
+  const galleryItemsLoading = useAppStore((state) => state.galleryItemsLoading);
   const analyze = useAppStore((state) => state.analyze);
   const analyzeBatch = useAppStore((state) => state.analyzeBatch);
   const analyzePlaylist = useAppStore((state) => state.analyzePlaylist);
+  const loadGalleryItems = useAppStore((state) => state.loadGalleryItems);
   const clearAnalysis = useAppStore((state) => state.clearAnalysis);
   const defaultDestination = useAppStore((state) => state.defaultDestination);
   const startDownload = useAppStore((state) => state.startDownload);
@@ -37,6 +41,8 @@ export function NewDownloadPage() {
   const [embedThumbnail, setEmbedThumbnail] = useState(false);
   const [starting, setStarting] = useState(false);
   const [selectedBatchUrls, setSelectedBatchUrls] = useState<string[]>([]);
+  const [selectedGalleryIndices, setSelectedGalleryIndices] = useState<number[]>([]);
+  const [gallerySearch, setGallerySearch] = useState("");
 
   useEffect(() => {
     if (!destination && defaultDestination) setDestination(defaultDestination);
@@ -52,6 +58,11 @@ export function NewDownloadPage() {
     );
   }, [batchAnalysis]);
 
+  useEffect(() => {
+    setSelectedGalleryIndices(galleryItems?.items.map((item) => item.index) ?? []);
+    setGallerySearch("");
+  }, [galleryItems]);
+
   const selectedQuality = useMemo(
     () => analysis?.qualityOptions.find((quality) => quality.id === qualityId),
     [analysis, qualityId],
@@ -59,6 +70,18 @@ export function NewDownloadPage() {
 
   const audioOnly = selectedQuality?.kind === "audioOnly";
   const isGallery = analysis?.engine === "galleryDl";
+  const filteredGalleryItems = useMemo(() => {
+    const query = gallerySearch.trim().toLocaleLowerCase();
+    if (!query) return galleryItems?.items ?? [];
+    return galleryItems?.items.filter((item) =>
+      `${item.filename}.${item.extension || ""}`.toLocaleLowerCase().includes(query),
+    ) ?? [];
+  }, [galleryItems, gallerySearch]);
+  const selectedGalleryItems = useMemo(
+    () => galleryItems?.items.filter((item) => selectedGalleryIndices.includes(item.index)) ?? [],
+    [galleryItems, selectedGalleryIndices],
+  );
+  const selectedGallerySize = selectedGalleryItems.reduce((total, item) => total + (item.sizeBytes ?? 0), 0);
 
   useEffect(() => {
     if (audioOnly && !["mp3", "m4a", "opus"].includes(container)) setContainer("mp3");
@@ -100,6 +123,9 @@ export function NewDownloadPage() {
       destination,
       filenameTemplate: "%(title).180B [%(id)s].%(ext)s",
       outputConflictPolicy,
+      gallerySelection: isGallery && galleryItems
+        ? selectedGalleryItems.map((item) => ({ index: item.index, sizeBytes: item.sizeBytes }))
+        : null,
     };
     await startDownload({ url: analysis.downloadUrl || analysis.webpageUrl || url, analysis, options });
     setStarting(false);
@@ -218,7 +244,54 @@ export function NewDownloadPage() {
             <div className="grid gap-4">
               {isGallery ? (
                 <div className="border border-line bg-elevated p-3 text-sm text-muted">
-                  gallery-dl will preserve every original album file. Video transcoding and container conversion do not apply to gallery downloads.
+                  <p>gallery-dl preserves original album files. Video transcoding and container conversion do not apply.</p>
+                  {!galleryItems ? (
+                    <Button
+                      variant="secondary"
+                      className="mt-3 w-full"
+                      disabled={galleryItemsLoading}
+                      onClick={() => void loadGalleryItems(analysis.downloadUrl)}
+                    >
+                      {galleryItemsLoading ? <LoaderCircle className="animate-spin" size={16} /> : <Film size={16} />}
+                      {galleryItemsLoading ? "Loading album files" : "Choose specific files"}
+                    </Button>
+                  ) : (
+                    <div className="mt-3">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs font-medium text-ink">
+                          {selectedGalleryItems.length} of {galleryItems.totalCount} selected
+                        </span>
+                        <span className="text-xs">{selectedGallerySize > 0 ? `~${formatBytes(selectedGallerySize)}` : "Size unknown"}</span>
+                      </div>
+                      <Input
+                        className="mt-3"
+                        value={gallerySearch}
+                        onChange={(event) => setGallerySearch(event.target.value)}
+                        placeholder="Filter album files"
+                      />
+                      <div className="mt-2 flex gap-2">
+                        <Button variant="secondary" className="h-8 px-2 text-xs" onClick={() => setSelectedGalleryIndices(galleryItems.items.map((item) => item.index))}>All</Button>
+                        <Button variant="secondary" className="h-8 px-2 text-xs" onClick={() => setSelectedGalleryIndices(galleryItems.items.filter((item) => item.isVideo).map((item) => item.index))}>Videos</Button>
+                        <Button variant="secondary" className="h-8 px-2 text-xs" onClick={() => setSelectedGalleryIndices([])}>Clear</Button>
+                      </div>
+                      {galleryItems.truncated ? (
+                        <p className="mt-2 text-xs text-amber-400">This album is very large. The first {galleryItems.items.length} files are available for individual selection.</p>
+                      ) : null}
+                      <div className="mt-3 max-h-72 divide-y divide-line overflow-auto border border-line bg-panel">
+                        {filteredGalleryItems.map((item) => (
+                          <GalleryItemRow
+                            key={item.index}
+                            item={item}
+                            selected={selectedGalleryIndices.includes(item.index)}
+                            onChange={(selected) => setSelectedGalleryIndices((indices) => selected
+                              ? [...indices, item.index]
+                              : indices.filter((index) => index !== item.index))}
+                          />
+                        ))}
+                        {filteredGalleryItems.length === 0 ? <p className="p-3 text-xs text-muted">No album files match this filter.</p> : null}
+                      </div>
+                    </div>
+                  )}
                 </div>
               ) : (
                 <>
@@ -278,9 +351,9 @@ export function NewDownloadPage() {
                 ) : null}
               </div> : null}
 
-              <Button className="mt-1 w-full" disabled={!destination || starting} onClick={() => void submitDownload()}>
+              <Button className="mt-1 w-full" disabled={!destination || starting || galleryItemsLoading || Boolean(isGallery && galleryItems && selectedGalleryItems.length === 0)} onClick={() => void submitDownload()}>
                 {starting ? <LoaderCircle className="animate-spin" size={17} /> : !isGallery && audioOnly ? <Music2 size={17} /> : <Download size={17} />}
-                {starting ? "Adding to queue" : isGallery ? "Download album" : "Download"}
+                {starting ? "Adding to queue" : isGallery && galleryItems && (galleryItems.truncated || selectedGalleryItems.length !== galleryItems.items.length) ? `Download ${selectedGalleryItems.length} selected` : isGallery ? "Download album" : "Download"}
               </Button>
             </div>
           </section>
@@ -362,6 +435,7 @@ function defaultBatchOptions(
       destination,
       filenameTemplate: "ignored",
       outputConflictPolicy,
+      gallerySelection: null,
     };
   }
   const hasVideo = analysis.formats.some((format) => format.videoCodec);
@@ -383,7 +457,35 @@ function defaultBatchOptions(
     destination,
     filenameTemplate: "%(title).180B [%(id)s].%(ext)s",
     outputConflictPolicy,
+    gallerySelection: null,
   };
+}
+
+function GalleryItemRow({
+  item,
+  selected,
+  onChange,
+}: {
+  item: GalleryItem;
+  selected: boolean;
+  onChange: (selected: boolean) => void;
+}) {
+  return (
+    <label className="flex cursor-pointer items-center gap-3 p-2.5 hover:bg-elevated">
+      <input type="checkbox" checked={selected} onChange={(event) => onChange(event.target.checked)} />
+      <div className="h-11 w-16 shrink-0 overflow-hidden bg-black/25">
+        {item.thumbnail ? <img className="h-full w-full object-cover" src={item.thumbnail} alt="" loading="lazy" /> : <div className="grid h-full place-items-center"><Film size={16} /></div>}
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-xs font-medium text-ink">{item.filename}{item.extension ? `.${item.extension}` : ""}</div>
+        <div className="mt-1 flex gap-2 text-[11px] text-muted">
+          <span>#{item.index}</span>
+          <span>{item.isVideo ? "Video" : "File"}</span>
+          {item.sizeBytes != null ? <span>{formatBytes(item.sizeBytes)}</span> : null}
+        </div>
+      </div>
+    </label>
+  );
 }
 
 function largestKnownSize(formats: { approximateFileSize?: number | null }[]): number | null {

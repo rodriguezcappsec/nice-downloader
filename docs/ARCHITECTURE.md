@@ -70,7 +70,7 @@ Before analysis, a narrow URL resolver canonicalizes `redd.it/<post-id>` links a
 
 Batch analysis accepts at most 20 unique URLs and runs three analyzers concurrently. Playlist expansion is a separate structured yt-dlp flat-playlist operation capped at 20 entries; each expanded URL then passes through the ordinary analyzer and typed download-intent path. Bulk enqueue remains a Rust command so queue authority never moves into React.
 
-Exact `bunkr.cr/a/<album-id>` URLs route to gallery-dl. Analysis is bounded to the album summary and first item, and signed CDN media URLs are discarded. Downloads preserve original files in a sanitized album directory; gallery-dl item and byte progress is normalized into the same `DownloadJob` events as yt-dlp.
+Exact `bunkr.cr/a/<album-id>` URLs route to gallery-dl. Initial analysis is bounded to the album summary and first item, and signed CDN media URLs are discarded. An explicit item-list command can return sanitized filenames, indices, sizes, extensions, and thumbnails for selection; Rust converts selected numeric indices into a validated gallery-dl range. Downloads preserve original files in a sanitized album directory, and gallery-dl item and byte progress is normalized into the same `DownloadJob` events as yt-dlp.
 
 ## Persistence
 
