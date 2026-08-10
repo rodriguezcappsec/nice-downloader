@@ -86,7 +86,7 @@ export function NewDownloadPage() {
       destination,
       filenameTemplate: "%(title).180B [%(id)s].%(ext)s",
     };
-    await startDownload({ url: analysis.webpageUrl || url, analysis, options });
+    await startDownload({ url: analysis.downloadUrl || analysis.webpageUrl || url, analysis, options });
     setStarting(false);
   }
 

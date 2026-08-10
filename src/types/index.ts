@@ -75,6 +75,7 @@ export interface MediaAnalysis {
   durationSeconds?: number | null;
   thumbnail?: string | null;
   webpageUrl: string;
+  downloadUrl: string;
   extractor: string;
   siteName: string;
   playlistTitle?: string | null;

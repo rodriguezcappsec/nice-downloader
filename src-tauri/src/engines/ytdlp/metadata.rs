@@ -30,6 +30,8 @@ struct RawFormat {
     fps: Option<f64>,
     vcodec: Option<String>,
     acodec: Option<String>,
+    video_ext: Option<String>,
+    audio_ext: Option<String>,
     dynamic_range: Option<String>,
     filesize: Option<f64>,
     filesize_approx: Option<f64>,
@@ -65,6 +67,7 @@ pub fn parse_metadata(
             .webpage_url
             .or(raw.original_url)
             .unwrap_or_else(|| requested_url.to_owned()),
+        download_url: requested_url.to_owned(),
         extractor,
         site_name,
         playlist_title: raw.playlist_title,
@@ -76,8 +79,10 @@ pub fn parse_metadata(
 
 fn normalize_format(raw: RawFormat) -> Option<MediaFormat> {
     let id = raw.format_id?;
-    let video_codec = normalize_codec(raw.vcodec);
-    let audio_codec = normalize_codec(raw.acodec);
+    let video_codec = normalize_codec(raw.vcodec)
+        .or_else(|| media_extension_present(raw.video_ext).then(|| "unknown".to_owned()));
+    let audio_codec = normalize_codec(raw.acodec)
+        .or_else(|| media_extension_present(raw.audio_ext).then(|| "unknown".to_owned()));
     let has_video = video_codec.is_some();
     let has_audio = audio_codec.is_some();
     Some(MediaFormat {
@@ -99,6 +104,10 @@ fn normalize_format(raw: RawFormat) -> Option<MediaFormat> {
 
 fn normalize_codec(value: Option<String>) -> Option<String> {
     value.filter(|codec| !codec.is_empty() && !codec.eq_ignore_ascii_case("none"))
+}
+
+fn media_extension_present(value: Option<String>) -> bool {
+    value.is_some_and(|extension| !extension.is_empty() && !extension.eq_ignore_ascii_case("none"))
 }
 
 fn finite_u32(value: Option<f64>) -> Option<u32> {
@@ -179,5 +188,25 @@ mod tests {
             .iter()
             .any(|quality| quality.id == "audio"));
         assert!(analysis.formats[0].video_only);
+    }
+
+    #[test]
+    fn recognizes_generic_hls_audio_from_its_media_extension() {
+        let analysis = parse_metadata(
+            json!({
+                "title": "HLSPlaylist",
+                "formats": [
+                    {"format_id":"video","height":720,"vcodec":"avc1","audio_ext":"none"},
+                    {"format_id":"audio","vcodec":"none","audio_ext":"mp4","video_ext":"none"}
+                ]
+            }),
+            "https://v.redd.it/example/HLSPlaylist.m3u8",
+        )
+        .unwrap();
+        assert!(analysis.formats[1].audio_only);
+        assert!(analysis
+            .quality_options
+            .iter()
+            .any(|quality| quality.kind == QualityKind::AudioOnly));
     }
 }

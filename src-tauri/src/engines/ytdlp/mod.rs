@@ -56,6 +56,31 @@ impl YtDlpEngine {
     ) -> Result<MediaAnalysis, AppError> {
         let validated = url_resolver::resolve_for_analysis(validate_media_url(url)?).await?;
         let capabilities = self.runtime_capabilities().await;
+        let initial_result = self
+            .run_structured_analysis(validated.as_str(), preferences, &capabilities)
+            .await;
+
+        match initial_result {
+            Ok(value) => parse_metadata(value, validated.as_str()),
+            Err(initial_error) if is_reddit_api_ip_error(initial_error.details.as_deref()) => {
+                self.analyze_reddit_embed_fallback(
+                    &validated,
+                    preferences,
+                    &capabilities,
+                    initial_error,
+                )
+                .await
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn run_structured_analysis(
+        &self,
+        url: &str,
+        preferences: &EnginePreferences,
+        capabilities: &YtDlpRuntimeCapabilities,
+    ) -> Result<serde_json::Value, AppError> {
         let mut command = Command::new(&self.executable);
         command.kill_on_drop(true).args([
             "--ignore-config",
@@ -63,8 +88,8 @@ impl YtDlpEngine {
             "--skip-download",
             "--dump-single-json",
         ]);
-        command.args(access_args(preferences, &capabilities));
-        command.arg("--").arg(validated.as_str());
+        command.args(access_args(preferences, capabilities));
+        command.arg("--").arg(url);
 
         tracing::info!(
             engine = "yt-dlp",
@@ -92,7 +117,53 @@ impl YtDlpEngine {
 
         let value: serde_json::Value = serde_json::from_slice(&output.stdout)
             .map_err(|error| AppError::internal("yt-dlp returned invalid JSON", error))?;
-        parse_metadata(value, validated.as_str())
+        Ok(value)
+    }
+
+    async fn analyze_reddit_embed_fallback(
+        &self,
+        reddit_url: &url::Url,
+        preferences: &EnginePreferences,
+        capabilities: &YtDlpRuntimeCapabilities,
+        initial_error: AppError,
+    ) -> Result<MediaAnalysis, AppError> {
+        let fallback = match url_resolver::resolve_reddit_embed_media(reddit_url).await {
+            Ok(Some(fallback)) => fallback,
+            Ok(None) => return Err(initial_error),
+            Err(fallback_error) => {
+                return Err(with_fallback_details(initial_error, &fallback_error));
+            }
+        };
+
+        tracing::info!(
+            engine = "yt-dlp",
+            operation = "analyze",
+            fallback = "reddit_embed",
+            "Reddit API was unavailable; analyzing the public embed media stream"
+        );
+        let value = self
+            .run_structured_analysis(fallback.download_url.as_str(), preferences, capabilities)
+            .await
+            .map_err(|error| {
+                let details = error
+                    .details
+                    .as_deref()
+                    .unwrap_or("yt-dlp did not provide a direct-stream diagnostic");
+                AppError::with_details(
+                    "reddit_fallback_analysis_failed",
+                    "Reddit exposed the video stream, but yt-dlp could not inspect it.",
+                    details,
+                )
+            })?;
+        let mut analysis = parse_metadata(value, fallback.download_url.as_str())?;
+        analysis.title = fallback.title;
+        analysis.uploader = fallback.uploader;
+        analysis.thumbnail = fallback.thumbnail;
+        analysis.webpage_url = fallback.webpage_url.to_string();
+        analysis.download_url = fallback.download_url.to_string();
+        analysis.extractor = "reddit-embed-fallback".to_owned();
+        analysis.site_name = "Reddit".to_owned();
+        Ok(analysis)
     }
 }
 
@@ -105,6 +176,7 @@ impl DownloadEngine for YtDlpEngine {
         &self,
         url: &str,
         options: &DownloadOptions,
+        metadata_title_override: Option<&str>,
         preferences: &EnginePreferences,
         capabilities: &YtDlpRuntimeCapabilities,
     ) -> Result<Vec<String>, AppError> {
@@ -141,6 +213,15 @@ impl DownloadEngine for YtDlpEngine {
             "--output".to_owned(),
             filename_template.to_owned(),
         ];
+
+        if let Some(title) = metadata_title_override.filter(|title| !title.trim().is_empty()) {
+            args.extend([
+                "--replace-in-metadata".to_owned(),
+                "title".to_owned(),
+                "(?s)^.*$".to_owned(),
+                literal_regex_replacement(title),
+            ]);
+        }
 
         if options.audio_only {
             args.extend([
@@ -185,6 +266,27 @@ impl DownloadEngine for YtDlpEngine {
         args.push(validated_url.as_str().to_owned());
         Ok(args)
     }
+}
+
+fn literal_regex_replacement(value: &str) -> String {
+    value.replace('\\', "\\\\")
+}
+
+fn is_reddit_api_ip_error(details: Option<&str>) -> bool {
+    details.is_some_and(|details| {
+        details
+            .to_ascii_lowercase()
+            .contains("your ip address is unable to access the reddit api")
+    })
+}
+
+fn with_fallback_details(mut initial_error: AppError, fallback_error: &str) -> AppError {
+    let initial_details = initial_error.details.take().unwrap_or_default();
+    initial_error.details = Some(format!(
+        "{initial_details}\nReddit embed fallback: {}",
+        sanitize_diagnostic(fallback_error)
+    ));
+    initial_error
 }
 
 pub async fn detect_runtime_capabilities(path: &std::path::Path) -> YtDlpRuntimeCapabilities {
@@ -425,5 +527,45 @@ mod tests {
             sanitize_diagnostic("Cookie: session=secret\nordinary diagnostic"),
             "[sensitive request header redacted]\nordinary diagnostic"
         );
+    }
+
+    #[test]
+    fn identifies_reddit_api_ip_blocks_for_the_embed_fallback() {
+        assert!(is_reddit_api_ip_error(Some(
+            "ERROR: [Reddit] abc123: Your IP address is unable to access the Reddit API"
+        )));
+        assert!(!is_reddit_api_ip_error(Some("ERROR: HTTP Error 403")));
+    }
+
+    #[test]
+    fn escapes_backslashes_in_metadata_title_replacements() {
+        assert_eq!(literal_regex_replacement(r"one\two"), r"one\\two");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires yt-dlp and public Reddit network access"]
+    async fn analyzes_api_blocked_reddit_video_through_embed_fallback() {
+        let analysis = YtDlpEngine::discover()
+            .expect("discover yt-dlp")
+            .analyze(
+                "https://www.reddit.com/comments/1vkq6jk",
+                &EnginePreferences {
+                    browser_cookie_source: BrowserCookieSource::Firefox,
+                    enable_impersonation: true,
+                },
+            )
+            .await
+            .expect("analyze Reddit fallback");
+        assert_eq!(analysis.title, "Pekeasmr");
+        assert_eq!(analysis.site_name, "Reddit");
+        assert!(analysis.download_url.starts_with("https://v.redd.it/"));
+        assert!(analysis
+            .formats
+            .iter()
+            .any(|format| format.height == Some(720)));
+        assert!(analysis
+            .formats
+            .iter()
+            .any(|format| format.audio_codec.is_some()));
     }
 }

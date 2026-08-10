@@ -117,6 +117,7 @@ pub struct MediaAnalysis {
     pub duration_seconds: Option<f64>,
     pub thumbnail: Option<String>,
     pub webpage_url: String,
+    pub download_url: String,
     pub extractor: String,
     pub site_name: String,
     pub playlist_title: Option<String>,
