@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
+  BatchAnalysisResponse,
   DownloadJob,
   EngineInfo,
   EnginePreferences,
@@ -15,10 +16,15 @@ export const api = {
   updateEnginePreferences: (preferences: EnginePreferences) =>
     invoke<EnginePreferences>("update_engine_preferences", { preferences }),
   analyzeUrl: (url: string) => invoke<MediaAnalysis>("analyze_url", { url }),
+  analyzeUrls: (urls: string[]) => invoke<BatchAnalysisResponse>("analyze_urls", { urls }),
+  analyzePlaylist: (url: string) => invoke<BatchAnalysisResponse>("analyze_playlist", { url }),
   getDefaultDestination: () => invoke<string>("get_default_destination"),
   startDownload: (request: StartDownloadRequest) =>
     invoke<DownloadJob>("start_download", { request }),
+  startDownloads: (requests: StartDownloadRequest[]) =>
+    invoke<DownloadJob[]>("start_downloads", { requests }),
   cancelDownload: (jobId: string) => invoke<void>("cancel_download", { jobId }),
+  retryDownload: (jobId: string) => invoke<DownloadJob>("retry_download", { jobId }),
   listJobs: () => invoke<DownloadJob[]>("list_jobs"),
   listHistory: () => invoke<HistoryEntry[]>("list_history"),
   onJobUpdated: (handler: (job: DownloadJob) => void): Promise<UnlistenFn> =>

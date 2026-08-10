@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { api, normalizeError } from "../lib/tauri";
 import type {
   AppError,
+  BatchAnalysisResponse,
   DownloadJob,
   EngineInfo,
   EnginePreferences,
@@ -18,6 +19,7 @@ interface AppStore {
   jobs: Record<string, DownloadJob>;
   history: HistoryEntry[];
   analysis: MediaAnalysis | null;
+  batchAnalysis: BatchAnalysisResponse | null;
   analyzing: boolean;
   engineLoading: boolean;
   historyLoading: boolean;
@@ -28,12 +30,16 @@ interface AppStore {
   setEnginePreferences: (preferences: EnginePreferences) => void;
   saveEnginePreferences: () => Promise<boolean>;
   analyze: (url: string) => Promise<MediaAnalysis | null>;
+  analyzeBatch: (urls: string[]) => Promise<BatchAnalysisResponse | null>;
+  analyzePlaylist: (url: string) => Promise<BatchAnalysisResponse | null>;
   clearAnalysis: () => void;
   detectEngines: () => Promise<void>;
   loadHistory: () => Promise<void>;
   initialize: () => Promise<() => void>;
   startDownload: (request: StartDownloadRequest) => Promise<DownloadJob | null>;
+  startDownloads: (requests: StartDownloadRequest[]) => Promise<DownloadJob[]>;
   cancelDownload: (jobId: string) => Promise<void>;
+  retryDownload: (jobId: string) => Promise<void>;
 }
 
 export const useAppStore = create<AppStore>((set, get) => ({
@@ -41,11 +47,14 @@ export const useAppStore = create<AppStore>((set, get) => ({
   engines: [],
   enginePreferences: {
     browserCookieSource: "none",
+    browserProfile: null,
+    proxyUrl: null,
     enableImpersonation: true,
   },
   jobs: {},
   history: [],
   analysis: null,
+  batchAnalysis: null,
   analyzing: false,
   engineLoading: false,
   historyLoading: false,
@@ -68,7 +77,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   },
 
   analyze: async (url) => {
-    set({ analyzing: true, error: null, analysis: null });
+    set({ analyzing: true, error: null, analysis: null, batchAnalysis: null });
     try {
       const analysis = await api.analyzeUrl(url);
       set({ analysis });
@@ -81,7 +90,35 @@ export const useAppStore = create<AppStore>((set, get) => ({
     }
   },
 
-  clearAnalysis: () => set({ analysis: null, error: null }),
+  analyzeBatch: async (urls) => {
+    set({ analyzing: true, error: null, analysis: null, batchAnalysis: null });
+    try {
+      const batchAnalysis = await api.analyzeUrls(urls);
+      set({ batchAnalysis });
+      return batchAnalysis;
+    } catch (error) {
+      set({ error: normalizeError(error) });
+      return null;
+    } finally {
+      set({ analyzing: false });
+    }
+  },
+
+  analyzePlaylist: async (url) => {
+    set({ analyzing: true, error: null, analysis: null, batchAnalysis: null });
+    try {
+      const batchAnalysis = await api.analyzePlaylist(url);
+      set({ batchAnalysis });
+      return batchAnalysis;
+    } catch (error) {
+      set({ error: normalizeError(error) });
+      return null;
+    } finally {
+      set({ analyzing: false });
+    }
+  },
+
+  clearAnalysis: () => set({ analysis: null, batchAnalysis: null, error: null }),
 
   detectEngines: async () => {
     set({ engineLoading: true });
@@ -156,9 +193,37 @@ export const useAppStore = create<AppStore>((set, get) => ({
     }
   },
 
+  startDownloads: async (requests) => {
+    set({ error: null });
+    try {
+      const jobs = await api.startDownloads(requests);
+      set((state) => ({
+        jobs: { ...state.jobs, ...Object.fromEntries(jobs.map((job) => [job.id, job])) },
+        view: "downloads",
+      }));
+      return jobs;
+    } catch (error) {
+      set({ error: normalizeError(error) });
+      return [];
+    }
+  },
+
   cancelDownload: async (jobId) => {
     try {
       await api.cancelDownload(jobId);
+    } catch (error) {
+      set({ error: normalizeError(error) });
+    }
+  },
+
+  retryDownload: async (jobId) => {
+    set({ error: null });
+    try {
+      const job = await api.retryDownload(jobId);
+      set((state) => ({
+        jobs: { ...state.jobs, [job.id]: job },
+        view: "downloads",
+      }));
     } catch (error) {
       set({ error: normalizeError(error) });
     }

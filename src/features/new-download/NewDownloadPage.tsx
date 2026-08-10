@@ -6,30 +6,37 @@ import {
   FolderOpen,
   Link2,
   LoaderCircle,
+  ListOrdered,
   Music2,
   Search,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { Button, Field, Input, Select } from "../../components/ui";
+import { Button, Field, Input, Select, Textarea } from "../../components/ui";
 import { formatBytes, formatDuration } from "../../lib/format";
 import { useAppStore } from "../../stores/app-store";
-import type { DownloadOptions } from "../../types";
+import type { DownloadOptions, MediaAnalysis, StartDownloadRequest } from "../../types";
 
 export function NewDownloadPage() {
   const analysis = useAppStore((state) => state.analysis);
   const analyzing = useAppStore((state) => state.analyzing);
+  const batchAnalysis = useAppStore((state) => state.batchAnalysis);
   const analyze = useAppStore((state) => state.analyze);
+  const analyzeBatch = useAppStore((state) => state.analyzeBatch);
+  const analyzePlaylist = useAppStore((state) => state.analyzePlaylist);
   const clearAnalysis = useAppStore((state) => state.clearAnalysis);
   const defaultDestination = useAppStore((state) => state.defaultDestination);
   const startDownload = useAppStore((state) => state.startDownload);
+  const startDownloads = useAppStore((state) => state.startDownloads);
   const [url, setUrl] = useState("");
   const [qualityId, setQualityId] = useState("best");
   const [container, setContainer] = useState<DownloadOptions["container"]>("mp4");
   const [destination, setDestination] = useState(defaultDestination);
+  const [outputConflictPolicy, setOutputConflictPolicy] = useState<DownloadOptions["outputConflictPolicy"]>("skip");
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [embedMetadata, setEmbedMetadata] = useState(true);
   const [embedThumbnail, setEmbedThumbnail] = useState(false);
   const [starting, setStarting] = useState(false);
+  const [selectedBatchUrls, setSelectedBatchUrls] = useState<string[]>([]);
 
   useEffect(() => {
     if (!destination && defaultDestination) setDestination(defaultDestination);
@@ -38,6 +45,12 @@ export function NewDownloadPage() {
   useEffect(() => {
     if (analysis) setQualityId(analysis.qualityOptions[0]?.id ?? "best");
   }, [analysis]);
+
+  useEffect(() => {
+    setSelectedBatchUrls(
+      batchAnalysis?.items.filter((item) => item.analysis).map((item) => item.inputUrl) ?? [],
+    );
+  }, [batchAnalysis]);
 
   const selectedQuality = useMemo(
     () => analysis?.qualityOptions.find((quality) => quality.id === qualityId),
@@ -56,7 +69,7 @@ export function NewDownloadPage() {
       const text = await navigator.clipboard.readText();
       if (text.trim()) {
         setUrl(text.trim());
-        if (analysis) clearAnalysis();
+        if (analysis || batchAnalysis) clearAnalysis();
       }
     } catch {
       // Clipboard permission is controlled by the desktop environment.
@@ -85,10 +98,29 @@ export function NewDownloadPage() {
       sponsorblock: false,
       destination,
       filenameTemplate: "%(title).180B [%(id)s].%(ext)s",
+      outputConflictPolicy,
     };
     await startDownload({ url: analysis.downloadUrl || analysis.webpageUrl || url, analysis, options });
     setStarting(false);
   }
+
+  async function submitBatch() {
+    if (!batchAnalysis || !destination) return;
+    const requests = batchAnalysis.items.flatMap((item): StartDownloadRequest[] => {
+      if (!item.analysis || !selectedBatchUrls.includes(item.inputUrl)) return [];
+      return [{
+        url: item.analysis.downloadUrl || item.analysis.webpageUrl || item.inputUrl,
+        analysis: item.analysis,
+        options: defaultBatchOptions(item.analysis, destination, outputConflictPolicy),
+      }];
+    });
+    if (requests.length === 0) return;
+    setStarting(true);
+    await startDownloads(requests);
+    setStarting(false);
+  }
+
+  const inputUrls = parseInputUrls(url);
 
   return (
     <div className="mx-auto w-full max-w-6xl px-8 py-7">
@@ -104,16 +136,19 @@ export function NewDownloadPage() {
         <div className="flex gap-2">
           <div className="relative flex-1">
             <Link2 className="absolute left-3.5 top-3.5 text-muted" size={17} />
-            <Input
+            <Textarea
               id="media-url"
-              className="pl-10"
+              className="min-h-11 py-3 pl-10"
               value={url}
               onChange={(event) => {
                 setUrl(event.target.value);
-                if (analysis) clearAnalysis();
+                if (analysis || batchAnalysis) clearAnalysis();
               }}
               onKeyDown={(event) => {
-                if (event.key === "Enter" && url.trim() && !analyzing) void analyze(url);
+                if (event.key === "Enter" && !event.shiftKey && inputUrls.length === 1 && !analyzing) {
+                  event.preventDefault();
+                  void analyze(inputUrls[0]);
+                }
               }}
               placeholder="https://www.youtube.com/watch?v=…"
               spellCheck={false}
@@ -122,9 +157,12 @@ export function NewDownloadPage() {
           <Button variant="secondary" onClick={() => void pasteUrl()}>
             Paste
           </Button>
-          <Button disabled={!url.trim() || analyzing} onClick={() => void analyze(url)}>
+          <Button variant="secondary" disabled={inputUrls.length !== 1 || analyzing} onClick={() => void analyzePlaylist(inputUrls[0])}>
+            <ListOrdered size={17} /> Playlist
+          </Button>
+          <Button disabled={inputUrls.length === 0 || analyzing} onClick={() => inputUrls.length > 1 ? void analyzeBatch(inputUrls) : void analyze(inputUrls[0])}>
             {analyzing ? <LoaderCircle className="animate-spin" size={17} /> : <Search size={17} />}
-            {analyzing ? "Analyzing" : "Analyze"}
+            {analyzing ? "Analyzing" : inputUrls.length > 1 ? `Analyze ${inputUrls.length}` : "Analyze"}
           </Button>
         </div>
         <p className="mt-2 text-xs text-muted">Supports yt-dlp compatible sites. Analysis runs locally.</p>
@@ -196,6 +234,13 @@ export function NewDownloadPage() {
                 </div>
               </Field>
 
+              <Field label="If the output already exists">
+                <Select value={outputConflictPolicy} onChange={(event) => setOutputConflictPolicy(event.target.value as DownloadOptions["outputConflictPolicy"])}>
+                  <option value="skip">Skip existing file</option>
+                  <option value="overwrite">Overwrite existing file</option>
+                </Select>
+              </Field>
+
               <div className="border-t border-line pt-2">
                 <button
                   className="flex w-full items-center justify-between py-2 text-sm font-medium text-muted hover:text-ink"
@@ -226,8 +271,86 @@ export function NewDownloadPage() {
           </section>
         </div>
       ) : null}
+
+      {batchAnalysis && !analyzing ? (
+        <section className="mt-5 border border-line bg-panel p-5">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <h2 className="text-sm font-semibold">{batchAnalysis.collectionTitle || "Batch analysis"}</h2>
+              <p className="mt-1 text-xs text-muted">Choose the successfully analyzed entries to add to the Rust queue.</p>
+            </div>
+            <span className="text-xs text-muted">{selectedBatchUrls.length} selected</span>
+          </div>
+          <div className="mt-4 max-h-80 divide-y divide-line overflow-auto border border-line">
+            {batchAnalysis.items.map((item) => (
+              <label key={item.inputUrl} className="flex items-center gap-3 p-3 text-sm">
+                <input
+                  type="checkbox"
+                  disabled={!item.analysis}
+                  checked={selectedBatchUrls.includes(item.inputUrl)}
+                  onChange={(event) => setSelectedBatchUrls((selected) => event.target.checked ? [...selected, item.inputUrl] : selected.filter((urlValue) => urlValue !== item.inputUrl))}
+                />
+                <div className="min-w-0 flex-1">
+                  <div className="truncate font-medium">{item.analysis?.title || item.inputUrl}</div>
+                  <div className={`mt-1 truncate text-xs ${item.error ? "text-red-400" : "text-muted"}`}>{item.error?.message || item.analysis?.siteName}</div>
+                </div>
+                {item.analysis?.durationSeconds != null ? <span className="text-xs text-muted">{formatDuration(item.analysis.durationSeconds)}</span> : null}
+              </label>
+            ))}
+          </div>
+          <div className="mt-4 grid gap-4 md:grid-cols-[1fr_220px_auto] md:items-end">
+            <Field label="Destination">
+              <div className="flex gap-2">
+                <Input value={destination} onChange={(event) => setDestination(event.target.value)} spellCheck={false} />
+                <Button variant="secondary" className="px-3" onClick={() => void chooseDestination()}><FolderOpen size={17} /></Button>
+              </div>
+            </Field>
+            <Field label="Existing output">
+              <Select value={outputConflictPolicy} onChange={(event) => setOutputConflictPolicy(event.target.value as DownloadOptions["outputConflictPolicy"])}>
+                <option value="skip">Skip</option>
+                <option value="overwrite">Overwrite</option>
+              </Select>
+            </Field>
+            <Button disabled={starting || selectedBatchUrls.length === 0 || !destination} onClick={() => void submitBatch()}>
+              {starting ? <LoaderCircle className="animate-spin" size={17} /> : <Download size={17} />}
+              Queue {selectedBatchUrls.length}
+            </Button>
+          </div>
+        </section>
+      ) : null}
     </div>
   );
+}
+
+function parseInputUrls(value: string): string[] {
+  return [...new Set(value.split(/\s+/).map((entry) => entry.trim()).filter(Boolean))];
+}
+
+function defaultBatchOptions(
+  analysis: MediaAnalysis,
+  destination: string,
+  outputConflictPolicy: DownloadOptions["outputConflictPolicy"],
+): DownloadOptions {
+  const hasVideo = analysis.formats.some((format) => format.videoCodec);
+  const quality = (hasVideo
+    ? analysis.qualityOptions.find((option) => option.kind === "best")
+    : analysis.qualityOptions.find((option) => option.kind === "audioOnly")) ?? analysis.qualityOptions[0]!;
+  return {
+    quality,
+    container: hasVideo ? "mp4" : "m4a",
+    videoCodecPreference: "any",
+    audioQuality: "best",
+    audioOnly: !hasVideo,
+    subtitles: false,
+    subtitleLanguages: [],
+    embedThumbnail: false,
+    embedMetadata: true,
+    chapters: false,
+    sponsorblock: false,
+    destination,
+    filenameTemplate: "%(title).180B [%(id)s].%(ext)s",
+    outputConflictPolicy,
+  };
 }
 
 function largestKnownSize(formats: { approximateFileSize?: number | null }[]): number | null {

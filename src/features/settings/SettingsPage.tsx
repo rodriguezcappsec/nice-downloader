@@ -2,6 +2,7 @@ import {
   CheckCircle2,
   CircleX,
   Cookie,
+  Network,
   RefreshCw,
   Save,
   Settings2,
@@ -10,7 +11,7 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 import { Page } from "../../components/Page";
-import { Button, Field, Select } from "../../components/ui";
+import { Button, Field, Input, Select } from "../../components/ui";
 import { useAppStore } from "../../stores/app-store";
 import type { BrowserCookieSource } from "../../types";
 
@@ -74,6 +75,7 @@ export function SettingsPage() {
                     setPreferences({
                       ...preferences,
                       browserCookieSource: event.target.value as BrowserCookieSource,
+                      browserProfile: event.target.value === "none" ? null : preferences.browserProfile,
                     });
                   }}
                 >
@@ -81,6 +83,41 @@ export function SettingsPage() {
                     <option key={option.value} value={option.value}>{option.label}</option>
                   ))}
                 </Select>
+              </div>
+            </Field>
+
+            <Field
+              label="Browser profile name"
+              hint="Optional profile directory name, for example work.default-release. Paths are intentionally not accepted."
+            >
+              <Input
+                value={preferences.browserProfile || ""}
+                disabled={preferences.browserCookieSource === "none"}
+                placeholder="default-release"
+                onChange={(event) => {
+                  setSaved(false);
+                  setPreferences({ ...preferences, browserProfile: event.target.value || null });
+                }}
+                spellCheck={false}
+              />
+            </Field>
+
+            <Field
+              label="Network proxy"
+              hint="Optional HTTP(S) or SOCKS proxy. Credentials are not stored in this milestone."
+            >
+              <div className="relative">
+                <Network className="pointer-events-none absolute left-3 top-3.5 text-muted" size={16} />
+                <Input
+                  className="pl-9"
+                  value={preferences.proxyUrl || ""}
+                  placeholder="socks5://127.0.0.1:1080"
+                  onChange={(event) => {
+                    setSaved(false);
+                    setPreferences({ ...preferences, proxyUrl: event.target.value || null });
+                  }}
+                  spellCheck={false}
+                />
               </div>
             </Field>
 

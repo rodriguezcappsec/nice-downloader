@@ -42,6 +42,8 @@ export type BrowserCookieSource =
 
 export interface EnginePreferences {
   browserCookieSource: BrowserCookieSource;
+  browserProfile?: string | null;
+  proxyUrl?: string | null;
   enableImpersonation: boolean;
 }
 
@@ -84,6 +86,17 @@ export interface MediaAnalysis {
   qualityOptions: QualityOption[];
 }
 
+export interface BatchAnalysisItem {
+  inputUrl: string;
+  analysis?: MediaAnalysis | null;
+  error?: AppError | null;
+}
+
+export interface BatchAnalysisResponse {
+  collectionTitle?: string | null;
+  items: BatchAnalysisItem[];
+}
+
 export interface DownloadOptions {
   quality: QualityOption;
   container: "mp4" | "mkv" | "webm" | "mp3" | "m4a" | "opus";
@@ -98,6 +111,7 @@ export interface DownloadOptions {
   sponsorblock: boolean;
   destination: string;
   filenameTemplate: string;
+  outputConflictPolicy: "skip" | "overwrite";
 }
 
 export type DownloadState =
@@ -128,6 +142,9 @@ export interface DownloadJob {
   outputPath?: string | null;
   currentOperation: string;
   error?: string | null;
+  diagnostics: string[];
+  attemptCount: number;
+  retryOfId?: string | null;
   createdAt: string;
   updatedAt: string;
   completedAt?: string | null;

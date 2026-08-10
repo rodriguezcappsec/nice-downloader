@@ -5,10 +5,12 @@ use crate::{
     engines::DownloadEngine,
     errors::AppError,
     models::{
-        DownloadOptions, EnginePreferences, MediaAnalysis, QualityKind, VideoCodecPreference,
+        DownloadOptions, EnginePreferences, MediaAnalysis, OutputConflictPolicy, QualityKind,
+        VideoCodecPreference,
     },
     utils::validation::{validate_filename_template, validate_media_url},
 };
+use std::collections::HashSet;
 use std::{path::PathBuf, time::Duration};
 use tokio::{process::Command, time::timeout};
 
@@ -73,6 +75,46 @@ impl YtDlpEngine {
             }
             Err(error) => Err(error),
         }
+    }
+
+    pub async fn expand_playlist(
+        &self,
+        url: &str,
+        preferences: &EnginePreferences,
+    ) -> Result<(Option<String>, Vec<String>), AppError> {
+        let validated = validate_media_url(url)?;
+        let capabilities = self.runtime_capabilities().await;
+        let mut command = Command::new(&self.executable);
+        command.kill_on_drop(true).args([
+            "--ignore-config",
+            "--yes-playlist",
+            "--flat-playlist",
+            "--playlist-end",
+            "20",
+            "--dump-single-json",
+        ]);
+        command.args(access_args(preferences, &capabilities));
+        command.arg("--").arg(validated.as_str());
+        let output = timeout(Duration::from_secs(60), command.output())
+            .await
+            .map_err(|_| {
+                AppError::new(
+                    "playlist_analysis_timeout",
+                    "Playlist inspection timed out after 60 seconds.",
+                )
+            })?
+            .map_err(|error| AppError::internal("could not start yt-dlp", error))?;
+        if !output.status.success() {
+            let details = sanitize_diagnostic(&String::from_utf8_lossy(&output.stderr));
+            return Err(AppError::with_details(
+                "playlist_analysis_failed",
+                friendly_engine_error(&details),
+                details,
+            ));
+        }
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .map_err(|error| AppError::internal("yt-dlp returned invalid playlist JSON", error))?;
+        parse_playlist_expansion(value)
     }
 
     async fn run_structured_analysis(
@@ -167,6 +209,44 @@ impl YtDlpEngine {
     }
 }
 
+fn parse_playlist_expansion(
+    value: serde_json::Value,
+) -> Result<(Option<String>, Vec<String>), AppError> {
+    let title = value
+        .get("title")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    let entries = value
+        .get("entries")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            AppError::new(
+                "not_a_playlist",
+                "yt-dlp did not identify this URL as a playlist or collection.",
+            )
+        })?;
+    let mut seen = HashSet::new();
+    let urls = entries
+        .iter()
+        .filter_map(|entry| {
+            ["webpage_url", "url"]
+                .into_iter()
+                .filter_map(|key| entry.get(key).and_then(serde_json::Value::as_str))
+                .find(|candidate| validate_media_url(candidate).is_ok())
+                .map(str::to_owned)
+        })
+        .filter(|url| seen.insert(url.clone()))
+        .take(20)
+        .collect::<Vec<_>>();
+    if urls.is_empty() {
+        return Err(AppError::new(
+            "empty_playlist",
+            "No downloadable entries were found in this playlist.",
+        ));
+    }
+    Ok((title, urls))
+}
+
 impl DownloadEngine for YtDlpEngine {
     fn executable_name(&self) -> &'static str {
         "yt-dlp"
@@ -221,6 +301,11 @@ impl DownloadEngine for YtDlpEngine {
                 "(?s)^.*$".to_owned(),
                 literal_regex_replacement(title),
             ]);
+        }
+
+        match options.output_conflict_policy {
+            OutputConflictPolicy::Skip => args.push("--no-overwrites".to_owned()),
+            OutputConflictPolicy::Overwrite => args.push("--force-overwrites".to_owned()),
         }
 
         if options.audio_only {
@@ -337,7 +422,15 @@ fn access_args(
 ) -> Vec<String> {
     let mut args = Vec::new();
     if let Some(browser) = preferences.browser_cookie_source.yt_dlp_name() {
-        args.extend(["--cookies-from-browser".to_owned(), browser.to_owned()]);
+        let browser = preferences
+            .browser_profile
+            .as_deref()
+            .map(|profile| format!("{browser}:{profile}"))
+            .unwrap_or_else(|| browser.to_owned());
+        args.extend(["--cookies-from-browser".to_owned(), browser]);
+    }
+    if let Some(proxy) = &preferences.proxy_url {
+        args.extend(["--proxy".to_owned(), proxy.clone()]);
     }
     if preferences.enable_impersonation {
         if let Some(target) = &capabilities.preferred_impersonation_target {
@@ -450,6 +543,7 @@ mod tests {
             sponsorblock: false,
             destination: "/tmp".to_owned(),
             filename_template: "%(title)s.%(ext)s".to_owned(),
+            output_conflict_policy: OutputConflictPolicy::Skip,
         }
     }
 
@@ -470,9 +564,45 @@ mod tests {
     }
 
     #[test]
+    fn maps_output_conflict_intent_to_safe_engine_arguments() {
+        let engine = YtDlpEngine {
+            executable: PathBuf::from("yt-dlp"),
+        };
+        let mut download_options = options(QualityKind::Best, None, false);
+        let skip_args = engine
+            .build_download_args(
+                "https://example.com/video",
+                &download_options,
+                None,
+                &EnginePreferences::default(),
+                &YtDlpRuntimeCapabilities::default(),
+            )
+            .unwrap();
+        assert!(skip_args
+            .iter()
+            .any(|argument| argument == "--no-overwrites"));
+
+        download_options.output_conflict_policy = OutputConflictPolicy::Overwrite;
+        let overwrite_args = engine
+            .build_download_args(
+                "https://example.com/video",
+                &download_options,
+                None,
+                &EnginePreferences::default(),
+                &YtDlpRuntimeCapabilities::default(),
+            )
+            .unwrap();
+        assert!(overwrite_args
+            .iter()
+            .any(|argument| argument == "--force-overwrites"));
+    }
+
+    #[test]
     fn builds_typed_browser_access_arguments() {
         let preferences = EnginePreferences {
             browser_cookie_source: BrowserCookieSource::Firefox,
+            browser_profile: Some("work".to_owned()),
+            proxy_url: Some("socks5://127.0.0.1:1080".to_owned()),
             enable_impersonation: true,
         };
         let capabilities = YtDlpRuntimeCapabilities {
@@ -482,7 +612,9 @@ mod tests {
             access_args(&preferences, &capabilities),
             [
                 "--cookies-from-browser",
-                "firefox",
+                "firefox:work",
+                "--proxy",
+                "socks5://127.0.0.1:1080",
                 "--impersonate",
                 "chrome-136:windows-10"
             ]
@@ -542,6 +674,22 @@ mod tests {
         assert_eq!(literal_regex_replacement(r"one\two"), r"one\\two");
     }
 
+    #[test]
+    fn extracts_unique_http_entries_from_flat_playlist_json() {
+        let (title, urls) = parse_playlist_expansion(serde_json::json!({
+            "title": "Examples",
+            "entries": [
+                {"webpage_url": "https://example.com/one"},
+                {"url": "https://example.com/two"},
+                {"url": "not-a-url"},
+                {"url": "https://example.com/one"}
+            ]
+        }))
+        .unwrap();
+        assert_eq!(title.as_deref(), Some("Examples"));
+        assert_eq!(urls, ["https://example.com/one", "https://example.com/two"]);
+    }
+
     #[tokio::test]
     #[ignore = "requires yt-dlp and public Reddit network access"]
     async fn analyzes_api_blocked_reddit_video_through_embed_fallback() {
@@ -551,6 +699,8 @@ mod tests {
                 "https://www.reddit.com/comments/1vkq6jk",
                 &EnginePreferences {
                     browser_cookie_source: BrowserCookieSource::Firefox,
+                    browser_profile: None,
+                    proxy_url: None,
                     enable_impersonation: true,
                 },
             )

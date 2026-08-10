@@ -24,14 +24,24 @@ Acceptance path: launch the app, analyze a supported URL, review metadata, choos
 - Capability status in Settings without exposing raw command arguments.
 - Canonical resolution for Reddit share-token and `redd.it` links before extractor routing.
 
-## Milestone 2: queue durability and recovery
+## Milestone 2: reliability and batch workflow
 
-- Persist queued/running job intent and reconcile interrupted jobs at startup.
-- Retry failed/cancelled jobs.
+Delivered:
+
+- Persist all non-completed job intent and reconcile interrupted jobs back into the queue at startup.
+- Retry failed/cancelled jobs as traceable attempts.
+- Persist bounded, sanitized per-job diagnostics.
+- Preflight destination write access and expose explicit skip/overwrite intent.
+- Select a named browser profile and an allowlisted credential-free HTTP/SOCKS proxy.
+- Analyze up to 20 URLs with bounded concurrency and bulk enqueue selected results.
+- Expand playlists through structured yt-dlp flat-playlist JSON before batch analysis.
+
+Still planned:
+
 - Queue reordering and configurable concurrency.
-- Download diagnostics/log detail view.
 - File reveal/open actions through narrow backend commands.
-- Stronger output conflict and disk-space handling.
+- Disk-space estimation and low-space warnings.
+- Automatic retry with bounded exponential backoff.
 
 ## Milestone 3: richer media intent
 

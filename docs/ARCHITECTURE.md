@@ -36,8 +36,8 @@ The frontend never receives a generic command-execution primitive. Tauri capabil
 - `commands`: narrow Tauri endpoints for analysis, engines, queue operations, defaults, and history.
 - `models`: serializable application models shared conceptually with TypeScript.
 - `engines`: engine interface and implementations. Milestone 1 fully implements yt-dlp analysis/download and detects FFmpeg/ffprobe.
-- `queue`: in-memory authoritative job registry, concurrency semaphore (default 2), child lifecycle, cancellation tokens, and normalized events.
-- `database`: SQLite connection, embedded migrations, and history repository.
+- `queue`: authoritative runtime job/request registry, concurrency semaphore (default 2), child lifecycle, cancellation tokens, retry lineage, startup recovery, and normalized events.
+- `database`: SQLite connection, embedded migrations, durable job intent/diagnostics, settings, and history repository.
 - `errors`: typed user-facing errors with optional diagnostic details.
 
 ## Frontend modules
@@ -60,17 +60,19 @@ Queued -> Analyzing -> Preparing -> Downloading
                                   -> Completed | Failed | Cancelled
 ```
 
-Milestone 1 analyzes before enqueueing in the UI, but the queue retains the `Analyzing` state for future jobs created from less interactive entry points. A semaphore controls concurrency. Each running job owns a cancellation token and a single child process. The process is configured to die with its Rust owner, is explicitly killed and reaped on cancellation, and is removed from the runtime process registry when it exits.
+Milestone 1 analyzes before enqueueing in the UI, but the queue retains the `Analyzing` state for future jobs created from less interactive entry points. A semaphore controls concurrency. Each running job owns a cancellation token and a single child process. The process is configured to die with its Rust owner, is explicitly killed and reaped on cancellation, and is removed from the runtime process registry when it exits. Enqueued requests and state transitions are persisted. Jobs interrupted by application shutdown are reconciled to `Queued` and restarted through the same validation and semaphore path; failed and cancelled jobs retain their original typed request for explicit retry.
 
 ## Analysis and format selection
 
 The yt-dlp adapter parses JSON metadata into tolerant internal structs, then returns normalized metadata plus simplified quality choices (`Best`, common resolution caps, and `Audio only`). Selection generates a conservative selector such as `bv*[height<=1080]+ba/b[height<=1080]`; yt-dlp and FFmpeg remain responsible for compatible stream merging.
 
-Before analysis, a narrow URL resolver canonicalizes `redd.it/<post-id>` links and Reddit `/r|user/.../s/<token>` share links that yt-dlp's Reddit extractor does not currently match. Redirects are bounded and restricted to Reddit-owned HTTPS/HTTP hosts, and tracking parameters are removed before yt-dlp runs.
+Before analysis, a narrow URL resolver canonicalizes `redd.it/<post-id>` links and Reddit `/r|user/.../s/<token>` share links that yt-dlp's Reddit extractor does not currently match. Redirects are bounded and restricted to Reddit-owned HTTPS/HTTP hosts, and tracking parameters are removed before yt-dlp runs. Native Reddit video can fall back to validated public embed metadata when Reddit blocks its JSON API.
+
+Batch analysis accepts at most 20 unique URLs and runs three analyzers concurrently. Playlist expansion is a separate structured yt-dlp flat-playlist operation capped at 20 entries; each expanded URL then passes through the ordinary analyzer and typed download-intent path. Bulk enqueue remains a Rust command so queue authority never moves into React.
 
 ## Persistence
 
-SQLite is stored in Tauri's application-data directory. Numbered embedded migrations create `downloads`, `presets`, and `settings`. Milestone 1 writes completed downloads and reads them for History. The schema keeps normalized display fields and the serialized download intent without storing transient process state.
+SQLite is stored in Tauri's application-data directory. Numbered embedded migrations create `downloads`, `presets`, and `settings`. Download rows store normalized display state, the serialized typed request, bounded sanitized diagnostics, retry lineage, and timestamps. Completed rows feed History; non-completed rows rebuild the runtime queue after restart.
 
 ## Security and reliability
 
@@ -80,6 +82,8 @@ SQLite is stored in Tauri's application-data directory. Numbered embedded migrat
 - Executable paths are discovered from PATH and passed directly to `Command`.
 - Engine stderr is sanitized and returned as expandable diagnostics without logging sensitive request headers.
 - Browser-cookie access is opt-in and represented by an allowlisted browser enum. Rust gives yt-dlp only the browser name; cookie contents never cross the Tauri boundary or enter application logs.
+- Optional browser profile names reject path separators, and proxy configuration accepts only credential-free HTTP(S)/SOCKS URLs.
+- Destination folders receive a create/remove write probe before enqueue. Existing-output behavior is explicit skip or overwrite intent mapped to fixed yt-dlp arguments.
 - Browser impersonation is applied only when yt-dlp reports a compatible runtime target. Settings distinguishes executable availability from optional capability readiness.
 - Production paths return typed errors rather than panicking.
 - Structured tracing records engine lifecycle without logging secrets.

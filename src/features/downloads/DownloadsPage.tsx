@@ -11,6 +11,7 @@ export function DownloadsPage({ queueOnly = false }: { queueOnly?: boolean }) {
   const jobMap = useAppStore((state) => state.jobs);
   const jobs = Object.values(jobMap);
   const cancel = useAppStore((state) => state.cancelDownload);
+  const retry = useAppStore((state) => state.retryDownload);
   const setView = useAppStore((state) => state.setView);
   const visible = jobs
     .filter((job) => (queueOnly ? job.state === "Queued" : true))
@@ -32,14 +33,14 @@ export function DownloadsPage({ queueOnly = false }: { queueOnly?: boolean }) {
         />
       ) : (
         <div className="divide-y divide-line border border-line bg-panel">
-          {visible.map((job) => <DownloadRow key={job.id} job={job} onCancel={() => void cancel(job.id)} />)}
+          {visible.map((job) => <DownloadRow key={job.id} job={job} onCancel={() => void cancel(job.id)} onRetry={() => void retry(job.id)} />)}
         </div>
       )}
     </Page>
   );
 }
 
-function DownloadRow({ job, onCancel }: { job: DownloadJob; onCancel: () => void }) {
+function DownloadRow({ job, onCancel, onRetry }: { job: DownloadJob; onCancel: () => void; onRetry: () => void }) {
   const canCancel = !terminalStates.has(job.state);
   const stateTone = job.state === "Failed" ? "text-red-400" : job.state === "Completed" ? "text-emerald-400" : job.state === "Cancelled" ? "text-muted" : "text-blue-400";
   return (
@@ -57,8 +58,8 @@ function DownloadRow({ job, onCancel }: { job: DownloadJob; onCancel: () => void
           </div>
           {canCancel ? (
             <Button variant="danger" className="h-8 px-2.5" onClick={onCancel}><Ban size={14} /> Cancel</Button>
-          ) : job.state === "Failed" ? (
-            <Button variant="ghost" className="h-8 px-2.5" disabled title="Retry is planned for milestone 2"><RotateCcw size={14} /> Retry</Button>
+          ) : job.state === "Failed" || job.state === "Cancelled" ? (
+            <Button variant="ghost" className="h-8 px-2.5" onClick={onRetry}><RotateCcw size={14} /> Retry</Button>
           ) : null}
         </div>
         <div className="mt-3"><Progress value={job.progressPercent} /></div>
@@ -67,6 +68,13 @@ function DownloadRow({ job, onCancel }: { job: DownloadJob; onCancel: () => void
           <span>{job.downloadedBytes != null ? `${formatBytes(job.downloadedBytes)} / ${formatBytes(job.totalBytes)}` : ""}</span>
           <span>{job.speedBytesPerSecond != null ? `${formatBytes(job.speedBytesPerSecond)}/s · ETA ${formatEta(job.etaSeconds)}` : `${job.progressPercent.toFixed(0)}%`}</span>
         </div>
+        {job.diagnostics.length > 0 ? (
+          <details className="mt-3 text-xs text-muted">
+            <summary className="cursor-pointer select-none font-medium text-ink">Diagnostics ({job.diagnostics.length})</summary>
+            <pre className="mt-2 max-h-44 overflow-auto whitespace-pre-wrap border border-line bg-canvas p-3 font-mono leading-5">{job.diagnostics.join("\n")}</pre>
+          </details>
+        ) : null}
+        {job.attemptCount > 1 ? <p className="mt-2 text-[11px] text-muted">Attempt {job.attemptCount}</p> : null}
       </div>
     </article>
   );
