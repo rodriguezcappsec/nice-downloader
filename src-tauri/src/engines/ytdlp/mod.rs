@@ -1,4 +1,5 @@
 mod metadata;
+mod url_resolver;
 
 use crate::{
     engines::DownloadEngine,
@@ -53,7 +54,7 @@ impl YtDlpEngine {
         url: &str,
         preferences: &EnginePreferences,
     ) -> Result<MediaAnalysis, AppError> {
-        let validated = validate_media_url(url)?;
+        let validated = url_resolver::resolve_for_analysis(validate_media_url(url)?).await?;
         let capabilities = self.runtime_capabilities().await;
         let mut command = Command::new(&self.executable);
         command.kill_on_drop(true).args([
