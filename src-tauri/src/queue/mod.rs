@@ -1,8 +1,9 @@
 use crate::{
     database::Database,
     engines::{
-        ytdlp::{sanitize_diagnostic, YtDlpEngine},
-        DownloadEngine,
+        gallery_dl::parse_human_bytes,
+        router::{self, PreparedDownload, PreparedEngineKind},
+        ytdlp::sanitize_diagnostic,
     },
     errors::AppError,
     models::{DownloadJob, DownloadState, EnginePreferences, StartDownloadRequest},
@@ -167,16 +168,7 @@ impl QueueManager {
         validate_engine_preferences(&preferences)?;
         let destination = validate_destination(&request.options.destination)?;
         validate_destination_writable(&destination)?;
-        let engine = YtDlpEngine::discover()?;
-        let capabilities = engine.runtime_capabilities().await;
-        let args = engine.build_download_args(
-            &request.url,
-            &request.options,
-            (request.analysis.download_url != request.analysis.webpage_url)
-                .then_some(request.analysis.title.as_str()),
-            &preferences,
-            &capabilities,
-        )?;
+        let prepared = router::prepare_download(&request, &preferences).await?;
 
         let id = Uuid::new_v4().to_string();
         let mut job = DownloadJob::from_request(id.clone(), &request);
@@ -200,8 +192,7 @@ impl QueueManager {
             app,
             id,
             destination,
-            engine,
-            args,
+            prepared,
             cancellation,
         };
         tokio::spawn(async move {
@@ -221,16 +212,7 @@ impl QueueManager {
         validate_engine_preferences(&preferences)?;
         let destination = validate_destination(&request.options.destination)?;
         validate_destination_writable(&destination)?;
-        let engine = YtDlpEngine::discover()?;
-        let capabilities = engine.runtime_capabilities().await;
-        let args = engine.build_download_args(
-            &request.url,
-            &request.options,
-            (request.analysis.download_url != request.analysis.webpage_url)
-                .then_some(request.analysis.title.as_str()),
-            &preferences,
-            &capabilities,
-        )?;
+        let prepared = router::prepare_download(&request, &preferences).await?;
         let cancellation = CancellationToken::new();
         self.cancellations
             .lock()
@@ -246,8 +228,7 @@ impl QueueManager {
                     app,
                     id,
                     destination,
-                    engine,
-                    args,
+                    prepared,
                     cancellation,
                 })
                 .await;
@@ -286,8 +267,7 @@ impl QueueManager {
             app,
             id,
             destination,
-            engine,
-            args,
+            prepared,
             cancellation,
         } = context;
         let permit = tokio::select! {
@@ -305,13 +285,21 @@ impl QueueManager {
 
         self.update_job(&app, &id, |job| {
             job.state = DownloadState::Preparing;
-            job.current_operation = "Preparing yt-dlp".to_owned();
+            job.current_operation = format!("Preparing {}", prepared.engine_name);
+            if let Some(relative_path) = &prepared.output_relative_path {
+                job.output_path = Some(
+                    destination
+                        .join(relative_path)
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+            }
         })
         .await;
 
-        let mut command = Command::new(engine.executable());
+        let mut command = Command::new(&prepared.executable);
         command
-            .args(args)
+            .args(&prepared.args)
             .current_dir(destination)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -319,13 +307,17 @@ impl QueueManager {
         #[cfg(unix)]
         command.as_std_mut().process_group(0);
 
-        tracing::info!(job_id = %id, engine = engine.executable_name(), "starting download process");
+        tracing::info!(job_id = %id, engine = prepared.engine_name, "starting download process");
         let child_result = command.spawn();
         let mut child = match child_result {
             Ok(child) => child,
             Err(error) => {
-                self.transition_failed(&app, &id, format!("Could not start yt-dlp: {error}"))
-                    .await;
+                self.transition_failed(
+                    &app,
+                    &id,
+                    format!("Could not start {}: {error}", prepared.engine_name),
+                )
+                .await;
                 return;
             }
         };
@@ -340,6 +332,7 @@ impl QueueManager {
         drop(line_tx);
 
         let mut diagnostics = VecDeque::with_capacity(MAX_JOB_DIAGNOSTIC_LINES);
+        let mut gallery_progress = GalleryProgressTracker::default();
         let exit_status = loop {
             if cancellation.is_cancelled() {
                 tracing::info!(job_id = %id, "cancelling download process group");
@@ -352,19 +345,39 @@ impl QueueManager {
                 Ok(Some(status)) => break Some(status),
                 Ok(None) => {}
                 Err(error) => {
-                    self.transition_failed(&app, &id, format!("Could not monitor yt-dlp: {error}"))
-                        .await;
+                    self.transition_failed(
+                        &app,
+                        &id,
+                        format!("Could not monitor {}: {error}", prepared.engine_name),
+                    )
+                    .await;
                     return;
                 }
             }
 
             if let Ok(Some(line)) = timeout(Duration::from_millis(120), line_rx.recv()).await {
-                self.process_line(&app, &id, line, &mut diagnostics).await;
+                self.process_line(
+                    &app,
+                    &id,
+                    prepared.kind,
+                    line,
+                    &mut diagnostics,
+                    &mut gallery_progress,
+                )
+                .await;
             }
         };
 
         while let Ok(Some(line)) = timeout(Duration::from_millis(80), line_rx.recv()).await {
-            self.process_line(&app, &id, line, &mut diagnostics).await;
+            self.process_line(
+                &app,
+                &id,
+                prepared.kind,
+                line,
+                &mut diagnostics,
+                &mut gallery_progress,
+            )
+            .await;
         }
 
         if exit_status.is_some_and(|status| status.success()) {
@@ -388,7 +401,12 @@ impl QueueManager {
                 .back()
                 .map(|line| sanitize_diagnostic(line))
                 .filter(|line| !line.is_empty())
-                .unwrap_or_else(|| "yt-dlp exited without a diagnostic message".to_owned());
+                .unwrap_or_else(|| {
+                    format!(
+                        "{} exited without a diagnostic message",
+                        prepared.engine_name
+                    )
+                });
             self.transition_failed(&app, &id, format!("Download failed: {detail}"))
                 .await;
         }
@@ -398,9 +416,18 @@ impl QueueManager {
         &self,
         app: &AppHandle,
         id: &str,
+        engine_kind: PreparedEngineKind,
         line: EngineLine,
         diagnostics: &mut VecDeque<String>,
+        gallery_progress: &mut GalleryProgressTracker,
     ) {
+        if engine_kind == PreparedEngineKind::GalleryDl
+            && self
+                .process_gallery_line(app, id, &line.text, gallery_progress)
+                .await
+        {
+            return;
+        }
         if let Some(progress) = line
             .text
             .strip_prefix("nicedl:progress:")
@@ -462,6 +489,117 @@ impl QueueManager {
         }
     }
 
+    async fn process_gallery_line(
+        &self,
+        app: &AppHandle,
+        id: &str,
+        text: &str,
+        tracker: &mut GalleryProgressTracker,
+    ) -> bool {
+        let text = text.trim_start_matches(['\r', ' ']);
+        let Some(event) = text.strip_prefix("nicedl:gallery:") else {
+            return false;
+        };
+        if let Some(value) = event.strip_prefix("item:") {
+            let mut fields = value.splitn(4, '|');
+            let (Some(index), Some(count), Some(size), Some(filename)) = (
+                fields.next().and_then(|value| value.parse::<u32>().ok()),
+                fields.next().and_then(|value| value.parse::<u32>().ok()),
+                fields.next().and_then(|value| value.parse::<u64>().ok()),
+                fields.next(),
+            ) else {
+                return true;
+            };
+            tracker.current_index = index;
+            tracker.item_count = count;
+            tracker.current_size = size;
+            tracker.current_name = filename.chars().take(180).collect();
+            self.update_job(app, id, |job| {
+                job.state = DownloadState::Downloading;
+                job.current_operation = format!(
+                    "Downloading item {index} of {count}: {}",
+                    tracker.current_name
+                );
+                job.downloaded_bytes = Some(tracker.completed_bytes);
+                job.progress_percent =
+                    gallery_album_percent(tracker, 0.0, job.total_bytes, tracker.completed_bytes);
+                job.speed_bytes_per_second = None;
+                job.eta_seconds = None;
+            })
+            .await;
+            return true;
+        }
+        if let Some(value) = event.strip_prefix("progress:") {
+            let Some(progress) = parse_gallery_progress(value) else {
+                return true;
+            };
+            let current_downloaded = progress.downloaded_bytes.unwrap_or_else(|| {
+                ((tracker.current_size as f64) * progress.item_percent / 100.0) as u64
+            });
+            let current_downloaded = if tracker.current_size > 0 {
+                current_downloaded.min(tracker.current_size)
+            } else {
+                current_downloaded
+            };
+            let downloaded = tracker.completed_bytes.saturating_add(current_downloaded);
+            self.update_job(app, id, |job| {
+                job.state = DownloadState::Downloading;
+                job.current_operation = format!(
+                    "Downloading item {} of {}: {}",
+                    tracker.current_index, tracker.item_count, tracker.current_name
+                );
+                job.progress_percent = gallery_album_percent(
+                    tracker,
+                    progress.item_percent,
+                    job.total_bytes,
+                    downloaded,
+                );
+                job.downloaded_bytes = Some(downloaded);
+                job.speed_bytes_per_second = progress.speed;
+                job.eta_seconds = progress.speed.and_then(|speed| {
+                    job.total_bytes.filter(|_| speed > 0.0).map(|total| {
+                        (total.saturating_sub(downloaded) as f64 / speed).ceil() as u64
+                    })
+                });
+            })
+            .await;
+            return true;
+        }
+        for prefix in ["complete:", "skip:"] {
+            if let Some(value) = event.strip_prefix(prefix) {
+                let mut fields = value.splitn(4, '|');
+                let index = fields.next().and_then(|value| value.parse::<u32>().ok());
+                let count = fields.next().and_then(|value| value.parse::<u32>().ok());
+                let size = fields.next().and_then(|value| value.parse::<u64>().ok());
+                if let (Some(index), Some(count), Some(size)) = (index, count, size) {
+                    if tracker.last_completed_index != Some(index) {
+                        tracker.completed_bytes = tracker.completed_bytes.saturating_add(size);
+                        tracker.last_completed_index = Some(index);
+                    }
+                    tracker.current_index = index;
+                    tracker.item_count = count;
+                    self.update_job(app, id, |job| {
+                        job.state = DownloadState::Downloading;
+                        job.current_operation = format!("Processed item {index} of {count}");
+                        job.downloaded_bytes = Some(tracker.completed_bytes);
+                        job.progress_percent = gallery_album_percent(
+                            tracker,
+                            100.0,
+                            job.total_bytes,
+                            tracker.completed_bytes,
+                        );
+                        job.speed_bytes_per_second = None;
+                        job.eta_seconds = None;
+                    })
+                    .await;
+                }
+                return true;
+            }
+        }
+        // Custom output lines can contain paths, but never belong in diagnostics.
+        true
+    }
+
     async fn transition_cancelled(&self, app: &AppHandle, id: &str) {
         self.update_job(app, id, |job| {
             job.state = DownloadState::Cancelled;
@@ -516,8 +654,7 @@ struct JobRunContext {
     app: AppHandle,
     id: String,
     destination: std::path::PathBuf,
-    engine: YtDlpEngine,
-    args: Vec<String>,
+    prepared: PreparedDownload,
     cancellation: CancellationToken,
 }
 
@@ -562,6 +699,59 @@ struct ParsedProgress {
     total_bytes: Option<u64>,
     speed: Option<f64>,
     eta: Option<u64>,
+}
+
+#[derive(Debug, Default)]
+struct GalleryProgressTracker {
+    current_index: u32,
+    item_count: u32,
+    current_size: u64,
+    current_name: String,
+    completed_bytes: u64,
+    last_completed_index: Option<u32>,
+}
+
+#[derive(Debug, PartialEq)]
+struct ParsedGalleryProgress {
+    item_percent: f64,
+    downloaded_bytes: Option<u64>,
+    speed: Option<f64>,
+}
+
+fn parse_gallery_progress(value: &str) -> Option<ParsedGalleryProgress> {
+    let mut fields = value.split('|');
+    let item_percent = fields
+        .next()?
+        .trim()
+        .trim_end_matches('%')
+        .parse::<f64>()
+        .ok()?
+        .clamp(0.0, 100.0);
+    Some(ParsedGalleryProgress {
+        item_percent,
+        downloaded_bytes: fields.next().and_then(parse_human_bytes),
+        speed: fields
+            .next()
+            .and_then(parse_human_bytes)
+            .map(|value| value as f64),
+    })
+}
+
+fn gallery_album_percent(
+    tracker: &GalleryProgressTracker,
+    item_percent: f64,
+    total_bytes: Option<u64>,
+    downloaded_bytes: u64,
+) -> f64 {
+    if let Some(total) = total_bytes.filter(|total| *total > 0) {
+        return (downloaded_bytes as f64 * 100.0 / total as f64).clamp(0.0, 100.0);
+    }
+    if tracker.item_count == 0 || tracker.current_index == 0 {
+        return 0.0;
+    }
+    (((tracker.current_index - 1) as f64 + item_percent / 100.0) * 100.0
+        / tracker.item_count as f64)
+        .clamp(0.0, 100.0)
 }
 
 fn parse_progress(value: &str) -> Option<ParsedProgress> {
@@ -678,6 +868,28 @@ mod tests {
         assert_eq!(progress.speed, None);
     }
 
+    #[test]
+    fn normalizes_gallery_item_progress_across_an_album() {
+        assert_eq!(
+            parse_gallery_progress("82|438.00M|48.20M|534.00M"),
+            Some(ParsedGalleryProgress {
+                item_percent: 82.0,
+                downloaded_bytes: Some(438_000_000),
+                speed: Some(48_200_000.0),
+            })
+        );
+        let tracker = GalleryProgressTracker {
+            current_index: 2,
+            item_count: 4,
+            ..GalleryProgressTracker::default()
+        };
+        assert_eq!(gallery_album_percent(&tracker, 50.0, None, 0), 37.5);
+        assert_eq!(
+            gallery_album_percent(&tracker, 50.0, Some(1_000), 250),
+            25.0
+        );
+    }
+
     #[tokio::test]
     async fn recovers_interrupted_jobs_as_queued() {
         let directory = tempdir().expect("temporary directory");
@@ -692,6 +904,7 @@ mod tests {
         let request = StartDownloadRequest {
             url: "https://example.com/video".to_owned(),
             analysis: MediaAnalysis {
+                engine: crate::models::DownloadEngineKind::YtDlp,
                 title: "Example".to_owned(),
                 uploader: None,
                 duration_seconds: None,
@@ -704,6 +917,8 @@ mod tests {
                 playlist_index: None,
                 formats: vec![],
                 quality_options: vec![quality.clone()],
+                item_count: None,
+                total_size_bytes: None,
             },
             options: crate::models::DownloadOptions {
                 quality,

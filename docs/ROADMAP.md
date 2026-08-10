@@ -53,8 +53,14 @@ Still planned:
 
 ## Milestone 4: additional engines
 
-- Analyzer/router policy and URL classification.
-- gallery-dl implementation for image/gallery sites.
+Delivered foundation:
+
+- Analyzer/router policy and strict URL classification.
+- gallery-dl analysis, original-file download, cancellation, progress, and history for Bunkr albums.
+
+Still planned:
+
+- Extend gallery-dl routing to additional tested image/gallery sites.
 - aria2 implementation for direct HTTP transfers.
 - HLS/DASH diagnostics and engine routing improvements.
 
