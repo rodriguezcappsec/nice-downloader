@@ -2,7 +2,7 @@ use crate::{
     database::Database,
     engines::{discovery, ytdlp::YtDlpEngine},
     errors::AppError,
-    models::{DownloadJob, EngineInfo, MediaAnalysis, StartDownloadRequest},
+    models::{DownloadJob, EngineInfo, EnginePreferences, MediaAnalysis, StartDownloadRequest},
     queue::QueueManager,
 };
 use tauri::{AppHandle, Manager, State};
@@ -13,8 +13,28 @@ pub async fn detect_engines() -> Result<Vec<EngineInfo>, AppError> {
 }
 
 #[tauri::command]
-pub async fn analyze_url(url: String) -> Result<MediaAnalysis, AppError> {
-    YtDlpEngine::discover()?.analyze(&url).await
+pub async fn analyze_url(
+    database: State<'_, Database>,
+    url: String,
+) -> Result<MediaAnalysis, AppError> {
+    let preferences = database.load_engine_preferences()?;
+    YtDlpEngine::discover()?.analyze(&url, &preferences).await
+}
+
+#[tauri::command]
+pub fn get_engine_preferences(
+    database: State<'_, Database>,
+) -> Result<EnginePreferences, AppError> {
+    database.load_engine_preferences()
+}
+
+#[tauri::command]
+pub fn update_engine_preferences(
+    database: State<'_, Database>,
+    preferences: EnginePreferences,
+) -> Result<EnginePreferences, AppError> {
+    database.save_engine_preferences(&preferences)?;
+    Ok(preferences)
 }
 
 #[tauri::command]
@@ -29,9 +49,11 @@ pub fn get_default_destination(app: AppHandle) -> Result<String, AppError> {
 pub async fn start_download(
     app: AppHandle,
     queue: State<'_, QueueManager>,
+    database: State<'_, Database>,
     request: StartDownloadRequest,
 ) -> Result<DownloadJob, AppError> {
-    queue.enqueue(app, request).await
+    let preferences = database.load_engine_preferences()?;
+    queue.enqueue(app, request, preferences).await
 }
 
 #[tauri::command]

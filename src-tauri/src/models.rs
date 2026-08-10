@@ -11,6 +11,16 @@ pub struct EngineInfo {
     pub version: Option<String>,
     pub required: bool,
     pub status_message: String,
+    pub capabilities: Vec<EngineCapability>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EngineCapability {
+    pub id: String,
+    pub display_name: String,
+    pub available: bool,
+    pub status_message: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -19,6 +29,50 @@ pub enum EngineId {
     YtDlp,
     Ffmpeg,
     Ffprobe,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum BrowserCookieSource {
+    None,
+    Firefox,
+    Chromium,
+    Chrome,
+    Brave,
+    Vivaldi,
+    Edge,
+    Opera,
+}
+
+impl BrowserCookieSource {
+    pub fn yt_dlp_name(self) -> Option<&'static str> {
+        match self {
+            Self::None => None,
+            Self::Firefox => Some("firefox"),
+            Self::Chromium => Some("chromium"),
+            Self::Chrome => Some("chrome"),
+            Self::Brave => Some("brave"),
+            Self::Vivaldi => Some("vivaldi"),
+            Self::Edge => Some("edge"),
+            Self::Opera => Some("opera"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct EnginePreferences {
+    pub browser_cookie_source: BrowserCookieSource,
+    pub enable_impersonation: bool,
+}
+
+impl Default for EnginePreferences {
+    fn default() -> Self {
+        Self {
+            browser_cookie_source: BrowserCookieSource::None,
+            enable_impersonation: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

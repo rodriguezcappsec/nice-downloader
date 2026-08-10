@@ -16,6 +16,13 @@ Deliver a runnable Linux desktop application that proves the complete path:
 
 Acceptance path: launch the app, analyze a supported URL, review metadata, choose quality and destination, download with visible progress/speed/ETA, cancel an active job, and see completed jobs in History.
 
+### Compatibility hardening delivered
+
+- Opt-in Firefox and Chromium-family cookie sources for authenticated and anti-bot-sensitive sites.
+- Runtime browser-impersonation detection with safe conditional activation.
+- Expandable sanitized yt-dlp diagnostics and clearer authentication/403 guidance.
+- Capability status in Settings without exposing raw command arguments.
+
 ## Milestone 2: queue durability and recovery
 
 - Persist queued/running job intent and reconcile interrupted jobs at startup.
@@ -49,4 +56,4 @@ Acceptance path: launch the app, analyze a supported URL, review metadata, choos
 
 ## Deferred by design
 
-Browser extensions, subscriptions, authentication/cookie importing, SponsorBlock UI, automatic binary downloads, and broad platform packaging are intentionally outside milestone 1.
+Browser extensions, subscriptions, standalone cookie-file importing, SponsorBlock UI, automatic binary downloads, and broad platform packaging are intentionally outside milestone 1.

@@ -1,15 +1,16 @@
 use crate::{
     errors::AppError,
-    models::{DownloadJob, DownloadOptions, DownloadState},
+    models::{DownloadJob, DownloadOptions, DownloadState, EnginePreferences},
 };
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::{
     path::Path,
     sync::{Arc, Mutex},
 };
 
 const MIGRATION_0001: &str = include_str!("migrations/0001_initial.sql");
+const ENGINE_PREFERENCES_KEY: &str = "engine.preferences";
 
 #[derive(Clone)]
 pub struct Database {
@@ -100,6 +101,45 @@ impl Database {
                 job.completed_at.map(|value| value.timestamp_millis()),
                 options_json,
             ],
+        )?;
+        Ok(())
+    }
+
+    pub fn load_engine_preferences(&self) -> Result<EnginePreferences, AppError> {
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "The application settings database is unavailable.",
+            )
+        })?;
+        let value: Option<String> = connection
+            .query_row(
+                "SELECT value_json FROM settings WHERE key = ?1",
+                [ENGINE_PREFERENCES_KEY],
+                |row| row.get(0),
+            )
+            .optional()?;
+        match value {
+            Some(value) => serde_json::from_str(&value)
+                .map_err(|error| AppError::internal("could not read engine preferences", error)),
+            None => Ok(EnginePreferences::default()),
+        }
+    }
+
+    pub fn save_engine_preferences(&self, preferences: &EnginePreferences) -> Result<(), AppError> {
+        let value = serde_json::to_string(preferences)
+            .map_err(|error| AppError::internal("could not serialize engine preferences", error))?;
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "The application settings database is unavailable.",
+            )
+        })?;
+        connection.execute(
+            "INSERT INTO settings (key, value_json, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json,
+                                                updated_at = excluded.updated_at",
+            params![ENGINE_PREFERENCES_KEY, value, Utc::now().timestamp_millis()],
         )?;
         Ok(())
     }
@@ -224,5 +264,32 @@ mod tests {
         let history = database.list_history().expect("list history");
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].title, "Example");
+    }
+
+    #[test]
+    fn round_trips_engine_preferences() {
+        use crate::models::BrowserCookieSource;
+
+        let directory = tempdir().expect("temporary directory");
+        let database =
+            Database::open(&directory.path().join("settings.sqlite3")).expect("database");
+        assert_eq!(
+            database
+                .load_engine_preferences()
+                .expect("default settings"),
+            EnginePreferences::default()
+        );
+
+        let preferences = EnginePreferences {
+            browser_cookie_source: BrowserCookieSource::Firefox,
+            enable_impersonation: false,
+        };
+        database
+            .save_engine_preferences(&preferences)
+            .expect("save settings");
+        assert_eq!(
+            database.load_engine_preferences().expect("saved settings"),
+            preferences
+        );
     }
 }
