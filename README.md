@@ -39,3 +39,5 @@ npm run tauri:build
 The application stores its SQLite database in the platform application-data directory. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for boundaries and [docs/ROADMAP.md](docs/ROADMAP.md) for planned milestones.
 
 For a site that requires authentication, open **Settings → Site access**, select the browser where you are signed in, save, and analyze the URL again. Close the browser first if its cookie database is locked. Nice Downloader stores only the selected browser name; yt-dlp reads the local browser profile directly.
+
+Reddit `/s/<share-token>` and `redd.it/<post-id>` links are resolved to canonical comments URLs before analysis so they reach yt-dlp's Reddit extractor instead of its generic webpage fallback.

@@ -22,6 +22,7 @@ Acceptance path: launch the app, analyze a supported URL, review metadata, choos
 - Runtime browser-impersonation detection with safe conditional activation.
 - Expandable sanitized yt-dlp diagnostics and clearer authentication/403 guidance.
 - Capability status in Settings without exposing raw command arguments.
+- Canonical resolution for Reddit share-token and `redd.it` links before extractor routing.
 
 ## Milestone 2: queue durability and recovery
 
