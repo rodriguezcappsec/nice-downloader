@@ -28,7 +28,15 @@ pub fn run() {
                 format!("could not create the application data directory: {error}")
             })?;
             let database = Database::open(&data_directory.join("nice-downloader.sqlite3"))?;
-            let queue = QueueManager::new(database.clone(), 2);
+            let queue = QueueManager::new(database.clone(), 2)?;
+            let recovery_queue = queue.clone();
+            let recovery_app = app.handle().clone();
+            let recovery_preferences = database.load_engine_preferences()?;
+            tauri::async_runtime::spawn(async move {
+                recovery_queue
+                    .recover_pending(recovery_app, recovery_preferences)
+                    .await;
+            });
             app.manage(database);
             app.manage(queue);
             tracing::info!(path = %data_directory.display(), "application backend initialized");
@@ -37,11 +45,15 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::detect_engines,
             commands::analyze_url,
+            commands::analyze_urls,
+            commands::analyze_playlist,
             commands::get_engine_preferences,
             commands::update_engine_preferences,
             commands::get_default_destination,
             commands::start_download,
+            commands::start_downloads,
             commands::cancel_download,
+            commands::retry_download,
             commands::list_jobs,
             commands::list_history,
         ])

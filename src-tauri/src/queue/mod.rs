@@ -5,10 +5,11 @@ use crate::{
         DownloadEngine,
     },
     errors::AppError,
-    models::{
-        DownloadJob, DownloadOptions, DownloadState, EnginePreferences, StartDownloadRequest,
+    models::{DownloadJob, DownloadState, EnginePreferences, StartDownloadRequest},
+    utils::validation::{
+        validate_destination, validate_destination_writable, validate_engine_preferences,
+        validate_media_url,
     },
-    utils::validation::{validate_destination, validate_media_url},
 };
 use chrono::Utc;
 use std::{
@@ -32,23 +33,47 @@ use uuid::Uuid;
 use std::os::unix::process::CommandExt;
 
 const JOB_EVENT: &str = "download-job-updated";
+const MAX_JOB_DIAGNOSTIC_LINES: usize = 80;
 
 #[derive(Clone)]
 pub struct QueueManager {
     jobs: Arc<RwLock<HashMap<String, DownloadJob>>>,
+    requests: Arc<RwLock<HashMap<String, StartDownloadRequest>>>,
     cancellations: Arc<Mutex<HashMap<String, CancellationToken>>>,
+    pending_recovery: Arc<Mutex<Vec<String>>>,
     semaphore: Arc<Semaphore>,
     database: Database,
 }
 
 impl QueueManager {
-    pub fn new(database: Database, concurrent_downloads: usize) -> Self {
-        Self {
-            jobs: Arc::new(RwLock::new(HashMap::new())),
+    pub fn new(database: Database, concurrent_downloads: usize) -> Result<Self, AppError> {
+        let persisted = database.load_runtime_jobs()?;
+        let mut jobs = HashMap::new();
+        let mut requests = HashMap::new();
+        let mut pending_recovery = Vec::new();
+        for (mut job, request) in persisted {
+            if !is_terminal_state(job.state) {
+                job.state = DownloadState::Queued;
+                job.progress_percent = 0.0;
+                job.speed_bytes_per_second = None;
+                job.eta_seconds = None;
+                job.error = None;
+                job.current_operation = "Recovered after application restart".to_owned();
+                job.updated_at = Utc::now();
+                database.save_job(&job, &request)?;
+                pending_recovery.push(job.id.clone());
+            }
+            requests.insert(job.id.clone(), request);
+            jobs.insert(job.id.clone(), job);
+        }
+        Ok(Self {
+            jobs: Arc::new(RwLock::new(jobs)),
+            requests: Arc::new(RwLock::new(requests)),
             cancellations: Arc::new(Mutex::new(HashMap::new())),
+            pending_recovery: Arc::new(Mutex::new(pending_recovery)),
             semaphore: Arc::new(Semaphore::new(concurrent_downloads.max(1))),
             database,
-        }
+        })
     }
 
     pub async fn enqueue(
@@ -57,8 +82,91 @@ impl QueueManager {
         request: StartDownloadRequest,
         preferences: EnginePreferences,
     ) -> Result<DownloadJob, AppError> {
+        self.enqueue_with_lineage(app, request, preferences, 1, None)
+            .await
+    }
+
+    pub async fn recover_pending(&self, app: AppHandle, preferences: EnginePreferences) {
+        let ids = {
+            let mut pending = self.pending_recovery.lock().await;
+            std::mem::take(&mut *pending)
+        };
+        for id in ids {
+            let request = self.requests.read().await.get(&id).cloned();
+            let Some(request) = request else {
+                self.transition_failed(
+                    &app,
+                    &id,
+                    "The persisted download request could not be recovered.".to_owned(),
+                )
+                .await;
+                continue;
+            };
+            if let Err(error) = self
+                .start_existing(app.clone(), id.clone(), request, preferences.clone())
+                .await
+            {
+                self.transition_failed(&app, &id, error.message).await;
+            }
+        }
+    }
+
+    pub async fn retry(
+        &self,
+        app: AppHandle,
+        job_id: &str,
+        preferences: EnginePreferences,
+    ) -> Result<DownloadJob, AppError> {
+        let previous = self
+            .jobs
+            .read()
+            .await
+            .get(job_id)
+            .cloned()
+            .ok_or_else(|| AppError::new("job_not_found", "The download job was not found."))?;
+        if !matches!(
+            previous.state,
+            DownloadState::Failed | DownloadState::Cancelled
+        ) {
+            return Err(AppError::new(
+                "job_not_retryable",
+                "Only failed or cancelled downloads can be retried.",
+            ));
+        }
+        let request = self
+            .requests
+            .read()
+            .await
+            .get(job_id)
+            .cloned()
+            .ok_or_else(|| {
+                AppError::new(
+                    "retry_unavailable",
+                    "The original download options are no longer available.",
+                )
+            })?;
+        self.enqueue_with_lineage(
+            app,
+            request,
+            preferences,
+            previous.attempt_count.saturating_add(1),
+            Some(previous.id),
+        )
+        .await
+    }
+
+    async fn enqueue_with_lineage(
+        &self,
+        app: AppHandle,
+        request: StartDownloadRequest,
+        preferences: EnginePreferences,
+        attempt_count: u32,
+        retry_of_id: Option<String>,
+    ) -> Result<DownloadJob, AppError> {
         validate_media_url(&request.url)?;
+        validate_engine_preferences(&preferences)?;
         let destination = validate_destination(&request.options.destination)?;
+        validate_destination_writable(&destination)?;
         let engine = YtDlpEngine::discover()?;
         let capabilities = engine.runtime_capabilities().await;
         let args = engine.build_download_args(
@@ -71,8 +179,15 @@ impl QueueManager {
         )?;
 
         let id = Uuid::new_v4().to_string();
-        let job = DownloadJob::from_request(id.clone(), &request);
+        let mut job = DownloadJob::from_request(id.clone(), &request);
+        job.attempt_count = attempt_count.max(1);
+        job.retry_of_id = retry_of_id;
+        self.database.save_job(&job, &request)?;
         self.jobs.write().await.insert(id.clone(), job.clone());
+        self.requests
+            .write()
+            .await
+            .insert(id.clone(), request.clone());
         let cancellation = CancellationToken::new();
         self.cancellations
             .lock()
@@ -84,7 +199,6 @@ impl QueueManager {
         let context = JobRunContext {
             app,
             id,
-            options: request.options,
             destination,
             engine,
             args,
@@ -94,6 +208,51 @@ impl QueueManager {
             queue.run_job(context).await;
         });
         Ok(job)
+    }
+
+    async fn start_existing(
+        &self,
+        app: AppHandle,
+        id: String,
+        request: StartDownloadRequest,
+        preferences: EnginePreferences,
+    ) -> Result<(), AppError> {
+        validate_media_url(&request.url)?;
+        validate_engine_preferences(&preferences)?;
+        let destination = validate_destination(&request.options.destination)?;
+        validate_destination_writable(&destination)?;
+        let engine = YtDlpEngine::discover()?;
+        let capabilities = engine.runtime_capabilities().await;
+        let args = engine.build_download_args(
+            &request.url,
+            &request.options,
+            (request.analysis.download_url != request.analysis.webpage_url)
+                .then_some(request.analysis.title.as_str()),
+            &preferences,
+            &capabilities,
+        )?;
+        let cancellation = CancellationToken::new();
+        self.cancellations
+            .lock()
+            .await
+            .insert(id.clone(), cancellation.clone());
+        if let Some(job) = self.jobs.read().await.get(&id).cloned() {
+            emit_job(&app, &job);
+        }
+        let queue = self.clone();
+        tokio::spawn(async move {
+            queue
+                .run_job(JobRunContext {
+                    app,
+                    id,
+                    destination,
+                    engine,
+                    args,
+                    cancellation,
+                })
+                .await;
+        });
+        Ok(())
     }
 
     pub async fn cancel(&self, job_id: &str) -> Result<(), AppError> {
@@ -126,7 +285,6 @@ impl QueueManager {
         let JobRunContext {
             app,
             id,
-            options,
             destination,
             engine,
             args,
@@ -181,7 +339,7 @@ impl QueueManager {
         }
         drop(line_tx);
 
-        let mut diagnostics = VecDeque::with_capacity(40);
+        let mut diagnostics = VecDeque::with_capacity(MAX_JOB_DIAGNOSTIC_LINES);
         let exit_status = loop {
             if cancellation.is_cancelled() {
                 tracing::info!(job_id = %id, "cancelling download process group");
@@ -221,16 +379,7 @@ impl QueueManager {
                 })
                 .await;
             if let Some(job) = completed {
-                if let Err(error) = self.database.save_completed(&job, &options) {
-                    tracing::error!(job_id = %id, error = %error, "could not persist completed download");
-                    self.update_job(&app, &id, |job| {
-                        job.error = Some(
-                            "The download completed, but it could not be saved to History."
-                                .to_owned(),
-                        );
-                    })
-                    .await;
-                }
+                self.persist_job(&job).await;
             }
             self.cancellations.lock().await.remove(&id);
             tracing::info!(job_id = %id, "download completed");
@@ -287,10 +436,18 @@ impl QueueManager {
         }
 
         if line.source == StreamSource::Stderr {
-            if diagnostics.len() == 40 {
+            let diagnostic = sanitize_diagnostic(&line.text);
+            if diagnostics.len() == MAX_JOB_DIAGNOSTIC_LINES {
                 diagnostics.pop_front();
             }
-            diagnostics.push_back(line.text.clone());
+            diagnostics.push_back(diagnostic.clone());
+            self.update_job(app, id, |job| {
+                if job.diagnostics.len() == MAX_JOB_DIAGNOSTIC_LINES {
+                    job.diagnostics.remove(0);
+                }
+                job.diagnostics.push(diagnostic);
+            })
+            .await;
         }
 
         let operation = operation_from_engine_line(&line.text);
@@ -341,14 +498,23 @@ impl QueueManager {
             job.clone()
         };
         emit_job(app, &job);
+        self.persist_job(&job).await;
         Some(job)
+    }
+
+    async fn persist_job(&self, job: &DownloadJob) {
+        let request = self.requests.read().await.get(&job.id).cloned();
+        if let Some(request) = request {
+            if let Err(error) = self.database.save_job(job, &request) {
+                tracing::error!(job_id = %job.id, %error, "could not persist download job");
+            }
+        }
     }
 }
 
 struct JobRunContext {
     app: AppHandle,
     id: String,
-    options: DownloadOptions,
     destination: std::path::PathBuf,
     engine: YtDlpEngine,
     args: Vec<String>,
@@ -459,6 +625,13 @@ fn emit_job(app: &AppHandle, job: &DownloadJob) {
     }
 }
 
+fn is_terminal_state(state: DownloadState) -> bool {
+    matches!(
+        state,
+        DownloadState::Completed | DownloadState::Failed | DownloadState::Cancelled
+    )
+}
+
 async fn terminate_child(child: &mut Child) {
     #[cfg(unix)]
     {
@@ -478,6 +651,11 @@ async fn terminate_child(child: &mut Child) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::{
+        AudioQuality, MediaAnalysis, OutputConflictPolicy, OutputContainer, QualityKind,
+        QualityOption, VideoCodecPreference,
+    };
+    use tempfile::tempdir;
 
     #[test]
     fn parses_structured_progress() {
@@ -498,5 +676,65 @@ mod tests {
         let progress = parse_progress("0.0%|0|NA|NA|NA").expect("progress");
         assert_eq!(progress.total_bytes, None);
         assert_eq!(progress.speed, None);
+    }
+
+    #[tokio::test]
+    async fn recovers_interrupted_jobs_as_queued() {
+        let directory = tempdir().expect("temporary directory");
+        let database = Database::open(&directory.path().join("queue.sqlite3")).expect("database");
+        let quality = QualityOption {
+            id: "best".to_owned(),
+            label: "Best".to_owned(),
+            description: "Highest available quality".to_owned(),
+            kind: QualityKind::Best,
+            max_height: None,
+        };
+        let request = StartDownloadRequest {
+            url: "https://example.com/video".to_owned(),
+            analysis: MediaAnalysis {
+                title: "Example".to_owned(),
+                uploader: None,
+                duration_seconds: None,
+                thumbnail: None,
+                webpage_url: "https://example.com/video".to_owned(),
+                download_url: "https://example.com/video".to_owned(),
+                extractor: "generic".to_owned(),
+                site_name: "Generic".to_owned(),
+                playlist_title: None,
+                playlist_index: None,
+                formats: vec![],
+                quality_options: vec![quality.clone()],
+            },
+            options: crate::models::DownloadOptions {
+                quality,
+                container: OutputContainer::Mp4,
+                video_codec_preference: VideoCodecPreference::Any,
+                audio_quality: AudioQuality::Best,
+                audio_only: false,
+                subtitles: false,
+                subtitle_languages: vec![],
+                embed_thumbnail: false,
+                embed_metadata: true,
+                chapters: false,
+                sponsorblock: false,
+                destination: directory.path().to_string_lossy().into_owned(),
+                filename_template: "%(title)s.%(ext)s".to_owned(),
+                output_conflict_policy: OutputConflictPolicy::Skip,
+            },
+        };
+        let mut job = DownloadJob::from_request("recover-me".to_owned(), &request);
+        job.state = DownloadState::Downloading;
+        job.progress_percent = 61.0;
+        database.save_job(&job, &request).expect("persist job");
+
+        let queue = QueueManager::new(database, 2).expect("recover queue");
+        let jobs = queue.list().await;
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].state, DownloadState::Queued);
+        assert_eq!(jobs[0].progress_percent, 0.0);
+        assert_eq!(
+            jobs[0].current_operation,
+            "Recovered after application restart"
+        );
     }
 }

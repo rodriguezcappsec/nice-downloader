@@ -1,3 +1,4 @@
+use crate::errors::AppError;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -63,6 +64,10 @@ impl BrowserCookieSource {
 #[serde(rename_all = "camelCase")]
 pub struct EnginePreferences {
     pub browser_cookie_source: BrowserCookieSource,
+    #[serde(default)]
+    pub browser_profile: Option<String>,
+    #[serde(default)]
+    pub proxy_url: Option<String>,
     pub enable_impersonation: bool,
 }
 
@@ -70,6 +75,8 @@ impl Default for EnginePreferences {
     fn default() -> Self {
         Self {
             browser_cookie_source: BrowserCookieSource::None,
+            browser_profile: None,
+            proxy_url: None,
             enable_impersonation: true,
         }
     }
@@ -126,6 +133,21 @@ pub struct MediaAnalysis {
     pub quality_options: Vec<QualityOption>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchAnalysisItem {
+    pub input_url: String,
+    pub analysis: Option<MediaAnalysis>,
+    pub error: Option<AppError>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchAnalysisResponse {
+    pub collection_title: Option<String>,
+    pub items: Vec<BatchAnalysisItem>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DownloadOptions {
@@ -142,6 +164,16 @@ pub struct DownloadOptions {
     pub sponsorblock: bool,
     pub destination: String,
     pub filename_template: String,
+    #[serde(default)]
+    pub output_conflict_policy: OutputConflictPolicy,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum OutputConflictPolicy {
+    #[default]
+    Skip,
+    Overwrite,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -247,6 +279,11 @@ pub struct DownloadJob {
     pub output_path: Option<String>,
     pub current_operation: String,
     pub error: Option<String>,
+    #[serde(default)]
+    pub diagnostics: Vec<String>,
+    #[serde(default = "default_attempt_count")]
+    pub attempt_count: u32,
+    pub retry_of_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
@@ -272,9 +309,16 @@ impl DownloadJob {
             output_path: None,
             current_operation: "Waiting for an available download slot".to_owned(),
             error: None,
+            diagnostics: Vec::new(),
+            attempt_count: 1,
+            retry_of_id: None,
             created_at: now,
             updated_at: now,
             completed_at: None,
         }
     }
+}
+
+fn default_attempt_count() -> u32 {
+    1
 }
