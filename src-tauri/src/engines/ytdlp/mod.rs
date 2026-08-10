@@ -483,13 +483,39 @@ pub fn sanitize_diagnostic(value: &str) -> String {
         .join("\n")
 }
 
-fn redact_sensitive_line(line: &str) -> &str {
+fn redact_sensitive_line(line: &str) -> String {
     let lowercase = line.trim_start().to_ascii_lowercase();
     if lowercase.starts_with("cookie:") || lowercase.starts_with("authorization:") {
-        "[sensitive request header redacted]"
+        "[sensitive request header redacted]".to_owned()
     } else {
-        line
+        redact_sensitive_query_values(line)
     }
+}
+
+fn redact_sensitive_query_values(line: &str) -> String {
+    let mut output = line.to_owned();
+    for key in ["token=", "signature=", "authorization=", "auth=", "sig="] {
+        let mut search_from = 0;
+        loop {
+            let lowercase = output.to_ascii_lowercase();
+            let Some(relative_start) = lowercase[search_from..].find(key) else {
+                break;
+            };
+            let value_start = search_from + relative_start + key.len();
+            let value_end = output[value_start..]
+                .char_indices()
+                .find_map(|(offset, character)| {
+                    (character == '&'
+                        || character.is_whitespace()
+                        || matches!(character, '\'' | '"' | '<' | '>'))
+                    .then_some(value_start + offset)
+                })
+                .unwrap_or(output.len());
+            output.replace_range(value_start..value_end, "[redacted]");
+            search_from = value_start + "[redacted]".len();
+        }
+    }
+    output
 }
 
 fn friendly_engine_error(details: &str) -> String {
@@ -658,6 +684,10 @@ mod tests {
         assert_eq!(
             sanitize_diagnostic("Cookie: session=secret\nordinary diagnostic"),
             "[sensitive request header redacted]\nordinary diagnostic"
+        );
+        assert_eq!(
+            sanitize_diagnostic("failed https://cdn.example/file?token=secret&sig=also-secret"),
+            "failed https://cdn.example/file?token=[redacted]&sig=[redacted]"
         );
     }
 

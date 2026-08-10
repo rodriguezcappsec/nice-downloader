@@ -354,6 +354,7 @@ mod tests {
         let request = StartDownloadRequest {
             url: job.url.clone(),
             analysis: MediaAnalysis {
+                engine: crate::models::DownloadEngineKind::YtDlp,
                 title: job.title.clone(),
                 uploader: None,
                 duration_seconds: None,
@@ -366,6 +367,8 @@ mod tests {
                 playlist_index: None,
                 formats: vec![],
                 quality_options: vec![options.quality.clone()],
+                item_count: None,
+                total_size_bytes: None,
             },
             options,
         };

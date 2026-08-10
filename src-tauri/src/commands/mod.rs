@@ -1,6 +1,6 @@
 use crate::{
     database::Database,
-    engines::{discovery, ytdlp::YtDlpEngine},
+    engines::{discovery, router, ytdlp::YtDlpEngine},
     errors::AppError,
     models::{
         BatchAnalysisItem, BatchAnalysisResponse, DownloadJob, EngineInfo, EnginePreferences,
@@ -27,7 +27,7 @@ pub async fn analyze_url(
     url: String,
 ) -> Result<MediaAnalysis, AppError> {
     let preferences = database.load_engine_preferences()?;
-    YtDlpEngine::discover()?.analyze(&url, &preferences).await
+    router::analyze(&url, &preferences).await
 }
 
 #[tauri::command]
@@ -37,8 +37,7 @@ pub async fn analyze_urls(
 ) -> Result<BatchAnalysisResponse, AppError> {
     let urls = normalize_batch_urls(urls)?;
     let preferences = database.load_engine_preferences()?;
-    let engine = YtDlpEngine::discover()?;
-    Ok(analyze_many(engine, preferences, urls, None).await)
+    Ok(analyze_many(preferences, urls, None).await)
 }
 
 #[tauri::command]
@@ -49,11 +48,10 @@ pub async fn analyze_playlist(
     let preferences = database.load_engine_preferences()?;
     let engine = YtDlpEngine::discover()?;
     let (title, urls) = engine.expand_playlist(&url, &preferences).await?;
-    Ok(analyze_many(engine, preferences, urls, title).await)
+    Ok(analyze_many(preferences, urls, title).await)
 }
 
 async fn analyze_many(
-    engine: YtDlpEngine,
     preferences: EnginePreferences,
     urls: Vec<String>,
     collection_title: Option<String>,
@@ -61,12 +59,11 @@ async fn analyze_many(
     let semaphore = Arc::new(Semaphore::new(BATCH_ANALYSIS_CONCURRENCY));
     let mut workers = JoinSet::new();
     for (index, input_url) in urls.into_iter().enumerate() {
-        let engine = engine.clone();
         let preferences = preferences.clone();
         let semaphore = semaphore.clone();
         workers.spawn(async move {
             let result = match semaphore.acquire_owned().await {
-                Ok(_permit) => engine.analyze(&input_url, &preferences).await,
+                Ok(_permit) => router::analyze(&input_url, &preferences).await,
                 Err(_) => Err(AppError::new(
                     "batch_cancelled",
                     "Batch analysis was cancelled before it could start.",

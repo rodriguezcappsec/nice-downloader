@@ -1,6 +1,7 @@
 pub mod aria2;
 pub mod discovery;
 pub mod gallery_dl;
+pub mod router;
 pub mod ytdlp;
 
 use crate::{

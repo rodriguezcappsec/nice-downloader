@@ -58,6 +58,7 @@ export function NewDownloadPage() {
   );
 
   const audioOnly = selectedQuality?.kind === "audioOnly";
+  const isGallery = analysis?.engine === "galleryDl";
 
   useEffect(() => {
     if (audioOnly && !["mp3", "m4a", "opus"].includes(container)) setContainer("mp3");
@@ -126,7 +127,7 @@ export function NewDownloadPage() {
     <div className="mx-auto w-full max-w-6xl px-8 py-7">
       <header className="mb-7">
         <h1 className="text-xl font-semibold tracking-tight">New Download</h1>
-        <p className="mt-1 text-sm text-muted">Paste a media URL to inspect available formats before downloading.</p>
+        <p className="mt-1 text-sm text-muted">Paste a media or gallery URL to inspect it before downloading.</p>
       </header>
 
       <section className="border border-line bg-panel p-5 shadow-panel">
@@ -150,7 +151,7 @@ export function NewDownloadPage() {
                   void analyze(inputUrls[0]);
                 }
               }}
-              placeholder="https://www.youtube.com/watch?v=…"
+              placeholder="YouTube, Reddit, Bunkr album, or another supported URL"
               spellCheck={false}
             />
           </div>
@@ -165,7 +166,7 @@ export function NewDownloadPage() {
             {analyzing ? "Analyzing" : inputUrls.length > 1 ? `Analyze ${inputUrls.length}` : "Analyze"}
           </Button>
         </div>
-        <p className="mt-2 text-xs text-muted">Supports yt-dlp compatible sites. Analysis runs locally.</p>
+        <p className="mt-2 text-xs text-muted">Supports yt-dlp compatible sites and Bunkr albums through gallery-dl. Analysis runs locally.</p>
       </section>
 
       {analyzing ? (
@@ -173,7 +174,7 @@ export function NewDownloadPage() {
           <LoaderCircle className="animate-spin text-blue-400" size={24} />
           <div>
             <h2 className="text-sm font-semibold">Inspecting media</h2>
-            <p className="mt-1 text-xs text-muted">yt-dlp is retrieving structured metadata and available streams…</p>
+            <p className="mt-1 text-xs text-muted">The appropriate local engine is retrieving structured metadata…</p>
           </div>
         </section>
       ) : null}
@@ -198,8 +199,14 @@ export function NewDownloadPage() {
               <h2 className="line-clamp-2 text-base font-semibold leading-6">{analysis.title}</h2>
               <p className="mt-2 text-sm text-muted">{analysis.uploader || analysis.extractor}</p>
               <div className="mt-4 flex flex-wrap gap-2 text-xs text-muted">
-                <span className="border border-line bg-elevated px-2 py-1">{analysis.formats.length} streams detected</span>
-                {largestKnownSize(analysis.formats) ? (
+                {isGallery ? (
+                  <span className="border border-line bg-elevated px-2 py-1">{analysis.itemCount ?? "Multiple"} original files</span>
+                ) : (
+                  <span className="border border-line bg-elevated px-2 py-1">{analysis.formats.length} streams detected</span>
+                )}
+                {analysis.totalSizeBytes ? (
+                  <span className="border border-line bg-elevated px-2 py-1">Approximately {formatBytes(analysis.totalSizeBytes)}</span>
+                ) : largestKnownSize(analysis.formats) ? (
                   <span className="border border-line bg-elevated px-2 py-1">Up to ~{formatBytes(largestKnownSize(analysis.formats))}</span>
                 ) : null}
               </div>
@@ -209,21 +216,29 @@ export function NewDownloadPage() {
           <section className="border border-line bg-panel p-5">
             <h2 className="mb-5 text-sm font-semibold">Download options</h2>
             <div className="grid gap-4">
-              <Field label="Quality">
-                <Select value={qualityId} onChange={(event) => setQualityId(event.target.value)}>
-                  {analysis.qualityOptions.map((quality) => (
-                    <option key={quality.id} value={quality.id}>{quality.label} — {quality.description}</option>
-                  ))}
-                </Select>
-              </Field>
+              {isGallery ? (
+                <div className="border border-line bg-elevated p-3 text-sm text-muted">
+                  gallery-dl will preserve every original album file. Video transcoding and container conversion do not apply to gallery downloads.
+                </div>
+              ) : (
+                <>
+                  <Field label="Quality">
+                    <Select value={qualityId} onChange={(event) => setQualityId(event.target.value)}>
+                      {analysis.qualityOptions.map((quality) => (
+                        <option key={quality.id} value={quality.id}>{quality.label} — {quality.description}</option>
+                      ))}
+                    </Select>
+                  </Field>
 
-              <Field label="Container">
-                <Select value={container} onChange={(event) => setContainer(event.target.value as DownloadOptions["container"])}>
-                  {(audioOnly ? ["mp3", "m4a", "opus"] : ["mp4", "mkv", "webm"]).map((format) => (
-                    <option key={format} value={format}>{format.toUpperCase()}</option>
-                  ))}
-                </Select>
-              </Field>
+                  <Field label="Container">
+                    <Select value={container} onChange={(event) => setContainer(event.target.value as DownloadOptions["container"])}>
+                      {(audioOnly ? ["mp3", "m4a", "opus"] : ["mp4", "mkv", "webm"]).map((format) => (
+                        <option key={format} value={format}>{format.toUpperCase()}</option>
+                      ))}
+                    </Select>
+                  </Field>
+                </>
+              )}
 
               <Field label="Destination" hint="The backend validates this directory before starting the engine.">
                 <div className="flex gap-2">
@@ -241,7 +256,7 @@ export function NewDownloadPage() {
                 </Select>
               </Field>
 
-              <div className="border-t border-line pt-2">
+              {!isGallery ? <div className="border-t border-line pt-2">
                 <button
                   className="flex w-full items-center justify-between py-2 text-sm font-medium text-muted hover:text-ink"
                   onClick={() => setAdvancedOpen((openState) => !openState)}
@@ -261,11 +276,11 @@ export function NewDownloadPage() {
                     </label>
                   </div>
                 ) : null}
-              </div>
+              </div> : null}
 
               <Button className="mt-1 w-full" disabled={!destination || starting} onClick={() => void submitDownload()}>
-                {starting ? <LoaderCircle className="animate-spin" size={17} /> : audioOnly ? <Music2 size={17} /> : <Download size={17} />}
-                {starting ? "Adding to queue" : "Download"}
+                {starting ? <LoaderCircle className="animate-spin" size={17} /> : !isGallery && audioOnly ? <Music2 size={17} /> : <Download size={17} />}
+                {starting ? "Adding to queue" : isGallery ? "Download album" : "Download"}
               </Button>
             </div>
           </section>
@@ -331,6 +346,24 @@ function defaultBatchOptions(
   destination: string,
   outputConflictPolicy: DownloadOptions["outputConflictPolicy"],
 ): DownloadOptions {
+  if (analysis.engine === "galleryDl") {
+    return {
+      quality: analysis.qualityOptions[0]!,
+      container: "mp4",
+      videoCodecPreference: "any",
+      audioQuality: "best",
+      audioOnly: false,
+      subtitles: false,
+      subtitleLanguages: [],
+      embedThumbnail: false,
+      embedMetadata: false,
+      chapters: false,
+      sponsorblock: false,
+      destination,
+      filenameTemplate: "ignored",
+      outputConflictPolicy,
+    };
+  }
   const hasVideo = analysis.formats.some((format) => format.videoCodec);
   const quality = (hasVideo
     ? analysis.qualityOptions.find((option) => option.kind === "best")

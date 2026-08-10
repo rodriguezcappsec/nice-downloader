@@ -30,6 +30,15 @@ pub enum EngineId {
     YtDlp,
     Ffmpeg,
     Ffprobe,
+    GalleryDl,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum DownloadEngineKind {
+    #[default]
+    YtDlp,
+    GalleryDl,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -119,6 +128,8 @@ pub enum QualityKind {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MediaAnalysis {
+    #[serde(default)]
+    pub engine: DownloadEngineKind,
     pub title: String,
     pub uploader: Option<String>,
     pub duration_seconds: Option<f64>,
@@ -131,6 +142,10 @@ pub struct MediaAnalysis {
     pub playlist_index: Option<u32>,
     pub formats: Vec<MediaFormat>,
     pub quality_options: Vec<QualityOption>,
+    #[serde(default)]
+    pub item_count: Option<u32>,
+    #[serde(default)]
+    pub total_size_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -292,6 +307,7 @@ pub struct DownloadJob {
 impl DownloadJob {
     pub fn from_request(id: String, request: &StartDownloadRequest) -> Self {
         let now = Utc::now();
+        let gallery_download = request.analysis.engine == DownloadEngineKind::GalleryDl;
         Self {
             id,
             url: request.url.clone(),
@@ -300,11 +316,15 @@ impl DownloadJob {
             state: DownloadState::Queued,
             progress_percent: 0.0,
             downloaded_bytes: None,
-            total_bytes: None,
+            total_bytes: request.analysis.total_size_bytes,
             speed_bytes_per_second: None,
             eta_seconds: None,
             selected_quality: request.options.quality.label.clone(),
-            output_format: request.options.container.as_str().to_owned(),
+            output_format: if gallery_download {
+                "album".to_owned()
+            } else {
+                request.options.container.as_str().to_owned()
+            },
             destination: request.options.destination.clone(),
             output_path: None,
             current_operation: "Waiting for an available download slot".to_owned(),
@@ -321,4 +341,32 @@ impl DownloadJob {
 
 fn default_attempt_count() -> u32 {
     1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn older_persisted_analysis_defaults_to_ytdlp() {
+        let analysis: MediaAnalysis = serde_json::from_value(json!({
+            "title": "Legacy",
+            "uploader": null,
+            "durationSeconds": null,
+            "thumbnail": null,
+            "webpageUrl": "https://example.com/video",
+            "downloadUrl": "https://example.com/video",
+            "extractor": "generic",
+            "siteName": "Generic",
+            "playlistTitle": null,
+            "playlistIndex": null,
+            "formats": [],
+            "qualityOptions": []
+        }))
+        .unwrap();
+        assert_eq!(analysis.engine, DownloadEngineKind::YtDlp);
+        assert_eq!(analysis.item_count, None);
+        assert_eq!(analysis.total_size_bytes, None);
+    }
 }

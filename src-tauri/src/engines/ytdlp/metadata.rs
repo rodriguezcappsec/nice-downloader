@@ -1,6 +1,6 @@
 use crate::{
     errors::AppError,
-    models::{MediaAnalysis, MediaFormat, QualityKind, QualityOption},
+    models::{DownloadEngineKind, MediaAnalysis, MediaFormat, QualityKind, QualityOption},
 };
 use serde::Deserialize;
 
@@ -57,6 +57,7 @@ pub fn parse_metadata(
     let quality_options = quality_options(&formats);
 
     Ok(MediaAnalysis {
+        engine: DownloadEngineKind::YtDlp,
         title,
         uploader: raw.uploader.or(raw.channel),
         duration_seconds: raw
@@ -74,6 +75,8 @@ pub fn parse_metadata(
         playlist_index: raw.playlist_index,
         formats,
         quality_options,
+        item_count: None,
+        total_size_bytes: None,
     })
 }
 

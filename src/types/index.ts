@@ -72,6 +72,7 @@ export interface QualityOption {
 }
 
 export interface MediaAnalysis {
+  engine: "ytDlp" | "galleryDl";
   title: string;
   uploader?: string | null;
   durationSeconds?: number | null;
@@ -84,6 +85,8 @@ export interface MediaAnalysis {
   playlistIndex?: number | null;
   formats: MediaFormat[];
   qualityOptions: QualityOption[];
+  itemCount?: number | null;
+  totalSizeBytes?: number | null;
 }
 
 export interface BatchAnalysisItem {

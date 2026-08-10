@@ -13,7 +13,7 @@ struct EngineDefinition {
     required: bool,
 }
 
-const ENGINES: [EngineDefinition; 3] = [
+const ENGINES: [EngineDefinition; 4] = [
     EngineDefinition {
         id: EngineId::YtDlp,
         executable: "yt-dlp",
@@ -33,6 +33,13 @@ const ENGINES: [EngineDefinition; 3] = [
         executable: "ffprobe",
         display_name: "ffprobe",
         version_arg: "-version",
+        required: false,
+    },
+    EngineDefinition {
+        id: EngineId::GalleryDl,
+        executable: "gallery-dl",
+        display_name: "gallery-dl",
+        version_arg: "--version",
         required: false,
     },
 ];
@@ -56,8 +63,19 @@ async fn detect(definition: EngineDefinition) -> EngineInfo {
                 executable_path: None,
                 version: None,
                 required: definition.required,
-                status_message: format!("{} was not found in PATH", definition.executable),
-                capabilities: Vec::new(),
+                status_message: match definition.id {
+                    EngineId::GalleryDl => "gallery-dl was not found in PATH. Install it to enable Bunkr album downloads.".to_owned(),
+                    _ => format!("{} was not found in PATH", definition.executable),
+                },
+                capabilities: match definition.id {
+                    EngineId::GalleryDl => vec![EngineCapability {
+                        id: "bunkrAlbums".to_owned(),
+                        display_name: "Bunkr albums".to_owned(),
+                        available: false,
+                        status_message: "Install gallery-dl to enable this capability".to_owned(),
+                    }],
+                    _ => Vec::new(),
+                },
             };
         }
     };
@@ -86,6 +104,12 @@ async fn detect(definition: EngineDefinition) -> EngineInfo {
                 },
             ]
         }
+        EngineId::GalleryDl => vec![EngineCapability {
+            id: "bunkrAlbums".to_owned(),
+            display_name: "Bunkr albums".to_owned(),
+            available: true,
+            status_message: "Album analysis and original-file downloads are available".to_owned(),
+        }],
         EngineId::Ffmpeg | EngineId::Ffprobe => Vec::new(),
     };
     EngineInfo {
