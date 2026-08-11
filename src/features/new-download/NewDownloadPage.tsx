@@ -1,6 +1,8 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import {
+  Archive,
   ChevronDown,
+  ClipboardCheck,
   Clock3,
   Download,
   Film,
@@ -16,7 +18,17 @@ import { Button, Field, Input, Select, Textarea } from "../../components/ui";
 import { formatBytes, formatDuration } from "../../lib/format";
 import { api } from "../../lib/tauri";
 import { useAppStore } from "../../stores/app-store";
-import type { DiskSpaceInfo, DownloadOptions, GalleryItem, MediaAnalysis, Preset, StartDownloadRequest } from "../../types";
+import type {
+  DiskSpaceInfo,
+  DownloadArchiveMatch,
+  DownloadOptions,
+  GalleryItem,
+  MediaAnalysis,
+  Preset,
+  SitePresetRule,
+  SponsorBlockCategory,
+  StartDownloadRequest,
+} from "../../types";
 
 export function NewDownloadPage() {
   const analysis = useAppStore((state) => state.analysis);
@@ -34,6 +46,7 @@ export function NewDownloadPage() {
   const startDownloads = useAppStore((state) => state.startDownloads);
   const engines = useAppStore((state) => state.engines);
   const setView = useAppStore((state) => state.setView);
+  const view = useAppStore((state) => state.view);
   const [url, setUrl] = useState("");
   const [qualityId, setQualityId] = useState("best");
   const [container, setContainer] = useState<DownloadOptions["container"]>("mp4");
@@ -57,7 +70,17 @@ export function NewDownloadPage() {
   const [subtitles, setSubtitles] = useState(false);
   const [subtitleLanguages, setSubtitleLanguages] = useState("en.*,en");
   const [chapters, setChapters] = useState(false);
+  const [sponsorblockCategories, setSponsorblockCategories] = useState<SponsorBlockCategory[]>([]);
+  const [filenameTemplate, setFilenameTemplate] = useState("%(title).180B [%(id)s].%(ext)s");
+  const [matchedRule, setMatchedRule] = useState<SitePresetRule | null>(null);
+  const [archiveMatch, setArchiveMatch] = useState<DownloadArchiveMatch | null>(null);
+  const [clipboardCandidate, setClipboardCandidate] = useState("");
+  const [clipboardWatch, setClipboardWatch] = useState(
+    () => window.localStorage.getItem("nice-downloader.clipboardWatch") === "true",
+  );
   const [dragActive, setDragActive] = useState(false);
+  const isGallery = analysis?.engine === "galleryDl";
+  const isDirect = analysis?.engine === "directHttp";
 
   useEffect(() => {
     void api.listPresets().then(setPresets).catch(() => setPresets([]));
@@ -70,6 +93,61 @@ export function NewDownloadPage() {
   useEffect(() => {
     if (analysis) setQualityId(analysis.qualityOptions[0]?.id ?? "best");
   }, [analysis]);
+
+  useEffect(() => {
+    window.localStorage.setItem("nice-downloader.clipboardWatch", String(clipboardWatch));
+    if (!clipboardWatch || view !== "new") return;
+    let lastValue = "";
+    const inspectClipboard = async () => {
+      try {
+        const value = (await navigator.clipboard.readText()).trim();
+        if (value && value !== lastValue && value !== url && isSupportedClipboardUrl(value)) {
+          lastValue = value;
+          setClipboardCandidate(value);
+        }
+      } catch {
+        // Some desktop environments require an explicit Paste action.
+      }
+    };
+    void inspectClipboard();
+    const timer = window.setInterval(() => void inspectClipboard(), 1500);
+    return () => window.clearInterval(timer);
+  }, [clipboardWatch, url, view]);
+
+  useEffect(() => {
+    if (!analysis || isGallery || isDirect) {
+      setMatchedRule(null);
+      return;
+    }
+    let cancelled = false;
+    void api.matchSitePresetRule(analysis.webpageUrl || url)
+      .then((rule) => {
+        if (cancelled) return;
+        setMatchedRule(rule);
+        if (rule) setPresetId(rule.presetId);
+      })
+      .catch(() => {
+        if (!cancelled) setMatchedRule(null);
+      });
+    return () => { cancelled = true; };
+  }, [analysis, isDirect, isGallery, url]);
+
+  useEffect(() => {
+    if (!analysis || !destination) {
+      setArchiveMatch(null);
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void api.findDownloadArchiveMatch(analysis.downloadUrl || analysis.webpageUrl, destination)
+        .then((match) => { if (!cancelled) setArchiveMatch(match); })
+        .catch(() => { if (!cancelled) setArchiveMatch(null); });
+    }, 250);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [analysis, destination]);
 
   useEffect(() => {
     setSelectedBatchUrls(
@@ -94,8 +172,6 @@ export function NewDownloadPage() {
   );
 
   const audioOnly = selectedQuality?.kind === "audioOnly";
-  const isGallery = analysis?.engine === "galleryDl";
-  const isDirect = analysis?.engine === "directHttp";
   const filteredGalleryItems = useMemo(() => {
     const query = gallerySearch.trim().toLocaleLowerCase();
     if (!query) return galleryItems?.items ?? [];
@@ -164,6 +240,8 @@ export function NewDownloadPage() {
     setEmbedThumbnail(preset.intent.embedThumbnail);
     setEmbedMetadata(preset.intent.embedMetadata);
     setOutputConflictPolicy(preset.intent.outputConflictPolicy);
+    setSponsorblockCategories(preset.intent.sponsorblockCategories ?? []);
+    if (preset.intent.filenameTemplate) setFilenameTemplate(preset.intent.filenameTemplate);
   }, [analysis, isDirect, isGallery, presetId, presets]);
 
   async function pasteUrl() {
@@ -198,9 +276,10 @@ export function NewDownloadPage() {
       embedThumbnail,
       embedMetadata,
       chapters,
-      sponsorblock: false,
+      sponsorblock: sponsorblockCategories.length > 0,
+      sponsorblockCategories,
       destination,
-      filenameTemplate: "%(title).180B [%(id)s].%(ext)s",
+      filenameTemplate,
       outputConflictPolicy,
       gallerySelection: isGallery && galleryItems
         ? selectedGalleryItems.map((item) => ({ index: item.index, sizeBytes: item.sizeBytes }))
@@ -233,6 +312,8 @@ export function NewDownloadPage() {
   }
 
   const inputUrls = parseInputUrls(url);
+  const filenameTemplateError = validateFilenameTemplate(filenameTemplate);
+  const filenamePreview = analysis ? previewFilename(filenameTemplate, analysis, container) : "";
 
   return (
     <div
@@ -294,7 +375,21 @@ export function NewDownloadPage() {
             {analyzing ? "Analyzing" : inputUrls.length > 1 ? `Analyze ${inputUrls.length}` : "Analyze"}
           </Button>
         </div>
-        <p className="mt-2 text-xs text-muted">Supports yt-dlp compatible sites and Bunkr albums through gallery-dl. Analysis runs locally.</p>
+        <div className="mt-2 flex flex-wrap items-center justify-between gap-3 text-xs text-muted">
+          <p>Supports yt-dlp compatible sites and Bunkr albums through gallery-dl. Analysis runs locally.</p>
+          <label className="flex items-center gap-2" title="Checks the clipboard only while New Download is open and never starts a download automatically.">
+            <input type="checkbox" checked={clipboardWatch} onChange={(event) => setClipboardWatch(event.target.checked)} />
+            Detect copied URLs
+          </label>
+        </div>
+        {clipboardCandidate ? (
+          <div className="mt-3 flex items-center gap-3 border border-blue-500/30 bg-blue-500/5 p-3 text-xs">
+            <ClipboardCheck size={17} className="shrink-0 text-blue-400" />
+            <div className="min-w-0 flex-1"><div className="font-medium text-ink">Supported URL detected</div><div className="mt-0.5 truncate text-muted">{clipboardCandidate}</div></div>
+            <Button variant="secondary" className="h-8 px-2.5" onClick={() => { setUrl(clipboardCandidate); setClipboardCandidate(""); clearAnalysis(); }}>Use URL</Button>
+            <button className="text-muted hover:text-ink" onClick={() => setClipboardCandidate("")}>Ignore</button>
+          </div>
+        ) : null}
       </section>
 
       {analyzing ? (
@@ -411,9 +506,15 @@ export function NewDownloadPage() {
                 </div>
               ) : (
                 <>
+                  {matchedRule ? (
+                    <div className="flex items-start gap-2 border border-blue-500/30 bg-blue-500/5 p-3 text-xs">
+                      <span className="mt-1 size-1.5 shrink-0 rounded-full bg-blue-400" />
+                      <div><span className="font-medium text-ink">Applied {matchedRule.name}</span><p className="mt-0.5 text-muted">Matched {matchedRule.hostSuffix}{matchedRule.pathPrefix ?? ""}. You can override the preset below.</p></div>
+                    </div>
+                  ) : null}
                   {presets.length > 0 ? (
                     <Field label="Preset">
-                      <Select value={presetId} onChange={(event) => setPresetId(event.target.value)}>
+                      <Select value={presetId} onChange={(event) => { setPresetId(event.target.value); setMatchedRule(null); }}>
                         <option value="">Custom</option>
                         {presets.map((preset) => <option key={preset.id} value={preset.id}>{preset.name}</option>)}
                       </Select>
@@ -468,6 +569,13 @@ export function NewDownloadPage() {
                   <option value="overwrite">Overwrite existing file</option>
                 </Select>
               </Field>
+              {archiveMatch ? (
+                <div className={`flex items-start gap-3 border p-3 text-xs ${outputConflictPolicy === "skip" ? "border-amber-500/30 bg-amber-500/5" : "border-line bg-canvas"}`}>
+                  <Archive size={17} className="mt-0.5 shrink-0 text-amber-400" />
+                  <div className="min-w-0 flex-1"><span className="font-medium text-ink">Previously downloaded to this folder</span><p className="mt-0.5 truncate text-muted">{archiveMatch.outputPath || `Recorded ${new Date(archiveMatch.completedAt).toLocaleString()}`}</p></div>
+                  {outputConflictPolicy === "skip" ? <Button variant="secondary" className="h-8 px-2.5" onClick={() => setOutputConflictPolicy("overwrite")}>Download again</Button> : null}
+                </div>
+              ) : null}
 
               {!isGallery && !isDirect ? <div className="border-t border-line pt-2">
                 <button
@@ -508,13 +616,42 @@ export function NewDownloadPage() {
                       <input type="checkbox" checked={embedThumbnail} onChange={(event) => setEmbedThumbnail(event.target.checked)} />
                       Embed thumbnail
                     </label>
+                    <Field label="Filename template" hint="Safe yt-dlp metadata tokens are expanded by the engine; folders and path separators are rejected.">
+                      <Input value={filenameTemplate} onChange={(event) => setFilenameTemplate(event.target.value)} spellCheck={false} />
+                    </Field>
+                    <div className="flex flex-wrap gap-2">
+                      <Button variant="secondary" className="h-8 px-2.5 text-xs" onClick={() => setFilenameTemplate("%(title).180B [%(id)s].%(ext)s")}>Title + ID</Button>
+                      <Button variant="secondary" className="h-8 px-2.5 text-xs" onClick={() => setFilenameTemplate("%(uploader).80B - %(title).150B.%(ext)s")}>Uploader + title</Button>
+                      <Button variant="secondary" className="h-8 px-2.5 text-xs" onClick={() => setFilenameTemplate("%(playlist_index)03d - %(title).170B.%(ext)s")}>Playlist order</Button>
+                    </div>
+                    <div className={`border p-2.5 font-mono text-[11px] ${filenameTemplateError ? "border-red-500/30 text-red-400" : "border-line bg-canvas text-muted"}`}>
+                      {filenameTemplateError || filenamePreview}
+                    </div>
+                    <div className="border-t border-line pt-3">
+                      <div className="mb-2 text-xs font-medium text-ink">Remove SponsorBlock segments</div>
+                      <div className="grid grid-cols-2 gap-2">
+                        {SPONSORBLOCK_CATEGORIES.map((category) => (
+                          <label key={category.id} className="flex items-center gap-2 text-xs">
+                            <input
+                              type="checkbox"
+                              checked={sponsorblockCategories.includes(category.id)}
+                              onChange={(event) => setSponsorblockCategories((selected) => event.target.checked
+                                ? [...selected, category.id]
+                                : selected.filter((item) => item !== category.id))}
+                            />
+                            {category.label}
+                          </label>
+                        ))}
+                      </div>
+                      <p className="mt-2 text-[11px] text-muted">Only applies on sites and videos supported by SponsorBlock.</p>
+                    </div>
                   </div>
                 ) : null}
               </div> : null}
 
               {!isGallery && !isDirect ? <div className="border border-line bg-canvas p-3 text-xs text-muted"><span className="font-semibold text-ink">{selectedQuality?.label}</span> · {container.toUpperCase()} · {videoCodecPreference === "any" ? "automatic codec" : videoCodecPreference.toUpperCase()} {estimatedBytes ? `· approximately ${formatBytes(estimatedBytes)}` : "· size estimated during download"}<p className="mt-1">{selectedQuality?.description}{formatStrategy === "compatibility" ? " with broadly compatible codecs" : formatStrategy === "smallest" ? " prioritizing smaller streams" : ""}.</p></div> : null}
               <div className="sticky bottom-0 -mx-5 -mb-5 border-t border-line bg-panel p-5">
-              <Button className="w-full" disabled={!destination || starting || galleryItemsLoading || diskSpace?.sufficient === false || Boolean(isGallery && galleryItems && selectedGalleryItems.length === 0)} onClick={() => void submitDownload()}>
+              <Button className="w-full" disabled={!destination || Boolean(!isGallery && !isDirect && filenameTemplateError) || starting || galleryItemsLoading || diskSpace?.sufficient === false || Boolean(isGallery && galleryItems && selectedGalleryItems.length === 0)} onClick={() => void submitDownload()}>
                 {starting ? <LoaderCircle className="animate-spin" size={17} /> : !isGallery && audioOnly ? <Music2 size={17} /> : <Download size={17} />}
                 {starting ? "Adding to queue" : isGallery && galleryItems && (galleryItems.truncated || selectedGalleryItems.length !== galleryItems.items.length) ? `Download ${selectedGalleryItems.length} selected` : isGallery ? "Download album" : "Download"}
               </Button>
@@ -601,6 +738,7 @@ function defaultBatchOptions(
       embedMetadata: false,
       chapters: false,
       sponsorblock: false,
+      sponsorblockCategories: [],
       destination,
       filenameTemplate: "ignored",
       outputConflictPolicy,
@@ -624,11 +762,65 @@ function defaultBatchOptions(
     embedMetadata: true,
     chapters: false,
     sponsorblock: false,
+    sponsorblockCategories: [],
     destination,
     filenameTemplate: "%(title).180B [%(id)s].%(ext)s",
     outputConflictPolicy,
     gallerySelection: null,
   };
+}
+
+const SPONSORBLOCK_CATEGORIES: { id: SponsorBlockCategory; label: string }[] = [
+  { id: "sponsor", label: "Sponsors" },
+  { id: "intro", label: "Intro" },
+  { id: "outro", label: "Outro" },
+  { id: "selfPromotion", label: "Self-promotion" },
+  { id: "interaction", label: "Interaction reminders" },
+  { id: "preview", label: "Previews" },
+  { id: "filler", label: "Filler" },
+  { id: "musicOfftopic", label: "Off-topic music" },
+];
+
+function isSupportedClipboardUrl(value: string): boolean {
+  if (/\s/.test(value)) return false;
+  try {
+    const parsed = new URL(value);
+    return (parsed.protocol === "http:" || parsed.protocol === "https:") && Boolean(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function validateFilenameTemplate(value: string): string | null {
+  if (!value || value.length > 240) return "Use between 1 and 240 characters.";
+  if (/[\\/\0\r\n]/.test(value)) return "Folder separators and control characters are not allowed.";
+  return null;
+}
+
+function previewFilename(
+  template: string,
+  analysis: MediaAnalysis,
+  container: DownloadOptions["container"],
+): string {
+  const id = (() => {
+    try {
+      const parsed = new URL(analysis.webpageUrl);
+      return parsed.searchParams.get("v") || parsed.pathname.split("/").filter(Boolean).at(-1) || "media";
+    } catch {
+      return "media";
+    }
+  })();
+  const values: Record<string, string> = {
+    title: analysis.title,
+    uploader: analysis.uploader || analysis.siteName,
+    id,
+    extractor: analysis.extractor,
+    playlist: analysis.playlistTitle || "playlist",
+    playlist_index: String(analysis.playlistIndex ?? 1).padStart(3, "0"),
+    ext: container,
+  };
+  const preview = template.replace(/%\(([^)]+)\)(?:\.[0-9]+B|0?[0-9]*d)?s?/g, (token, key: string) => values[key] ?? token);
+  return `Preview: ${preview.slice(0, 220)}`;
 }
 
 function GalleryItemRow({

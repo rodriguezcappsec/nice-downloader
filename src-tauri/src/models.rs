@@ -214,12 +214,42 @@ pub struct DownloadOptions {
     pub embed_metadata: bool,
     pub chapters: bool,
     pub sponsorblock: bool,
+    #[serde(default)]
+    pub sponsorblock_categories: Vec<SponsorBlockCategory>,
     pub destination: String,
     pub filename_template: String,
     #[serde(default)]
     pub output_conflict_policy: OutputConflictPolicy,
     #[serde(default)]
     pub gallery_selection: Option<Vec<GalleryItemSelection>>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SponsorBlockCategory {
+    Sponsor,
+    Intro,
+    Outro,
+    SelfPromotion,
+    Interaction,
+    Preview,
+    Filler,
+    MusicOfftopic,
+}
+
+impl SponsorBlockCategory {
+    pub fn as_ytdlp(self) -> &'static str {
+        match self {
+            Self::Sponsor => "sponsor",
+            Self::Intro => "intro",
+            Self::Outro => "outro",
+            Self::SelfPromotion => "selfpromo",
+            Self::Interaction => "interaction",
+            Self::Preview => "preview",
+            Self::Filler => "filler",
+            Self::MusicOfftopic => "music_offtopic",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -357,6 +387,10 @@ pub struct PresetIntent {
     pub embed_thumbnail: bool,
     pub embed_metadata: bool,
     pub output_conflict_policy: OutputConflictPolicy,
+    #[serde(default)]
+    pub sponsorblock_categories: Vec<SponsorBlockCategory>,
+    #[serde(default)]
+    pub filename_template: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -375,6 +409,39 @@ pub struct SavePresetRequest {
     pub id: Option<String>,
     pub name: String,
     pub intent: PresetIntent,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SitePresetRule {
+    pub id: String,
+    pub name: String,
+    pub host_suffix: String,
+    pub path_prefix: Option<String>,
+    pub preset_id: String,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveSitePresetRuleRequest {
+    pub id: Option<String>,
+    pub name: String,
+    pub host_suffix: String,
+    pub path_prefix: Option<String>,
+    pub preset_id: String,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadArchiveMatch {
+    pub url: String,
+    pub destination: String,
+    pub output_path: Option<String>,
+    pub completed_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize)]

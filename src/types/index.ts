@@ -155,11 +155,22 @@ export interface DownloadOptions {
   embedMetadata: boolean;
   chapters: boolean;
   sponsorblock: boolean;
+  sponsorblockCategories: SponsorBlockCategory[];
   destination: string;
   filenameTemplate: string;
   outputConflictPolicy: "skip" | "overwrite";
   gallerySelection?: GalleryItemSelection[] | null;
 }
+
+export type SponsorBlockCategory =
+  | "sponsor"
+  | "intro"
+  | "outro"
+  | "selfPromotion"
+  | "interaction"
+  | "preview"
+  | "filler"
+  | "musicOfftopic";
 
 export type DownloadState =
   | "Queued"
@@ -233,6 +244,8 @@ export interface PresetIntent {
   embedThumbnail: boolean;
   embedMetadata: boolean;
   outputConflictPolicy: DownloadOptions["outputConflictPolicy"];
+  sponsorblockCategories: SponsorBlockCategory[];
+  filenameTemplate?: string | null;
 }
 
 export interface Preset {
@@ -247,6 +260,33 @@ export interface SavePresetRequest {
   id?: string | null;
   name: string;
   intent: PresetIntent;
+}
+
+export interface SitePresetRule {
+  id: string;
+  name: string;
+  hostSuffix: string;
+  pathPrefix?: string | null;
+  presetId: string;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SaveSitePresetRuleRequest {
+  id?: string | null;
+  name: string;
+  hostSuffix: string;
+  pathPrefix?: string | null;
+  presetId: string;
+  enabled: boolean;
+}
+
+export interface DownloadArchiveMatch {
+  url: string;
+  destination: string;
+  outputPath?: string | null;
+  completedAt: string;
 }
 
 export type HistoryEntry = DownloadJob;

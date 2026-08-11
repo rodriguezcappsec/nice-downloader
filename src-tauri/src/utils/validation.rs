@@ -127,10 +127,14 @@ pub fn validate_engine_preferences(preferences: &EnginePreferences) -> Result<()
 }
 
 pub fn validate_filename_template(value: &str) -> Result<&str, AppError> {
-    if value.is_empty() || value.len() > 240 || value.contains('/') || value.contains('\0') {
+    if value.is_empty()
+        || value.len() > 240
+        || value.contains(['/', '\\', '\0'])
+        || value.chars().any(char::is_control)
+    {
         return Err(AppError::new(
             "invalid_filename_template",
-            "The filename template is not valid.",
+            "Filename templates must contain 1 to 240 characters and cannot contain path separators.",
         ));
     }
     Ok(value)

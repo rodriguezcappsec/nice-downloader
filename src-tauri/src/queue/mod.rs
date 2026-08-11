@@ -1717,6 +1717,7 @@ mod tests {
                 embed_metadata: true,
                 chapters: false,
                 sponsorblock: false,
+                sponsorblock_categories: vec![],
                 destination: directory.path().to_string_lossy().into_owned(),
                 filename_template: "%(title)s.%(ext)s".to_owned(),
                 output_conflict_policy: OutputConflictPolicy::Skip,

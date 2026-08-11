@@ -3,6 +3,7 @@ import {
   CircleX,
   Cookie,
   DownloadCloud,
+  Globe2,
   Network,
   RefreshCw,
   RotateCcw,
@@ -18,7 +19,16 @@ import { Page } from "../../components/Page";
 import { Button, Field, Input, Select } from "../../components/ui";
 import { useAppStore } from "../../stores/app-store";
 import { api, normalizeError } from "../../lib/tauri";
-import type { BrowserCookieSource, EngineId, EngineUpdateCandidate, ManagedEngineStatus, Preset, PresetIntent } from "../../types";
+import type {
+  BrowserCookieSource,
+  EngineId,
+  EngineUpdateCandidate,
+  ManagedEngineStatus,
+  Preset,
+  PresetIntent,
+  SitePresetRule,
+  SponsorBlockCategory,
+} from "../../types";
 
 const browserOptions: { value: BrowserCookieSource; label: string }[] = [
   { value: "none", label: "Do not use browser cookies" },
@@ -29,6 +39,17 @@ const browserOptions: { value: BrowserCookieSource; label: string }[] = [
   { value: "vivaldi", label: "Vivaldi" },
   { value: "edge", label: "Microsoft Edge" },
   { value: "opera", label: "Opera" },
+];
+
+const sponsorCategoryOptions: { value: SponsorBlockCategory; label: string }[] = [
+  { value: "sponsor", label: "Sponsors" },
+  { value: "intro", label: "Intros" },
+  { value: "outro", label: "Outros" },
+  { value: "selfPromotion", label: "Self-promotion" },
+  { value: "interaction", label: "Interaction reminders" },
+  { value: "preview", label: "Previews" },
+  { value: "filler", label: "Filler" },
+  { value: "musicOfftopic", label: "Off-topic music" },
 ];
 
 export function SettingsPage() {
@@ -369,6 +390,7 @@ export function SettingsPage() {
 export function PresetsPage() {
   const setError = useAppStore((state) => state.setError);
   const [presets, setPresets] = useState<Preset[]>([]);
+  const [rules, setRules] = useState<SitePresetRule[]>([]);
   const [name, setName] = useState("");
   const [intent, setIntent] = useState<PresetIntent>({
     quality: "best",
@@ -378,17 +400,48 @@ export function PresetsPage() {
     embedThumbnail: false,
     embedMetadata: true,
     outputConflictPolicy: "skip",
+    sponsorblockCategories: [],
+    filenameTemplate: "%(title).180B [%(id)s].%(ext)s",
   });
+  const [ruleName, setRuleName] = useState("");
+  const [hostSuffix, setHostSuffix] = useState("");
+  const [pathPrefix, setPathPrefix] = useState("");
+  const [rulePresetId, setRulePresetId] = useState("");
 
   useEffect(() => {
-    void api.listPresets().then(setPresets).catch((error) => setError(normalizeError(error)));
+    void Promise.all([api.listPresets(), api.listSitePresetRules()])
+      .then(([savedPresets, savedRules]) => {
+        setPresets(savedPresets);
+        setRules(savedRules);
+        setRulePresetId((current) => current || savedPresets[0]?.id || "");
+      })
+      .catch((error) => setError(normalizeError(error)));
   }, [setError]);
 
   async function createPreset() {
     try {
       const preset = await api.savePreset({ name, intent });
       setPresets((items) => [...items, preset].sort((a, b) => a.name.localeCompare(b.name)));
+      setRulePresetId((current) => current || preset.id);
       setName("");
+    } catch (error) {
+      setError(normalizeError(error));
+    }
+  }
+
+  async function createRule() {
+    try {
+      const rule = await api.saveSitePresetRule({
+        name: ruleName,
+        hostSuffix,
+        pathPrefix: pathPrefix || null,
+        presetId: rulePresetId,
+        enabled: true,
+      });
+      setRules((items) => [...items, rule].sort((a, b) => a.name.localeCompare(b.name)));
+      setRuleName("");
+      setHostSuffix("");
+      setPathPrefix("");
     } catch (error) {
       setError(normalizeError(error));
     }
@@ -415,16 +468,51 @@ export function PresetsPage() {
           <label className="flex items-center gap-2"><input type="checkbox" checked={intent.embedThumbnail} onChange={(event) => setIntent({ ...intent, embedThumbnail: event.target.checked })} /> Embed thumbnail</label>
           <Button className="ml-auto" disabled={!name.trim()} onClick={() => void createPreset()}>Save preset</Button>
         </div>
+        <div className="mt-4 border-t border-line pt-4">
+          <div className="mb-2 text-xs font-medium text-ink">SponsorBlock categories</div>
+          <div className="flex flex-wrap gap-x-5 gap-y-2 text-xs text-muted">
+            {sponsorCategoryOptions.map((category) => (
+              <label key={category.value} className="flex items-center gap-2">
+                <input type="checkbox" checked={intent.sponsorblockCategories.includes(category.value)} onChange={(event) => setIntent({ ...intent, sponsorblockCategories: event.target.checked ? [...intent.sponsorblockCategories, category.value] : intent.sponsorblockCategories.filter((value) => value !== category.value) })} />
+                {category.label}
+              </label>
+            ))}
+          </div>
+        </div>
+        <Field label="Filename template" hint="Optional safe filename pattern applied with this preset.">
+          <Input className="mt-4" value={intent.filenameTemplate ?? ""} onChange={(event) => setIntent({ ...intent, filenameTemplate: event.target.value })} spellCheck={false} />
+        </Field>
       </section>
       <div className="mt-5 divide-y divide-line border border-line bg-panel">
         {presets.map((preset) => (
           <article key={preset.id} className="flex items-center gap-4 p-4">
             <Settings2 size={18} className="text-muted" />
             <div className="min-w-0 flex-1"><h3 className="text-sm font-semibold">{preset.name}</h3><p className="mt-1 text-xs text-muted">{preset.intent.quality === "audio" ? "Audio only" : preset.intent.quality === "best" ? "Best quality" : `${preset.intent.quality}p`} · {preset.intent.container.toUpperCase()} · {preset.intent.videoCodecPreference.toUpperCase()}</p></div>
-            <Button variant="danger" className="h-8 px-2.5" onClick={() => void api.deletePreset(preset.id).then(() => setPresets((items) => items.filter((item) => item.id !== preset.id))).catch((error) => setError(normalizeError(error)))}><Trash2 size={14} /> Delete</Button>
+            <Button variant="danger" className="h-8 px-2.5" onClick={() => void api.deletePreset(preset.id).then(() => { setPresets((items) => items.filter((item) => item.id !== preset.id)); setRules((items) => items.filter((rule) => rule.presetId !== preset.id)); }).catch((error) => setError(normalizeError(error)))}><Trash2 size={14} /> Delete</Button>
           </article>
         ))}
         {presets.length === 0 ? <p className="p-5 text-sm text-muted">No presets saved yet.</p> : null}
+      </div>
+      <section className="mt-5 border border-line bg-panel p-5">
+        <div className="mb-4 flex items-center gap-2"><Globe2 size={17} className="text-muted" /><div><h2 className="text-sm font-semibold">Automatic site rules</h2><p className="mt-1 text-xs text-muted">Apply a saved preset when a URL host and optional path prefix match. Subdomains match automatically.</p></div></div>
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+          <Field label="Rule name"><Input value={ruleName} onChange={(event) => setRuleName(event.target.value)} placeholder="YouTube compatibility" /></Field>
+          <Field label="Host"><Input value={hostSuffix} onChange={(event) => setHostSuffix(event.target.value)} placeholder="youtube.com" spellCheck={false} /></Field>
+          <Field label="Path prefix" hint="Optional, such as /shorts/"><Input value={pathPrefix} onChange={(event) => setPathPrefix(event.target.value)} placeholder="/shorts/" spellCheck={false} /></Field>
+          <Field label="Preset"><Select value={rulePresetId} onChange={(event) => setRulePresetId(event.target.value)}><option value="">Choose preset</option>{presets.map((preset) => <option key={preset.id} value={preset.id}>{preset.name}</option>)}</Select></Field>
+        </div>
+        <div className="mt-4 flex justify-end"><Button disabled={!ruleName.trim() || !hostSuffix.trim() || !rulePresetId} onClick={() => void createRule()}>Save site rule</Button></div>
+      </section>
+      <div className="mt-5 divide-y divide-line border border-line bg-panel">
+        {rules.map((rule) => (
+          <article key={rule.id} className="flex items-center gap-4 p-4">
+            <Globe2 size={18} className="text-muted" />
+            <div className="min-w-0 flex-1"><h3 className="text-sm font-semibold">{rule.name}{!rule.enabled ? <span className="ml-2 text-xs font-normal text-muted">Disabled</span> : null}</h3><p className="mt-1 text-xs text-muted">*.{rule.hostSuffix}{rule.pathPrefix ?? ""} → {presets.find((preset) => preset.id === rule.presetId)?.name ?? "Deleted preset"}</p></div>
+            <Button variant="secondary" className="h-8 px-2.5" onClick={() => void api.saveSitePresetRule({ ...rule, enabled: !rule.enabled }).then((updated) => setRules((items) => items.map((item) => item.id === updated.id ? updated : item))).catch((error) => setError(normalizeError(error)))}>{rule.enabled ? "Disable" : "Enable"}</Button>
+            <Button variant="danger" className="h-8 px-2.5" onClick={() => void api.deleteSitePresetRule(rule.id).then(() => setRules((items) => items.filter((item) => item.id !== rule.id))).catch((error) => setError(normalizeError(error)))}><Trash2 size={14} /> Delete</Button>
+          </article>
+        ))}
+        {rules.length === 0 ? <p className="p-5 text-sm text-muted">No automatic site rules configured.</p> : null}
       </div>
     </Page>
   );

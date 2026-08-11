@@ -1,5 +1,9 @@
 # Desktop UX Principles
 
+Optional clipboard detection only runs while New Download is visible and offers a copied URL for confirmation. It never starts analysis or a download. A matched site rule is announced before applying its preset, and selecting another preset clears the automatic match. Filename previews are advisory; Rust performs authoritative validation.
+
+Duplicate protection uses a durable archive separate from History. When the current URL and destination match an archived completion, the options panel explains the match and offers an explicit Download again action.
+
 Nice Downloader presents download intent, not engine flags. The normal path is `Paste URL → Analyze → Confirm recommendation → Download`. Quality, destination, and the recommended strategy remain visible; codecs, subtitles, naming, and overwrite behavior use progressive disclosure.
 
 Navigation must not discard work. Page components remain mounted so analyzed metadata, gallery selections, filters, and option edits survive a trip to Queue or Settings. The selected page and sidebar state persist locally. `Ctrl+N` opens New Download and `Ctrl+,` opens Settings.

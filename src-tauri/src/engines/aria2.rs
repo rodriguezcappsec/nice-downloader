@@ -397,6 +397,7 @@ mod tests {
                 embed_metadata: false,
                 chapters: false,
                 sponsorblock: false,
+                sponsorblock_categories: vec![],
                 destination: destination.to_string_lossy().into_owned(),
                 filename_template: "ignored".to_owned(),
                 output_conflict_policy: OutputConflictPolicy::Overwrite,

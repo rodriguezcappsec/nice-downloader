@@ -75,6 +75,11 @@ pub fn run() {
             commands::list_presets,
             commands::save_preset,
             commands::delete_preset,
+            commands::list_site_preset_rules,
+            commands::save_site_preset_rule,
+            commands::delete_site_preset_rule,
+            commands::match_site_preset_rule,
+            commands::find_download_archive_match,
             commands::open_download_output,
             commands::export_diagnostics,
         ])
