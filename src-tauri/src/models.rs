@@ -24,13 +24,15 @@ pub struct EngineCapability {
     pub status_message: String,
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum EngineId {
     YtDlp,
     Ffmpeg,
     Ffprobe,
     GalleryDl,
+    Aria2,
+    Curl,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -39,6 +41,7 @@ pub enum DownloadEngineKind {
     #[default]
     YtDlp,
     GalleryDl,
+    DirectHttp,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

@@ -5,10 +5,13 @@ import type {
   DownloadJob,
   DiskSpaceInfo,
   EngineInfo,
+  EngineId,
   EnginePreferences,
+  EngineUpdateCandidate,
   GalleryItemList,
   HistoryEntry,
   MediaAnalysis,
+  ManagedEngineStatus,
   QueueSettings,
   QueueSnapshot,
   StartDownloadRequest,
@@ -16,6 +19,16 @@ import type {
 
 export const api = {
   detectEngines: () => invoke<EngineInfo[]>("detect_engines"),
+  listManagedEngines: () => invoke<ManagedEngineStatus[]>("list_managed_engines"),
+  checkEngineUpdate: (engine: EngineId) =>
+    invoke<EngineUpdateCandidate>("check_engine_update", { engine }),
+  installEngineUpdate: (candidate: EngineUpdateCandidate) =>
+    invoke<ManagedEngineStatus>("install_engine_update", { candidate }),
+  pinManagedEngine: (engine: EngineId, pinned: boolean) =>
+    invoke<ManagedEngineStatus>("pin_managed_engine", { engine, pinned }),
+  rollbackManagedEngine: (engine: EngineId) =>
+    invoke<ManagedEngineStatus>("rollback_managed_engine", { engine }),
+  testSiteAccess: (url: string) => invoke<MediaAnalysis>("test_site_access", { url }),
   getEnginePreferences: () => invoke<EnginePreferences>("get_engine_preferences"),
   updateEnginePreferences: (preferences: EnginePreferences) =>
     invoke<EnginePreferences>("update_engine_preferences", { preferences }),

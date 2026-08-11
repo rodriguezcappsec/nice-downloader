@@ -79,6 +79,7 @@ export function NewDownloadPage() {
 
   const audioOnly = selectedQuality?.kind === "audioOnly";
   const isGallery = analysis?.engine === "galleryDl";
+  const isDirect = analysis?.engine === "directHttp";
   const filteredGalleryItems = useMemo(() => {
     const query = gallerySearch.trim().toLocaleLowerCase();
     if (!query) return galleryItems?.items ?? [];
@@ -338,6 +339,10 @@ export function NewDownloadPage() {
                     </div>
                   )}
                 </div>
+              ) : isDirect ? (
+                <div className="border border-line bg-elevated p-3 text-sm text-muted">
+                  This URL points directly to a file. It will be transferred unchanged with aria2c, or curl as the resumable fallback.
+                </div>
               ) : (
                 <>
                   <Field label="Quality">
@@ -384,7 +389,7 @@ export function NewDownloadPage() {
                 </Select>
               </Field>
 
-              {!isGallery ? <div className="border-t border-line pt-2">
+              {!isGallery && !isDirect ? <div className="border-t border-line pt-2">
                 <button
                   className="flex w-full items-center justify-between py-2 text-sm font-medium text-muted hover:text-ink"
                   onClick={() => setAdvancedOpen((openState) => !openState)}

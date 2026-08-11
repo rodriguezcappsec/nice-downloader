@@ -1,5 +1,6 @@
 use crate::{
     engines::{
+        aria2::{analyze_direct, is_direct_download_url, prepare_direct},
         gallery_dl::{is_bunkr_album_url, GalleryDlEngine},
         ytdlp::YtDlpEngine,
         DownloadEngine,
@@ -13,6 +14,7 @@ use std::path::PathBuf;
 pub enum PreparedEngineKind {
     YtDlp,
     GalleryDl,
+    DirectHttp,
 }
 
 #[derive(Debug, Clone)]
@@ -31,6 +33,8 @@ pub async fn analyze(
 ) -> Result<MediaAnalysis, AppError> {
     if is_bunkr_album_url(url) {
         GalleryDlEngine::discover()?.analyze(url, preferences).await
+    } else if is_direct_download_url(url) {
+        analyze_direct(url).await
     } else {
         YtDlpEngine::discover()?.analyze(url, preferences).await
     }
@@ -93,6 +97,21 @@ pub async fn prepare_download(
                 expected_item_count: None,
             })
         }
+        DownloadEngineKind::DirectHttp if is_direct_download_url(&request.url) => {
+            let prepared = prepare_direct(request, preferences)?;
+            Ok(PreparedDownload {
+                executable: prepared.executable,
+                engine_name: prepared.engine_name,
+                kind: PreparedEngineKind::DirectHttp,
+                args: prepared.args,
+                output_relative_path: Some(prepared.filename),
+                expected_item_count: Some(1),
+            })
+        }
+        DownloadEngineKind::DirectHttp => Err(AppError::new(
+            "engine_route_mismatch",
+            "The direct transfer engine only accepts recognized HTTP file URLs.",
+        )),
     }
 }
 

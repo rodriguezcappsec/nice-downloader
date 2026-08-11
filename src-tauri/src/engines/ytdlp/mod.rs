@@ -34,7 +34,7 @@ impl YtDlpRuntimeCapabilities {
 
 impl YtDlpEngine {
     pub fn discover() -> Result<Self, AppError> {
-        let executable = which::which("yt-dlp").map_err(|_| {
+        let executable = crate::engines::managed::resolve("yt-dlp").ok_or_else(|| {
             AppError::new(
                 "engine_not_found",
                 "yt-dlp is not installed or could not be found in PATH.",

@@ -21,7 +21,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     process::Stdio,
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tauri::{AppHandle, Emitter};
 use tokio::{
@@ -538,7 +538,7 @@ impl QueueManager {
         let mut command = Command::new(&prepared.executable);
         command
             .args(&prepared.args)
-            .current_dir(destination)
+            .current_dir(&destination)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
@@ -577,6 +577,18 @@ impl QueueManager {
             item_count: prepared.expected_item_count.unwrap_or_default(),
             ..GalleryProgressTracker::default()
         };
+        let mut direct_progress = if prepared.kind == PreparedEngineKind::DirectHttp {
+            prepared
+                .output_relative_path
+                .as_ref()
+                .map(|relative| DirectProgressTracker {
+                    path: destination.join(relative),
+                    last_bytes: 0,
+                    last_sample: Instant::now(),
+                })
+        } else {
+            None
+        };
         let exit_status = loop {
             if cancellation.is_cancelled() {
                 tracing::info!(job_id = %id, "cancelling download process group");
@@ -596,6 +608,37 @@ impl QueueManager {
                     )
                     .await;
                     return;
+                }
+            }
+
+            if let Some(tracker) = direct_progress.as_mut() {
+                if tracker.last_sample.elapsed() >= Duration::from_millis(500) {
+                    let elapsed = tracker.last_sample.elapsed().as_secs_f64();
+                    if let Ok(metadata) = std::fs::metadata(&tracker.path) {
+                        let downloaded = metadata.len();
+                        let speed =
+                            (downloaded.saturating_sub(tracker.last_bytes)) as f64 / elapsed;
+                        tracker.last_bytes = downloaded;
+                        tracker.last_sample = Instant::now();
+                        self.update_job(&app, &id, |job| {
+                            job.state = DownloadState::Downloading;
+                            job.current_operation =
+                                format!("Downloading with {}", prepared.engine_name);
+                            job.downloaded_bytes = Some(downloaded);
+                            job.progress_percent = job
+                                .total_bytes
+                                .filter(|total| *total > 0)
+                                .map(|total| downloaded as f64 * 100.0 / total as f64)
+                                .unwrap_or(job.progress_percent)
+                                .clamp(0.0, 99.9);
+                            job.speed_bytes_per_second = (speed > 0.0).then_some(speed);
+                            job.eta_seconds =
+                                job.total_bytes.filter(|_| speed > 0.0).map(|total| {
+                                    (total.saturating_sub(downloaded) as f64 / speed).ceil() as u64
+                                });
+                        })
+                        .await;
+                    }
                 }
             }
 
@@ -983,6 +1026,12 @@ struct GalleryProgressTracker {
     current_name: String,
     completed_bytes: u64,
     last_completed_index: Option<u32>,
+}
+
+struct DirectProgressTracker {
+    path: std::path::PathBuf,
+    last_bytes: u64,
+    last_sample: Instant,
 }
 
 #[derive(Debug, PartialEq)]

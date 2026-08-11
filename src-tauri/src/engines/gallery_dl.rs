@@ -31,7 +31,7 @@ pub struct GalleryDownload {
 
 impl GalleryDlEngine {
     pub fn discover() -> Result<Self, AppError> {
-        let executable = which::which("gallery-dl").map_err(|_| {
+        let executable = crate::engines::managed::resolve("gallery-dl").ok_or_else(|| {
             AppError::new(
                 "engine_not_found",
                 "gallery-dl is required for Bunkr albums but was not found in PATH. Install gallery-dl, then use Settings > Engines to detect it.",

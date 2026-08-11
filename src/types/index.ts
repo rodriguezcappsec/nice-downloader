@@ -13,7 +13,7 @@ export interface AppError {
 }
 
 export interface EngineInfo {
-  id: "ytDlp" | "ffmpeg" | "ffprobe" | "galleryDl" | "aria2";
+  id: "ytDlp" | "ffmpeg" | "ffprobe" | "galleryDl" | "aria2" | "curl";
   displayName: string;
   installed: boolean;
   executablePath?: string | null;
@@ -21,6 +21,24 @@ export interface EngineInfo {
   required: boolean;
   statusMessage: string;
   capabilities: EngineCapability[];
+}
+
+export type EngineId = EngineInfo["id"];
+
+export interface ManagedEngineStatus {
+  engine: EngineId;
+  supported: boolean;
+  activeVersion?: string | null;
+  previousVersion?: string | null;
+  pinned: boolean;
+  installedVersions: string[];
+}
+
+export interface EngineUpdateCandidate {
+  engine: EngineId;
+  version: string;
+  downloadUrl: string;
+  sha256: string;
 }
 
 export interface EngineCapability {
@@ -72,7 +90,7 @@ export interface QualityOption {
 }
 
 export interface MediaAnalysis {
-  engine: "ytDlp" | "galleryDl";
+  engine: "ytDlp" | "galleryDl" | "directHttp";
   title: string;
   uploader?: string | null;
   durationSeconds?: number | null;

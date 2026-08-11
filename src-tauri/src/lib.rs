@@ -6,7 +6,7 @@ mod models;
 mod queue;
 mod utils;
 
-use crate::{database::Database, queue::QueueManager};
+use crate::{database::Database, engines::managed, queue::QueueManager};
 use tauri::Manager;
 use tracing_subscriber::EnvFilter;
 
@@ -27,6 +27,7 @@ pub fn run() {
             std::fs::create_dir_all(&data_directory).map_err(|error| {
                 format!("could not create the application data directory: {error}")
             })?;
+            managed::initialize(&data_directory)?;
             let database = Database::open(&data_directory.join("nice-downloader.sqlite3"))?;
             let queue = QueueManager::new(database.clone())?;
             let recovery_queue = queue.clone();
@@ -44,6 +45,12 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::detect_engines,
+            commands::list_managed_engines,
+            commands::check_engine_update,
+            commands::install_engine_update,
+            commands::pin_managed_engine,
+            commands::rollback_managed_engine,
+            commands::test_site_access,
             commands::analyze_url,
             commands::list_gallery_items,
             commands::analyze_urls,
