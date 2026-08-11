@@ -1,6 +1,6 @@
 use crate::{
     errors::AppError,
-    models::{DownloadJob, DownloadState, EnginePreferences, StartDownloadRequest},
+    models::{DownloadJob, DownloadState, EnginePreferences, QueueSettings, StartDownloadRequest},
     utils::validation::{normalize_engine_preferences, validate_engine_preferences},
 };
 use chrono::{DateTime, Utc};
@@ -13,6 +13,7 @@ use std::{
 const MIGRATION_0001: &str = include_str!("migrations/0001_initial.sql");
 const MIGRATION_0002: &str = include_str!("migrations/0002_durable_queue.sql");
 const ENGINE_PREFERENCES_KEY: &str = "engine.preferences";
+const QUEUE_SETTINGS_KEY: &str = "queue.settings";
 
 #[derive(Clone)]
 pub struct Database {
@@ -195,6 +196,47 @@ impl Database {
         Ok(())
     }
 
+    pub fn load_queue_settings(&self) -> Result<QueueSettings, AppError> {
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "Application settings are unavailable.",
+            )
+        })?;
+        let value: Option<String> = connection
+            .query_row(
+                "SELECT value_json FROM settings WHERE key = ?1",
+                [QUEUE_SETTINGS_KEY],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let mut settings: QueueSettings = value
+            .map(|value| serde_json::from_str(&value))
+            .transpose()
+            .map_err(|error| AppError::internal("could not read queue settings", error))?
+            .unwrap_or_default();
+        settings.concurrent_downloads = settings.concurrent_downloads.clamp(1, 8);
+        Ok(settings)
+    }
+
+    pub fn save_queue_settings(&self, settings: &QueueSettings) -> Result<(), AppError> {
+        let value = serde_json::to_string(settings)
+            .map_err(|error| AppError::internal("could not serialize queue settings", error))?;
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "Application settings are unavailable.",
+            )
+        })?;
+        connection.execute(
+            "INSERT INTO settings (key, value_json, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json,
+                                                updated_at = excluded.updated_at",
+            params![QUEUE_SETTINGS_KEY, value, Utc::now().timestamp_millis()],
+        )?;
+        Ok(())
+    }
+
     pub fn list_history(&self) -> Result<Vec<DownloadJob>, AppError> {
         let connection = self.connection.lock().map_err(|_| {
             AppError::new(
@@ -252,6 +294,7 @@ fn job_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DownloadJob> {
 fn download_state_name(state: DownloadState) -> &'static str {
     match state {
         DownloadState::Queued => "Queued",
+        DownloadState::Paused => "Paused",
         DownloadState::Analyzing => "Analyzing",
         DownloadState::Preparing => "Preparing",
         DownloadState::Downloading => "Downloading",
@@ -266,6 +309,7 @@ fn download_state_name(state: DownloadState) -> &'static str {
 fn parse_download_state(value: &str) -> DownloadState {
     match value {
         "Queued" => DownloadState::Queued,
+        "Paused" => DownloadState::Paused,
         "Analyzing" => DownloadState::Analyzing,
         "Preparing" => DownloadState::Preparing,
         "Downloading" => DownloadState::Downloading,
@@ -372,6 +416,7 @@ mod tests {
                 total_size_bytes: None,
             },
             options,
+            scheduled_for: None,
         };
         database.save_job(&job, &request).expect("save history");
         let history = database.list_history().expect("list history");

@@ -9,6 +9,8 @@ import type {
   GalleryItemList,
   HistoryEntry,
   MediaAnalysis,
+  QueueSettings,
+  QueueSnapshot,
   StartDownloadRequest,
   ViewId,
 } from "../types";
@@ -19,6 +21,7 @@ interface AppStore {
   enginePreferences: EnginePreferences;
   jobs: Record<string, DownloadJob>;
   history: HistoryEntry[];
+  queue: QueueSnapshot;
   analysis: MediaAnalysis | null;
   galleryItems: GalleryItemList | null;
   batchAnalysis: BatchAnalysisResponse | null;
@@ -44,6 +47,10 @@ interface AppStore {
   startDownloads: (requests: StartDownloadRequest[]) => Promise<DownloadJob[]>;
   cancelDownload: (jobId: string) => Promise<void>;
   retryDownload: (jobId: string) => Promise<void>;
+  pauseDownload: (jobId: string) => Promise<void>;
+  resumeDownload: (jobId: string) => Promise<void>;
+  updateQueueSettings: (settings: QueueSettings) => Promise<void>;
+  moveQueuedDownload: (jobId: string, newIndex: number) => Promise<void>;
 }
 
 export const useAppStore = create<AppStore>((set, get) => ({
@@ -57,6 +64,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   },
   jobs: {},
   history: [],
+  queue: { settings: { concurrentDownloads: 2, paused: false }, orderedJobIds: [], activeJobIds: [] },
   analysis: null,
   galleryItems: null,
   batchAnalysis: null,
@@ -178,7 +186,12 @@ export const useAppStore = create<AppStore>((set, get) => ({
     let unlisten = () => {};
     try {
       unlisten = await api.onJobUpdated((job) => {
-        set((state) => ({ jobs: { ...state.jobs, [job.id]: job } }));
+        set((state) => ({
+          jobs: { ...state.jobs, [job.id]: job },
+          queue: ["Queued", "Paused"].includes(job.state)
+            ? state.queue
+            : { ...state.queue, orderedJobIds: state.queue.orderedJobIds.filter((id) => id !== job.id) },
+        }));
         if (job.state === "Completed") void get().loadHistory();
       });
     } catch (error) {
@@ -192,9 +205,10 @@ export const useAppStore = create<AppStore>((set, get) => ({
       api.detectEngines(),
       api.listHistory(),
       api.getEnginePreferences(),
+      api.getQueueSnapshot(),
     ]);
 
-    const [jobs, destination, engines, history, preferences] = results;
+    const [jobs, destination, engines, history, preferences, queue] = results;
     if (jobs.status === "fulfilled") {
       set({ jobs: Object.fromEntries(jobs.value.map((job) => [job.id, job])) });
     }
@@ -204,6 +218,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
     if (preferences.status === "fulfilled") {
       set({ enginePreferences: preferences.value });
     }
+    if (queue.status === "fulfilled") set({ queue: queue.value });
 
     const failure = results.find((result) => result.status === "rejected");
     if (failure?.status === "rejected") set({ error: normalizeError(failure.reason) });
@@ -218,6 +233,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
         jobs: { ...state.jobs, [job.id]: job },
         view: "downloads",
       }));
+      void api.getQueueSnapshot().then((queue) => set({ queue }));
       return job;
     } catch (error) {
       set({ error: normalizeError(error) });
@@ -233,6 +249,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
         jobs: { ...state.jobs, ...Object.fromEntries(jobs.map((job) => [job.id, job])) },
         view: "downloads",
       }));
+      void api.getQueueSnapshot().then((queue) => set({ queue }));
       return jobs;
     } catch (error) {
       set({ error: normalizeError(error) });
@@ -256,6 +273,39 @@ export const useAppStore = create<AppStore>((set, get) => ({
         jobs: { ...state.jobs, [job.id]: job },
         view: "downloads",
       }));
+      set({ queue: await api.getQueueSnapshot() });
+    } catch (error) {
+      set({ error: normalizeError(error) });
+    }
+  },
+
+  pauseDownload: async (jobId) => {
+    try {
+      await api.pauseDownload(jobId);
+    } catch (error) {
+      set({ error: normalizeError(error) });
+    }
+  },
+
+  resumeDownload: async (jobId) => {
+    try {
+      await api.resumeDownload(jobId);
+    } catch (error) {
+      set({ error: normalizeError(error) });
+    }
+  },
+
+  updateQueueSettings: async (settings) => {
+    try {
+      set({ queue: await api.updateQueueSettings(settings), error: null });
+    } catch (error) {
+      set({ error: normalizeError(error) });
+    }
+  },
+
+  moveQueuedDownload: async (jobId, newIndex) => {
+    try {
+      set({ queue: await api.moveQueuedDownload(jobId, newIndex), error: null });
     } catch (error) {
       set({ error: normalizeError(error) });
     }

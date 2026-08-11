@@ -6,7 +6,10 @@ use crate::{
         ytdlp::sanitize_diagnostic,
     },
     errors::AppError,
-    models::{DownloadJob, DownloadState, EnginePreferences, StartDownloadRequest},
+    models::{
+        DiskSpaceInfo, DownloadJob, DownloadState, EnginePreferences, QueueSettings, QueueSnapshot,
+        StartDownloadRequest,
+    },
     utils::validation::{
         validate_destination, validate_destination_writable, validate_engine_preferences,
         validate_media_url,
@@ -15,7 +18,7 @@ use crate::{
 use chrono::Utc;
 use std::{
     cmp::Reverse,
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     process::Stdio,
     sync::Arc,
     time::Duration,
@@ -24,7 +27,7 @@ use tauri::{AppHandle, Emitter};
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     process::{Child, Command},
-    sync::{mpsc, Mutex, RwLock, Semaphore},
+    sync::{mpsc, Mutex, Notify, RwLock},
     time::timeout,
 };
 use tokio_util::sync::CancellationToken;
@@ -42,13 +45,23 @@ pub struct QueueManager {
     requests: Arc<RwLock<HashMap<String, StartDownloadRequest>>>,
     cancellations: Arc<Mutex<HashMap<String, CancellationToken>>>,
     pending_recovery: Arc<Mutex<Vec<String>>>,
-    semaphore: Arc<Semaphore>,
+    scheduler: Arc<Mutex<SchedulerState>>,
+    scheduler_notify: Arc<Notify>,
+    process_ids: Arc<Mutex<HashMap<String, u32>>>,
+    paused_from: Arc<Mutex<HashMap<String, DownloadState>>>,
     database: Database,
 }
 
+struct SchedulerState {
+    pending: VecDeque<String>,
+    active: HashSet<String>,
+    settings: QueueSettings,
+}
+
 impl QueueManager {
-    pub fn new(database: Database, concurrent_downloads: usize) -> Result<Self, AppError> {
+    pub fn new(database: Database) -> Result<Self, AppError> {
         let persisted = database.load_runtime_jobs()?;
+        let settings = database.load_queue_settings()?;
         let mut jobs = HashMap::new();
         let mut requests = HashMap::new();
         let mut pending_recovery = Vec::new();
@@ -72,7 +85,14 @@ impl QueueManager {
             requests: Arc::new(RwLock::new(requests)),
             cancellations: Arc::new(Mutex::new(HashMap::new())),
             pending_recovery: Arc::new(Mutex::new(pending_recovery)),
-            semaphore: Arc::new(Semaphore::new(concurrent_downloads.max(1))),
+            scheduler: Arc::new(Mutex::new(SchedulerState {
+                pending: VecDeque::new(),
+                active: HashSet::new(),
+                settings,
+            })),
+            scheduler_notify: Arc::new(Notify::new()),
+            process_ids: Arc::new(Mutex::new(HashMap::new())),
+            paused_from: Arc::new(Mutex::new(HashMap::new())),
             database,
         })
     }
@@ -170,6 +190,8 @@ impl QueueManager {
         validate_destination_writable(&destination)?;
         let prepared = router::prepare_download(&request, &preferences).await?;
 
+        preflight_disk_space(&destination, request_estimated_bytes(&request))?;
+
         let id = Uuid::new_v4().to_string();
         let mut job = DownloadJob::from_request(id.clone(), &request);
         job.attempt_count = attempt_count.max(1);
@@ -187,6 +209,9 @@ impl QueueManager {
             .insert(id.clone(), cancellation.clone());
         emit_job(&app, &job);
 
+        self.scheduler.lock().await.pending.push_back(id.clone());
+        self.scheduler_notify.notify_waiters();
+
         let queue = self.clone();
         let context = JobRunContext {
             app,
@@ -194,9 +219,12 @@ impl QueueManager {
             destination,
             prepared,
             cancellation,
+            scheduled_for: request.scheduled_for,
         };
         tokio::spawn(async move {
+            let id = context.id.clone();
             queue.run_job(context).await;
+            queue.release_slot(&id).await;
         });
         Ok(job)
     }
@@ -213,6 +241,7 @@ impl QueueManager {
         let destination = validate_destination(&request.options.destination)?;
         validate_destination_writable(&destination)?;
         let prepared = router::prepare_download(&request, &preferences).await?;
+        preflight_disk_space(&destination, request_estimated_bytes(&request))?;
         let cancellation = CancellationToken::new();
         self.cancellations
             .lock()
@@ -221,8 +250,11 @@ impl QueueManager {
         if let Some(job) = self.jobs.read().await.get(&id).cloned() {
             emit_job(&app, &job);
         }
+        self.scheduler.lock().await.pending.push_back(id.clone());
+        self.scheduler_notify.notify_waiters();
         let queue = self.clone();
         tokio::spawn(async move {
+            let run_id = id.clone();
             queue
                 .run_job(JobRunContext {
                     app,
@@ -230,8 +262,10 @@ impl QueueManager {
                     destination,
                     prepared,
                     cancellation,
+                    scheduled_for: request.scheduled_for,
                 })
                 .await;
+            queue.release_slot(&run_id).await;
         });
         Ok(())
     }
@@ -240,6 +274,7 @@ impl QueueManager {
         let token = self.cancellations.lock().await.get(job_id).cloned();
         if let Some(token) = token {
             token.cancel();
+            self.scheduler_notify.notify_waiters();
             return Ok(());
         }
         let jobs = self.jobs.read().await;
@@ -262,6 +297,212 @@ impl QueueManager {
         jobs
     }
 
+    pub async fn snapshot(&self) -> QueueSnapshot {
+        let scheduler = self.scheduler.lock().await;
+        let mut active_job_ids = scheduler.active.iter().cloned().collect::<Vec<_>>();
+        active_job_ids.sort();
+        QueueSnapshot {
+            settings: scheduler.settings.clone(),
+            ordered_job_ids: scheduler.pending.iter().cloned().collect(),
+            active_job_ids,
+        }
+    }
+
+    pub async fn update_settings(
+        &self,
+        mut settings: QueueSettings,
+    ) -> Result<QueueSnapshot, AppError> {
+        if !(1..=8).contains(&settings.concurrent_downloads) {
+            return Err(AppError::new(
+                "invalid_concurrency",
+                "Concurrent downloads must be between 1 and 8.",
+            ));
+        }
+        let snapshot = {
+            let mut scheduler = self.scheduler.lock().await;
+            settings.concurrent_downloads = settings.concurrent_downloads.clamp(1, 8);
+            scheduler.settings = settings.clone();
+            QueueSnapshot {
+                settings: settings.clone(),
+                ordered_job_ids: scheduler.pending.iter().cloned().collect(),
+                active_job_ids: scheduler.active.iter().cloned().collect(),
+            }
+        };
+        self.database.save_queue_settings(&settings)?;
+        self.scheduler_notify.notify_waiters();
+        Ok(snapshot)
+    }
+
+    pub async fn move_pending(
+        &self,
+        job_id: &str,
+        new_index: usize,
+    ) -> Result<QueueSnapshot, AppError> {
+        let mut scheduler = self.scheduler.lock().await;
+        let Some(old_index) = scheduler.pending.iter().position(|id| id == job_id) else {
+            return Err(AppError::new(
+                "job_not_queued",
+                "Only waiting downloads can be reordered.",
+            ));
+        };
+        let Some(id) = scheduler.pending.remove(old_index) else {
+            return Err(AppError::new(
+                "job_not_queued",
+                "The queued job was not found.",
+            ));
+        };
+        let index = new_index.min(scheduler.pending.len());
+        scheduler.pending.insert(index, id);
+        let snapshot = QueueSnapshot {
+            settings: scheduler.settings.clone(),
+            ordered_job_ids: scheduler.pending.iter().cloned().collect(),
+            active_job_ids: scheduler.active.iter().cloned().collect(),
+        };
+        drop(scheduler);
+        self.scheduler_notify.notify_waiters();
+        Ok(snapshot)
+    }
+
+    pub async fn pause(&self, app: &AppHandle, job_id: &str) -> Result<(), AppError> {
+        let current = self
+            .jobs
+            .read()
+            .await
+            .get(job_id)
+            .map(|job| job.state)
+            .ok_or_else(|| AppError::new("job_not_found", "The download job was not found."))?;
+        if is_terminal_state(current) || current == DownloadState::Paused {
+            return Err(AppError::new(
+                "job_not_pausable",
+                "This download cannot be paused.",
+            ));
+        }
+        let running = self.scheduler.lock().await.active.contains(job_id);
+        if running {
+            signal_process_group(self.process_ids.lock().await.get(job_id).copied(), true)?;
+        }
+        self.paused_from
+            .lock()
+            .await
+            .insert(job_id.to_owned(), current);
+        self.update_job(app, job_id, |job| {
+            job.state = DownloadState::Paused;
+            job.current_operation = if running {
+                "Download paused".to_owned()
+            } else {
+                "Paused in queue".to_owned()
+            };
+            job.speed_bytes_per_second = None;
+            job.eta_seconds = None;
+        })
+        .await;
+        self.scheduler_notify.notify_waiters();
+        Ok(())
+    }
+
+    pub async fn resume(&self, app: &AppHandle, job_id: &str) -> Result<(), AppError> {
+        let current = self
+            .jobs
+            .read()
+            .await
+            .get(job_id)
+            .map(|job| job.state)
+            .ok_or_else(|| AppError::new("job_not_found", "The download job was not found."))?;
+        if current != DownloadState::Paused {
+            return Err(AppError::new(
+                "job_not_paused",
+                "This download is not paused.",
+            ));
+        }
+        let running = self.scheduler.lock().await.active.contains(job_id);
+        if running {
+            signal_process_group(self.process_ids.lock().await.get(job_id).copied(), false)?;
+        }
+        let previous = self
+            .paused_from
+            .lock()
+            .await
+            .remove(job_id)
+            .unwrap_or(DownloadState::Queued);
+        self.update_job(app, job_id, |job| {
+            job.state = if running {
+                previous
+            } else {
+                DownloadState::Queued
+            };
+            job.current_operation = if running {
+                "Resuming download".to_owned()
+            } else {
+                "Waiting for an available download slot".to_owned()
+            };
+        })
+        .await;
+        self.scheduler_notify.notify_waiters();
+        Ok(())
+    }
+
+    async fn wait_for_turn(
+        &self,
+        id: &str,
+        cancellation: &CancellationToken,
+        scheduled_for: Option<chrono::DateTime<Utc>>,
+    ) -> bool {
+        loop {
+            if cancellation.is_cancelled() {
+                return false;
+            }
+            let paused_ids = self
+                .jobs
+                .read()
+                .await
+                .iter()
+                .filter(|(_, job)| job.state == DownloadState::Paused)
+                .map(|(id, _)| id.clone())
+                .collect::<HashSet<_>>();
+            let due = scheduled_for.is_none_or(|time| time <= Utc::now());
+            {
+                let mut scheduler = self.scheduler.lock().await;
+                let next = scheduler
+                    .pending
+                    .iter()
+                    .find(|pending_id| !paused_ids.contains(*pending_id));
+                if !scheduler.settings.paused
+                    && due
+                    && scheduler.active.len() < scheduler.settings.concurrent_downloads
+                    && next.is_some_and(|next_id| next_id == id)
+                {
+                    if let Some(index) = scheduler.pending.iter().position(|item| item == id) {
+                        scheduler.pending.remove(index);
+                    }
+                    scheduler.active.insert(id.to_owned());
+                    return true;
+                }
+            }
+
+            let wake_after = scheduled_for
+                .and_then(|time| (time - Utc::now()).to_std().ok())
+                .unwrap_or(Duration::from_secs(60))
+                .min(Duration::from_secs(60));
+            tokio::select! {
+                _ = self.scheduler_notify.notified() => {},
+                _ = cancellation.cancelled() => return false,
+                _ = tokio::time::sleep(wake_after) => {},
+            }
+        }
+    }
+
+    async fn release_slot(&self, id: &str) {
+        let mut scheduler = self.scheduler.lock().await;
+        scheduler.active.remove(id);
+        if let Some(index) = scheduler.pending.iter().position(|item| item == id) {
+            scheduler.pending.remove(index);
+        }
+        drop(scheduler);
+        self.process_ids.lock().await.remove(id);
+        self.paused_from.lock().await.remove(id);
+        self.scheduler_notify.notify_waiters();
+    }
+
     async fn run_job(&self, context: JobRunContext) {
         let JobRunContext {
             app,
@@ -269,15 +510,12 @@ impl QueueManager {
             destination,
             prepared,
             cancellation,
+            scheduled_for,
         } = context;
-        let permit = tokio::select! {
-            permit = self.semaphore.clone().acquire_owned() => permit.ok(),
-            _ = cancellation.cancelled() => None,
-        };
-        let Some(_permit) = permit else {
+        if !self.wait_for_turn(&id, &cancellation, scheduled_for).await {
             self.transition_cancelled(&app, &id).await;
             return;
-        };
+        }
         if cancellation.is_cancelled() {
             self.transition_cancelled(&app, &id).await;
             return;
@@ -321,6 +559,9 @@ impl QueueManager {
                 return;
             }
         };
+        if let Some(pid) = child.id() {
+            self.process_ids.lock().await.insert(id.clone(), pid);
+        }
 
         let (line_tx, mut line_rx) = mpsc::channel::<EngineLine>(256);
         if let Some(stdout) = child.stdout.take() {
@@ -403,6 +644,7 @@ impl QueueManager {
             let error = download_failure_message(prepared.kind, prepared.engine_name, &diagnostics);
             self.transition_failed(&app, &id, error).await;
         }
+        self.process_ids.lock().await.remove(&id);
     }
 
     async fn process_line(
@@ -686,6 +928,7 @@ struct JobRunContext {
     destination: std::path::PathBuf,
     prepared: PreparedDownload,
     cancellation: CancellationToken,
+    scheduled_for: Option<chrono::DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -888,6 +1131,89 @@ fn is_terminal_state(state: DownloadState) -> bool {
     )
 }
 
+fn request_estimated_bytes(request: &StartDownloadRequest) -> Option<u64> {
+    request
+        .options
+        .gallery_selection
+        .as_ref()
+        .and_then(|items| {
+            items
+                .iter()
+                .try_fold(0_u64, |total, item| total.checked_add(item.size_bytes?))
+        })
+        .or(request.analysis.total_size_bytes)
+        .or_else(|| {
+            request
+                .analysis
+                .formats
+                .iter()
+                .filter_map(|format| format.approximate_file_size)
+                .max()
+        })
+}
+
+pub fn disk_space(
+    destination: &std::path::Path,
+    required: Option<u64>,
+) -> Result<DiskSpaceInfo, AppError> {
+    let available = fs2::available_space(destination)
+        .map_err(|error| AppError::internal("could not read destination free space", error))?;
+    let required_with_margin = required.map(|bytes| {
+        bytes
+            .saturating_add(bytes / 10)
+            .saturating_add(256 * 1024 * 1024)
+    });
+    Ok(DiskSpaceInfo {
+        available_bytes: available,
+        required_bytes: required_with_margin,
+        sufficient: required_with_margin.is_none_or(|bytes| available >= bytes),
+    })
+}
+
+fn preflight_disk_space(
+    destination: &std::path::Path,
+    required: Option<u64>,
+) -> Result<(), AppError> {
+    let info = disk_space(destination, required)?;
+    if !info.sufficient {
+        return Err(AppError::new(
+            "insufficient_disk_space",
+            "The destination does not have enough free space for this download and its temporary files.",
+        ));
+    }
+    Ok(())
+}
+
+fn signal_process_group(pid: Option<u32>, pause: bool) -> Result<(), AppError> {
+    let pid = pid.ok_or_else(|| {
+        AppError::new(
+            "process_not_ready",
+            "The download process is still starting. Try again in a moment.",
+        )
+    })?;
+    #[cfg(unix)]
+    {
+        let raw = i32::try_from(pid)
+            .map_err(|_| AppError::new("invalid_process", "The engine process ID is invalid."))?;
+        let signal = if pause {
+            nix::sys::signal::Signal::SIGSTOP
+        } else {
+            nix::sys::signal::Signal::SIGCONT
+        };
+        nix::sys::signal::killpg(nix::unistd::Pid::from_raw(raw), signal)
+            .map_err(|error| AppError::internal("could not signal the download process", error))?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (pid, pause);
+        Err(AppError::new(
+            "pause_unsupported",
+            "Pausing active downloads is not supported on this platform yet.",
+        ))
+    }
+}
+
 async fn terminate_child(child: &mut Child) {
     #[cfg(unix)]
     {
@@ -1030,13 +1356,14 @@ mod tests {
                 output_conflict_policy: OutputConflictPolicy::Skip,
                 gallery_selection: None,
             },
+            scheduled_for: None,
         };
         let mut job = DownloadJob::from_request("recover-me".to_owned(), &request);
         job.state = DownloadState::Downloading;
         job.progress_percent = 61.0;
         database.save_job(&job, &request).expect("persist job");
 
-        let queue = QueueManager::new(database, 2).expect("recover queue");
+        let queue = QueueManager::new(database).expect("recover queue");
         let jobs = queue.list().await;
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].state, DownloadState::Queued);
