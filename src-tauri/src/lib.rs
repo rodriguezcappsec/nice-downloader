@@ -1,3 +1,4 @@
+mod authentication;
 mod commands;
 mod database;
 mod engines;
@@ -107,6 +108,10 @@ pub fn run() {
             commands::reconcile_library,
             commands::export_library,
             commands::restore_library,
+            commands::list_authentication_profiles,
+            commands::save_authentication_profile,
+            commands::delete_authentication_profile,
+            commands::discover_browser_profiles,
         ])
         .run(tauri::generate_context!());
     if let Err(error) = result {

@@ -83,6 +83,8 @@ pub struct EnginePreferences {
     pub enable_impersonation: bool,
     #[serde(default)]
     pub bandwidth_limit_kib: Option<u64>,
+    #[serde(default, skip_serializing)]
+    pub managed_cookie_file: Option<String>,
 }
 
 impl Default for EnginePreferences {
@@ -93,6 +95,7 @@ impl Default for EnginePreferences {
             proxy_url: None,
             enable_impersonation: true,
             bandwidth_limit_kib: None,
+            managed_cookie_file: None,
         }
     }
 }
@@ -593,6 +596,45 @@ pub struct UpdateLibraryItemRequest {
 pub struct LibraryScanResult {
     pub checked_count: usize,
     pub missing_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthenticationProfile {
+    pub id: String,
+    pub name: String,
+    pub host_suffix: String,
+    pub browser_cookie_source: BrowserCookieSource,
+    pub browser_profile: Option<String>,
+    pub proxy_url: Option<String>,
+    pub cookie_file_configured: bool,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    #[serde(skip_serializing)]
+    pub managed_cookie_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveAuthenticationProfileRequest {
+    pub id: Option<String>,
+    pub name: String,
+    pub host_suffix: String,
+    pub browser_cookie_source: BrowserCookieSource,
+    pub browser_profile: Option<String>,
+    pub proxy_url: Option<String>,
+    pub cookie_file_path: Option<String>,
+    pub clear_cookie_file: bool,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserProfileInfo {
+    pub browser: BrowserCookieSource,
+    pub name: String,
+    pub path: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

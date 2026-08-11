@@ -1,4 +1,5 @@
 use crate::{
+    authentication,
     database::Database,
     engines::{router, ytdlp::YtDlpEngine},
     errors::AppError,
@@ -83,7 +84,8 @@ async fn check_inner(
                 "The subscription preset no longer exists.",
             )
         })?;
-    let preferences = database.load_engine_preferences()?;
+    let mut preferences = database.load_engine_preferences()?;
+    authentication::apply_profile(database, &subscription.url, &mut preferences)?;
     let engine = YtDlpEngine::discover()?;
     let (_, urls) = engine
         .expand_playlist(&subscription.url, &preferences)
@@ -97,7 +99,9 @@ async fn check_inner(
     let mut skipped_count = 0;
 
     for url in urls {
-        let analysis = match router::analyze(&url, &preferences).await {
+        let mut entry_preferences = database.load_engine_preferences()?;
+        authentication::apply_profile(database, &url, &mut entry_preferences)?;
+        let analysis = match router::analyze(&url, &entry_preferences).await {
             Ok(value) => value,
             Err(error) => {
                 tracing::warn!(subscription_id = %subscription.id, %error, "subscription entry analysis failed");
@@ -120,10 +124,7 @@ async fn check_inner(
             analysis,
             scheduled_for: None,
         };
-        match queue
-            .enqueue(app.clone(), request, preferences.clone())
-            .await
-        {
+        match queue.enqueue(app.clone(), request, entry_preferences).await {
             Ok(_) => queued_count += 1,
             Err(error) if error.code == "duplicate_download" => skipped_count += 1,
             Err(error) => return Err(error),

@@ -27,6 +27,9 @@ import type {
   LibraryItem,
   LibraryScanResult,
   UpdateLibraryItemRequest,
+  AuthenticationProfile,
+  SaveAuthenticationProfileRequest,
+  BrowserProfileInfo,
   StartDownloadRequest,
 } from "../types";
 
@@ -102,6 +105,10 @@ export const api = {
   reconcileLibrary: () => invoke<LibraryScanResult>("reconcile_library"),
   exportLibrary: (path: string) => invoke<void>("export_library", { path }),
   restoreLibrary: (path: string) => invoke<LibraryItem[]>("restore_library", { path }),
+  listAuthenticationProfiles: () => invoke<AuthenticationProfile[]>("list_authentication_profiles"),
+  saveAuthenticationProfile: (request: SaveAuthenticationProfileRequest) => invoke<AuthenticationProfile>("save_authentication_profile", { request }),
+  deleteAuthenticationProfile: (id: string) => invoke<void>("delete_authentication_profile", { id }),
+  discoverBrowserProfiles: () => invoke<BrowserProfileInfo[]>("discover_browser_profiles"),
   openDownloadOutput: (jobId: string, reveal: boolean) =>
     invoke<void>("open_download_output", { jobId, reveal }),
   exportDiagnostics: (path: string) => invoke<void>("export_diagnostics", { path }),
