@@ -56,8 +56,13 @@ pub fn run() {
     let result = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            install_tray(app)
-                .map_err(|error| format!("could not initialize the system tray: {error}"))?;
+            let tray_available = match install_tray(app) {
+                Ok(()) => true,
+                Err(error) => {
+                    tracing::warn!(%error, "system tray is unavailable; continuing with the main window");
+                    false
+                }
+            };
             let data_directory = app.path().app_data_dir().map_err(|error| {
                 format!("could not resolve the application data directory: {error}")
             })?;
@@ -66,7 +71,7 @@ pub fn run() {
             })?;
             managed::initialize(&data_directory)?;
             let database = Database::open(&data_directory.join("nice-downloader.sqlite3"))?;
-            if database.load_desktop_preferences()?.start_minimized {
+            if tray_available && database.load_desktop_preferences()?.start_minimized {
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.hide();
                 }
