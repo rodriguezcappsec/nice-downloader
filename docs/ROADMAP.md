@@ -36,16 +36,15 @@ Delivered:
 - Analyze up to 20 URLs with bounded concurrency and bulk enqueue selected results.
 - Expand playlists through structured yt-dlp flat-playlist JSON before batch analysis.
 
-Still planned:
-
-- Automatic retry with bounded exponential backoff.
-
 Additional reliability delivered:
 
 - Authoritative queue reordering, persisted dynamic concurrency, whole-queue pause, per-job pause/resume, and scheduled starts.
 - Disk-space estimation and backend preflight with temporary-file margin.
 - Narrow file open/reveal actions and configurable Linux completion notifications.
 - Sanitized diagnostic export for support.
+- Classified automatic recovery for rate limits, 5xx responses, timeouts, resets, and incomplete reads, capped at three total attempts.
+- ffprobe output verification with verified/warning status in History.
+- Global bandwidth limiting, safe duplicate prevention, and searchable History with record-only deletion.
 
 ## Milestone 3: richer media intent
 
@@ -54,6 +53,8 @@ Additional reliability delivered:
 - Subtitle, metadata, thumbnail, chapters, and playlist controls.
 - Reusable SQLite-backed presets with New Download integration.
 - ffprobe-based inspection of completed output.
+
+Delivered foundations include Recommended/Compatibility/Quality/Smallest selection strategies, subtitle language patterns, chapter embedding, codec/audio controls, and completed-output inspection.
 
 ## Milestone 4: additional engines
 
@@ -76,6 +77,8 @@ Delivered:
 - Managed yt-dlp/gallery-dl storage with vendor SHA-256 verification, version probing, pinning, and rollback.
 - Linux packaging and desktop integration.
 - Windows and macOS platform adapters and packaging.
+
+Linux `.deb` and AppImage bundle targets plus first-run required-engine guidance are configured. Flatpak and cross-platform packages remain distribution work.
 
 ## Deferred by design
 

@@ -77,6 +77,15 @@ pub fn normalize_engine_preferences(preferences: &mut EnginePreferences) {
 }
 
 pub fn validate_engine_preferences(preferences: &EnginePreferences) -> Result<(), AppError> {
+    if preferences
+        .bandwidth_limit_kib
+        .is_some_and(|limit| !(64..=10_000_000).contains(&limit))
+    {
+        return Err(AppError::new(
+            "invalid_bandwidth_limit",
+            "The bandwidth limit must be between 64 KiB/s and 10,000,000 KiB/s.",
+        ));
+    }
     if let Some(profile) = &preferences.browser_profile {
         if preferences.browser_cookie_source.yt_dlp_name().is_none()
             || profile.len() > 80
@@ -153,6 +162,7 @@ mod tests {
             browser_profile: Some("work.default-release".to_owned()),
             proxy_url: Some("socks5://127.0.0.1:1080".to_owned()),
             enable_impersonation: true,
+            bandwidth_limit_kib: None,
         };
         assert!(validate_engine_preferences(&preferences).is_ok());
         assert!(validate_engine_preferences(&EnginePreferences {

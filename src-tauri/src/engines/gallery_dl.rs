@@ -546,6 +546,9 @@ fn access_args(preferences: &EnginePreferences) -> Vec<String> {
     if let Some(proxy) = &preferences.proxy_url {
         args.extend(["--proxy".to_owned(), proxy.clone()]);
     }
+    if let Some(limit) = preferences.bandwidth_limit_kib {
+        args.extend(["--limit-rate".to_owned(), format!("{limit}K")]);
+    }
     args
 }
 
@@ -643,6 +646,7 @@ mod tests {
                 },
                 container: OutputContainer::Mp4,
                 video_codec_preference: VideoCodecPreference::Any,
+                format_strategy: crate::models::FormatStrategy::Recommended,
                 audio_quality: AudioQuality::Best,
                 audio_only: false,
                 subtitles: false,
@@ -752,6 +756,7 @@ mod tests {
                 quality: analysis.quality_options[0].clone(),
                 container: OutputContainer::Mp4,
                 video_codec_preference: VideoCodecPreference::Any,
+                format_strategy: crate::models::FormatStrategy::Recommended,
                 audio_quality: AudioQuality::Best,
                 audio_only: false,
                 subtitles: false,

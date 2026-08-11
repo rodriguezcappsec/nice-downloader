@@ -61,7 +61,9 @@ Queued -> Analyzing -> Preparing -> Downloading
                                   -> Completed | Failed | Cancelled
 ```
 
-Milestone 1 analyzes before enqueueing in the UI, but the queue retains the `Analyzing` state for future jobs created from less interactive entry points. A scheduler owns pending order and active slots. On Linux, active process groups pause/resume through `SIGSTOP`/`SIGCONT`; cancellation terminates and reaps the group. Enqueued requests and state transitions are persisted. Jobs interrupted by shutdown are reconciled to `Queued`; failed and cancelled jobs retain typed intent for explicit retry.
+Milestone 1 analyzes before enqueueing in the UI, but the queue retains the `Analyzing` state for future jobs created from less interactive entry points. A scheduler owns pending order and active slots. On Linux, active process groups pause/resume through `SIGSTOP`/`SIGCONT`; cancellation terminates and reaps the group. Enqueued requests and state transitions are persisted. Jobs interrupted by shutdown are reconciled to `Queued`; failed and cancelled jobs retain typed intent for explicit retry. HTTP 429/5xx, connection reset, timeout, and incomplete-read failures receive at most two automatic follow-up attempts with bounded delay. Authentication, unsupported URL, and other permanent failures never retry automatically.
+
+After an engine exits successfully, media files enter `Verifying`. A bounded ffprobe JSON probe must find at least one audio/video stream to mark the output verified. Missing ffprobe, non-media gallery outputs, and verification warnings remain visible in History rather than causing a downloaded file to be removed.
 
 ## Analysis and format selection
 
@@ -92,6 +94,7 @@ Presets store reusable intent fields, not engine flags. Queue concurrency, queue
 - Optional browser profile names reject path separators, and proxy configuration accepts only credential-free HTTP(S)/SOCKS URLs.
 - Destination folders receive a create/remove write probe before enqueue. Existing-output behavior is explicit skip or overwrite intent mapped to fixed yt-dlp arguments.
 - Known output sizes receive a free-space preflight with a 10 percent and 256 MiB temporary-file margin.
+- A completed URL/destination pair is rejected under the `Skip` policy to prevent accidental duplicate downloads; choosing `Overwrite` is the explicit override.
 - Browser impersonation is applied only when yt-dlp reports a compatible runtime target. Settings distinguishes executable availability from optional capability readiness.
 - Production paths return typed errors rather than panicking.
 - Structured tracing records engine lifecycle without logging secrets.

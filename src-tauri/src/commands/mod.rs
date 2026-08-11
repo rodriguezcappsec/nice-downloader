@@ -319,6 +319,11 @@ pub fn list_history(database: State<'_, Database>) -> Result<Vec<DownloadJob>, A
 }
 
 #[tauri::command]
+pub fn delete_history_entry(database: State<'_, Database>, id: String) -> Result<(), AppError> {
+    database.delete_history_entry(&id)
+}
+
+#[tauri::command]
 pub fn list_presets(database: State<'_, Database>) -> Result<Vec<Preset>, AppError> {
     database.list_presets()
 }

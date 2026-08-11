@@ -63,6 +63,7 @@ export interface EnginePreferences {
   browserProfile?: string | null;
   proxyUrl?: string | null;
   enableImpersonation: boolean;
+  bandwidthLimitKib?: number | null;
 }
 
 export interface MediaFormat {
@@ -145,6 +146,7 @@ export interface DownloadOptions {
   quality: QualityOption;
   container: "mp4" | "mkv" | "webm" | "mp3" | "m4a" | "opus";
   videoCodecPreference: "any" | "h264" | "av1" | "vp9";
+  formatStrategy: "recommended" | "compatibility" | "quality" | "smallest";
   audioQuality: "best" | "320k" | "256k" | "192k" | "128k";
   audioOnly: boolean;
   subtitles: boolean;
@@ -167,6 +169,7 @@ export type DownloadState =
   | "Downloading"
   | "PostProcessing"
   | "Merging"
+  | "Verifying"
   | "Completed"
   | "Failed"
   | "Cancelled";
@@ -207,6 +210,7 @@ export interface QueueSettings {
   concurrentDownloads: number;
   paused: boolean;
   notifyOnCompletion: boolean;
+  completionAction: "none" | "openFolder";
 }
 
 export interface QueueSnapshot {

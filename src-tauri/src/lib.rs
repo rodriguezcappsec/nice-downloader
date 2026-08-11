@@ -70,6 +70,7 @@ pub fn run() {
             commands::resume_download,
             commands::check_disk_space,
             commands::list_history,
+            commands::delete_history_entry,
             commands::list_presets,
             commands::save_preset,
             commands::delete_preset,

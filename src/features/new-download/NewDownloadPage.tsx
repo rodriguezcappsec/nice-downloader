@@ -32,6 +32,8 @@ export function NewDownloadPage() {
   const defaultDestination = useAppStore((state) => state.defaultDestination);
   const startDownload = useAppStore((state) => state.startDownload);
   const startDownloads = useAppStore((state) => state.startDownloads);
+  const engines = useAppStore((state) => state.engines);
+  const setView = useAppStore((state) => state.setView);
   const [url, setUrl] = useState("");
   const [qualityId, setQualityId] = useState("best");
   const [container, setContainer] = useState<DownloadOptions["container"]>("mp4");
@@ -50,6 +52,10 @@ export function NewDownloadPage() {
   const [presetId, setPresetId] = useState("");
   const [videoCodecPreference, setVideoCodecPreference] = useState<DownloadOptions["videoCodecPreference"]>("any");
   const [audioQuality, setAudioQuality] = useState<DownloadOptions["audioQuality"]>("best");
+  const [formatStrategy, setFormatStrategy] = useState<DownloadOptions["formatStrategy"]>("recommended");
+  const [subtitles, setSubtitles] = useState(false);
+  const [subtitleLanguages, setSubtitleLanguages] = useState("en.*,en");
+  const [chapters, setChapters] = useState(false);
 
   useEffect(() => {
     void api.listPresets().then(setPresets).catch(() => setPresets([]));
@@ -170,13 +176,14 @@ export function NewDownloadPage() {
       quality: selectedQuality,
       container,
       videoCodecPreference,
+      formatStrategy,
       audioQuality,
       audioOnly,
-      subtitles: false,
-      subtitleLanguages: [],
+      subtitles,
+      subtitleLanguages: subtitles ? subtitleLanguages.split(",").map((value) => value.trim()).filter(Boolean) : [],
       embedThumbnail,
       embedMetadata,
-      chapters: false,
+      chapters,
       sponsorblock: false,
       destination,
       filenameTemplate: "%(title).180B [%(id)s].%(ext)s",
@@ -219,6 +226,13 @@ export function NewDownloadPage() {
         <h1 className="text-xl font-semibold tracking-tight">New Download</h1>
         <p className="mt-1 text-sm text-muted">Paste a media or gallery URL to inspect it before downloading.</p>
       </header>
+
+      {engines.some((engine) => engine.required && !engine.installed) ? (
+        <section className="mb-5 flex items-center justify-between border border-amber-500/30 bg-amber-500/5 p-4 text-sm">
+          <div><h2 className="font-semibold text-amber-300">Required engines need attention</h2><p className="mt-1 text-xs text-muted">Install or activate yt-dlp and FFmpeg before starting media downloads.</p></div>
+          <Button variant="secondary" onClick={() => setView("settings")}>Open engine settings</Button>
+        </section>
+      ) : null}
 
       <section className="border border-line bg-panel p-5 shadow-panel">
         <label className="mb-2 block text-sm font-medium" htmlFor="media-url">
@@ -438,6 +452,11 @@ export function NewDownloadPage() {
                         <option value="any">Automatic</option><option value="h264">H.264 compatibility</option><option value="av1">AV1</option><option value="vp9">VP9</option>
                       </Select>
                     </Field>
+                    <Field label="Selection strategy">
+                      <Select value={formatStrategy} onChange={(event) => setFormatStrategy(event.target.value as DownloadOptions["formatStrategy"])}>
+                        <option value="recommended">Recommended</option><option value="compatibility">Best compatibility</option><option value="quality">Best quality</option><option value="smallest">Smallest file</option>
+                      </Select>
+                    </Field>
                     {audioOnly ? <Field label="Audio quality">
                       <Select value={audioQuality} onChange={(event) => setAudioQuality(event.target.value as DownloadOptions["audioQuality"])}>
                         {(["best", "320k", "256k", "192k", "128k"] as const).map((value) => <option key={value} value={value}>{value === "best" ? "Best available" : value}</option>)}
@@ -447,6 +466,17 @@ export function NewDownloadPage() {
                       <input type="checkbox" checked={embedMetadata} onChange={(event) => setEmbedMetadata(event.target.checked)} />
                       Embed media metadata
                     </label>
+                    <label className="flex items-center gap-3">
+                      <input type="checkbox" checked={chapters} onChange={(event) => setChapters(event.target.checked)} />
+                      Embed chapters when available
+                    </label>
+                    <label className="flex items-center gap-3">
+                      <input type="checkbox" checked={subtitles} onChange={(event) => setSubtitles(event.target.checked)} />
+                      Download and embed subtitles
+                    </label>
+                    {subtitles ? <Field label="Subtitle languages" hint="Comma-separated yt-dlp language patterns, for example en.*,en">
+                      <Input value={subtitleLanguages} onChange={(event) => setSubtitleLanguages(event.target.value)} spellCheck={false} />
+                    </Field> : null}
                     <label className="flex items-center gap-3">
                       <input type="checkbox" checked={embedThumbnail} onChange={(event) => setEmbedThumbnail(event.target.checked)} />
                       Embed thumbnail
@@ -531,6 +561,7 @@ function defaultBatchOptions(
       quality: analysis.qualityOptions[0]!,
       container: "mp4",
       videoCodecPreference: "any",
+      formatStrategy: "recommended",
       audioQuality: "best",
       audioOnly: false,
       subtitles: false,
@@ -553,6 +584,7 @@ function defaultBatchOptions(
     quality,
     container: hasVideo ? "mp4" : "m4a",
     videoCodecPreference: "any",
+    formatStrategy: "recommended",
     audioQuality: "best",
     audioOnly: !hasVideo,
     subtitles: false,

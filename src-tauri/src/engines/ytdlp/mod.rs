@@ -5,8 +5,8 @@ use crate::{
     engines::DownloadEngine,
     errors::AppError,
     models::{
-        DownloadOptions, EnginePreferences, MediaAnalysis, OutputConflictPolicy, QualityKind,
-        VideoCodecPreference,
+        DownloadOptions, EnginePreferences, FormatStrategy, MediaAnalysis, OutputConflictPolicy,
+        QualityKind, VideoCodecPreference,
     },
     utils::validation::{validate_filename_template, validate_media_url},
 };
@@ -346,6 +346,20 @@ impl DownloadEngine for YtDlpEngine {
         if options.sponsorblock {
             args.extend(["--sponsorblock-remove".to_owned(), "all".to_owned()]);
         }
+        match options.format_strategy {
+            FormatStrategy::Recommended => {}
+            FormatStrategy::Compatibility => args.extend([
+                "--format-sort".to_owned(),
+                "vcodec:h264,acodec:aac,ext:mp4:m4a,res,fps".to_owned(),
+            ]),
+            FormatStrategy::Quality => args.extend([
+                "--format-sort".to_owned(),
+                "res,fps,hdr:12,vcodec,channels,acodec".to_owned(),
+            ]),
+            FormatStrategy::Smallest => {
+                args.extend(["--format-sort".to_owned(), "+size,+br,+res,+fps".to_owned()])
+            }
+        }
         args.extend(access_args(preferences, capabilities));
         args.push("--".to_owned());
         args.push(validated_url.as_str().to_owned());
@@ -436,6 +450,9 @@ fn access_args(
         if let Some(target) = &capabilities.preferred_impersonation_target {
             args.extend(["--impersonate".to_owned(), target.clone()]);
         }
+    }
+    if let Some(limit) = preferences.bandwidth_limit_kib {
+        args.extend(["--limit-rate".to_owned(), format!("{limit}K")]);
     }
     args
 }
@@ -559,6 +576,7 @@ mod tests {
                 OutputContainer::Mp4
             },
             video_codec_preference: VideoCodecPreference::Any,
+            format_strategy: crate::models::FormatStrategy::Recommended,
             audio_quality: AudioQuality::Best,
             audio_only,
             subtitles: false,
@@ -631,6 +649,7 @@ mod tests {
             browser_profile: Some("work".to_owned()),
             proxy_url: Some("socks5://127.0.0.1:1080".to_owned()),
             enable_impersonation: true,
+            bandwidth_limit_kib: None,
         };
         let capabilities = YtDlpRuntimeCapabilities {
             preferred_impersonation_target: Some("chrome-136:windows-10".to_owned()),
@@ -733,6 +752,7 @@ mod tests {
                     browser_profile: None,
                     proxy_url: None,
                     enable_impersonation: true,
+                    bandwidth_limit_kib: None,
                 },
             )
             .await
