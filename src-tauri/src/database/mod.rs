@@ -1,8 +1,9 @@
 use crate::{
     errors::AppError,
     models::{
-        DownloadArchiveMatch, DownloadJob, DownloadState, EnginePreferences, LibraryItem, Preset,
-        PresetIntent, QueueSettings, SavePresetRequest, SaveSitePresetRuleRequest,
+        AuthenticationProfile, BrowserCookieSource, DownloadArchiveMatch, DownloadJob,
+        DownloadState, EnginePreferences, LibraryItem, Preset, PresetIntent, QueueSettings,
+        SaveAuthenticationProfileRequest, SavePresetRequest, SaveSitePresetRuleRequest,
         SaveSubscriptionRequest, SitePresetRule, StartDownloadRequest, Subscription,
         TransformationOperation, TransformationState, TransformationTask, UpdateLibraryItemRequest,
     },
@@ -25,6 +26,7 @@ const MIGRATION_0003: &str = include_str!("migrations/0003_workflow_intelligence
 const MIGRATION_0004: &str = include_str!("migrations/0004_subscriptions.sql");
 const MIGRATION_0005: &str = include_str!("migrations/0005_transformations.sql");
 const MIGRATION_0006: &str = include_str!("migrations/0006_media_library.sql");
+const MIGRATION_0007: &str = include_str!("migrations/0007_authentication_profiles.sql");
 const ENGINE_PREFERENCES_KEY: &str = "engine.preferences";
 const QUEUE_SETTINGS_KEY: &str = "queue.settings";
 
@@ -62,6 +64,7 @@ impl Database {
             (4, MIGRATION_0004),
             (5, MIGRATION_0005),
             (6, MIGRATION_0006),
+            (7, MIGRATION_0007),
         ] {
             let migrated: bool = transaction.query_row(
                 "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = ?1)",
@@ -1011,6 +1014,185 @@ impl Database {
         )?;
         Ok(())
     }
+
+    pub fn list_authentication_profiles(&self) -> Result<Vec<AuthenticationProfile>, AppError> {
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "Authentication profiles are unavailable.",
+            )
+        })?;
+        let mut statement = connection.prepare(
+            "SELECT id, name, host_suffix, browser_cookie_source, browser_profile, proxy_url,
+                    managed_cookie_path, enabled, created_at, updated_at
+             FROM authentication_profiles ORDER BY name COLLATE NOCASE",
+        )?;
+        let rows = statement.query_map([], authentication_profile_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+    }
+
+    pub fn save_authentication_profile(
+        &self,
+        request: SaveAuthenticationProfileRequest,
+        managed_cookie_path: Option<String>,
+    ) -> Result<AuthenticationProfile, AppError> {
+        let id = match request.id {
+            Some(id) => Uuid::parse_str(&id)
+                .map_err(|_| {
+                    AppError::new(
+                        "invalid_auth_profile_id",
+                        "The authentication profile ID is invalid.",
+                    )
+                })?
+                .to_string(),
+            None => Uuid::new_v4().to_string(),
+        };
+        let now = Utc::now();
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "Authentication profiles are unavailable.",
+            )
+        })?;
+        connection.execute(
+            "INSERT INTO authentication_profiles
+                (id, name, host_suffix, browser_cookie_source, browser_profile, proxy_url,
+                 managed_cookie_path, enabled, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)
+             ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name, host_suffix = excluded.host_suffix,
+                browser_cookie_source = excluded.browser_cookie_source,
+                browser_profile = excluded.browser_profile, proxy_url = excluded.proxy_url,
+                managed_cookie_path = excluded.managed_cookie_path, enabled = excluded.enabled,
+                updated_at = excluded.updated_at",
+            params![
+                id,
+                request.name,
+                request.host_suffix,
+                browser_source_name(request.browser_cookie_source),
+                request.browser_profile,
+                request.proxy_url,
+                managed_cookie_path,
+                request.enabled,
+                now.timestamp_millis()
+            ],
+        )?;
+        connection
+            .query_row(
+                "SELECT id, name, host_suffix, browser_cookie_source, browser_profile, proxy_url,
+                    managed_cookie_path, enabled, created_at, updated_at
+             FROM authentication_profiles WHERE id = ?1",
+                [&id],
+                authentication_profile_from_row,
+            )
+            .map_err(AppError::from)
+    }
+
+    pub fn authentication_profile(
+        &self,
+        id: &str,
+    ) -> Result<Option<AuthenticationProfile>, AppError> {
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "Authentication profiles are unavailable.",
+            )
+        })?;
+        connection
+            .query_row(
+                "SELECT id, name, host_suffix, browser_cookie_source, browser_profile, proxy_url,
+                    managed_cookie_path, enabled, created_at, updated_at
+             FROM authentication_profiles WHERE id = ?1",
+                [id],
+                authentication_profile_from_row,
+            )
+            .optional()
+            .map_err(AppError::from)
+    }
+
+    pub fn match_authentication_profile(
+        &self,
+        url: &str,
+    ) -> Result<Option<AuthenticationProfile>, AppError> {
+        let host = url::Url::parse(url)
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_owned));
+        let Some(host) = host else {
+            return Ok(None);
+        };
+        Ok(self
+            .list_authentication_profiles()?
+            .into_iter()
+            .filter(|profile| {
+                profile.enabled
+                    && (host == profile.host_suffix
+                        || host.ends_with(&format!(".{}", profile.host_suffix)))
+            })
+            .max_by_key(|profile| profile.host_suffix.len()))
+    }
+
+    pub fn delete_authentication_profile(&self, id: &str) -> Result<Option<String>, AppError> {
+        let profile = self.authentication_profile(id)?.ok_or_else(|| {
+            AppError::new(
+                "auth_profile_not_found",
+                "The authentication profile was not found.",
+            )
+        })?;
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "Authentication profiles are unavailable.",
+            )
+        })?;
+        connection.execute("DELETE FROM authentication_profiles WHERE id = ?1", [id])?;
+        Ok(profile.managed_cookie_path)
+    }
+}
+
+fn authentication_profile_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<AuthenticationProfile> {
+    let source: String = row.get(3)?;
+    let managed_cookie_path: Option<String> = row.get(6)?;
+    Ok(AuthenticationProfile {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        host_suffix: row.get(2)?,
+        browser_cookie_source: browser_source_from_name(&source),
+        browser_profile: row.get(4)?,
+        proxy_url: row.get(5)?,
+        cookie_file_configured: managed_cookie_path.is_some(),
+        managed_cookie_path,
+        enabled: row.get(7)?,
+        created_at: timestamp_or_epoch(row.get(8)?),
+        updated_at: timestamp_or_epoch(row.get(9)?),
+    })
+}
+
+fn browser_source_name(source: BrowserCookieSource) -> &'static str {
+    match source {
+        BrowserCookieSource::None => "none",
+        BrowserCookieSource::Firefox => "firefox",
+        BrowserCookieSource::Chromium => "chromium",
+        BrowserCookieSource::Chrome => "chrome",
+        BrowserCookieSource::Brave => "brave",
+        BrowserCookieSource::Vivaldi => "vivaldi",
+        BrowserCookieSource::Edge => "edge",
+        BrowserCookieSource::Opera => "opera",
+    }
+}
+
+fn browser_source_from_name(source: &str) -> BrowserCookieSource {
+    match source {
+        "firefox" => BrowserCookieSource::Firefox,
+        "chromium" => BrowserCookieSource::Chromium,
+        "chrome" => BrowserCookieSource::Chrome,
+        "brave" => BrowserCookieSource::Brave,
+        "vivaldi" => BrowserCookieSource::Vivaldi,
+        "edge" => BrowserCookieSource::Edge,
+        "opera" => BrowserCookieSource::Opera,
+        _ => BrowserCookieSource::None,
+    }
 }
 
 fn library_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LibraryItem> {
@@ -1365,6 +1547,7 @@ mod tests {
             proxy_url: Some("http://127.0.0.1:8080".to_owned()),
             enable_impersonation: false,
             bandwidth_limit_kib: Some(2048),
+            managed_cookie_file: None,
         };
         database
             .save_engine_preferences(&preferences)

@@ -167,6 +167,7 @@ mod tests {
             proxy_url: Some("socks5://127.0.0.1:1080".to_owned()),
             enable_impersonation: true,
             bandwidth_limit_kib: None,
+            managed_cookie_file: None,
         };
         assert!(validate_engine_preferences(&preferences).is_ok());
         assert!(validate_engine_preferences(&EnginePreferences {

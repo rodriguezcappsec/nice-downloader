@@ -535,7 +535,9 @@ fn clean_title(value: &str) -> String {
 
 fn access_args(preferences: &EnginePreferences) -> Vec<String> {
     let mut args = Vec::new();
-    if let Some(browser) = preferences.browser_cookie_source.yt_dlp_name() {
+    if let Some(cookie_file) = &preferences.managed_cookie_file {
+        args.extend(["--cookies".to_owned(), cookie_file.clone()]);
+    } else if let Some(browser) = preferences.browser_cookie_source.yt_dlp_name() {
         let browser = preferences
             .browser_profile
             .as_deref()

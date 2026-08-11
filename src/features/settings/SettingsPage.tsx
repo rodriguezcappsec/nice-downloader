@@ -13,7 +13,7 @@ import {
   Trash2,
   Wrench,
 } from "lucide-react";
-import { save as saveDialog } from "@tauri-apps/plugin-dialog";
+import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { useEffect, useState } from "react";
 import { Page } from "../../components/Page";
 import { Button, Field, Input, Select } from "../../components/ui";
@@ -21,6 +21,8 @@ import { useAppStore } from "../../stores/app-store";
 import { api, normalizeError } from "../../lib/tauri";
 import type {
   BrowserCookieSource,
+  AuthenticationProfile,
+  BrowserProfileInfo,
   EngineId,
   EngineUpdateCandidate,
   ManagedEngineStatus,
@@ -68,7 +70,7 @@ export function SettingsPage() {
   const [managed, setManaged] = useState<ManagedEngineStatus[]>([]);
   const [candidate, setCandidate] = useState<EngineUpdateCandidate | null>(null);
   const [managing, setManaging] = useState<EngineId | null>(null);
-  const [settingsTab, setSettingsTab] = useState<"access" | "engines">("access");
+  const [settingsTab, setSettingsTab] = useState<"access" | "profiles" | "engines">("access");
 
   useEffect(() => {
     void api.listManagedEngines().then(setManaged).catch((error) => setError(normalizeError(error)));
@@ -149,7 +151,7 @@ export function SettingsPage() {
       }
     >
       <div className="mb-7 inline-flex gap-1 rounded-[10px] border border-line/60 bg-panel/55 p-1 shadow-control" role="tablist" aria-label="Settings sections">
-        {([ ["access", "Network & cookies"], ["engines", "Engines & diagnostics"] ] as const).map(([id, label]) => <button key={id} role="tab" aria-selected={settingsTab === id} onClick={() => setSettingsTab(id)} className={`rounded-[7px] px-4 py-2 text-[13px] font-semibold transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 ${settingsTab === id ? "bg-elevated text-ink shadow-control" : "text-muted hover:text-ink"}`}>{label}</button>)}
+        {([ ["access", "Network & cookies"], ["profiles", "Site profiles"], ["engines", "Engines & diagnostics"] ] as const).map(([id, label]) => <button key={id} role="tab" aria-selected={settingsTab === id} onClick={() => setSettingsTab(id)} className={`rounded-[7px] px-4 py-2 text-[13px] font-semibold transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 ${settingsTab === id ? "bg-elevated text-ink shadow-control" : "text-muted hover:text-ink"}`}>{label}</button>)}
       </div>
       {settingsTab === "access" ? (
       <section className="mb-8">
@@ -284,6 +286,8 @@ export function SettingsPage() {
       </section>
       ) : null}
 
+      {settingsTab === "profiles" ? <AuthenticationProfiles /> : null}
+
       {settingsTab === "engines" ? <>
       <section className="mb-8">
         <div className="mb-3 flex items-center gap-2">
@@ -385,6 +389,84 @@ export function SettingsPage() {
       </> : null}
     </Page>
   );
+}
+
+function AuthenticationProfiles() {
+  const setError = useAppStore((state) => state.setError);
+  const setNotice = useAppStore((state) => state.setNotice);
+  const [profiles, setProfiles] = useState<AuthenticationProfile[]>([]);
+  const [browserProfiles, setBrowserProfiles] = useState<BrowserProfileInfo[]>([]);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [name, setName] = useState("");
+  const [hostSuffix, setHostSuffix] = useState("");
+  const [browser, setBrowser] = useState<BrowserCookieSource>("none");
+  const [browserProfile, setBrowserProfile] = useState("");
+  const [proxyUrl, setProxyUrl] = useState("");
+  const [cookieFilePath, setCookieFilePath] = useState("");
+  const [cookieConfigured, setCookieConfigured] = useState(false);
+  const [clearCookieFile, setClearCookieFile] = useState(false);
+  const [enabled, setEnabled] = useState(true);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    void Promise.all([api.listAuthenticationProfiles(), api.discoverBrowserProfiles()])
+      .then(([savedProfiles, discovered]) => { setProfiles(savedProfiles); setBrowserProfiles(discovered); })
+      .catch((error) => setError(normalizeError(error)));
+  }, [setError]);
+
+  function reset() {
+    setEditingId(null); setName(""); setHostSuffix(""); setBrowser("none"); setBrowserProfile("");
+    setProxyUrl(""); setCookieFilePath(""); setCookieConfigured(false); setClearCookieFile(false); setEnabled(true);
+  }
+
+  function edit(profile: AuthenticationProfile) {
+    setEditingId(profile.id); setName(profile.name); setHostSuffix(profile.hostSuffix);
+    setBrowser(profile.browserCookieSource); setBrowserProfile(profile.browserProfile || "");
+    setProxyUrl(profile.proxyUrl || ""); setCookieConfigured(profile.cookieFileConfigured);
+    setCookieFilePath(""); setClearCookieFile(false); setEnabled(profile.enabled);
+  }
+
+  async function pickCookieFile() {
+    const path = await openDialog({ multiple: false, directory: false, title: "Import Netscape cookies.txt", filters: [{ name: "Cookie text files", extensions: ["txt"] }] });
+    if (path) { setCookieFilePath(path); setClearCookieFile(false); }
+  }
+
+  async function saveProfile() {
+    setSaving(true);
+    try {
+      const saved = await api.saveAuthenticationProfile({ id: editingId, name, hostSuffix, browserCookieSource: browser, browserProfile: browserProfile || null, proxyUrl: proxyUrl || null, cookieFilePath: cookieFilePath || null, clearCookieFile, enabled });
+      setProfiles((current) => [...current.filter((item) => item.id !== saved.id), saved].sort((a, b) => a.name.localeCompare(b.name)));
+      reset(); setNotice({ message: "Site authentication profile saved.", view: "settings" });
+    } catch (error) { setError(normalizeError(error)); } finally { setSaving(false); }
+  }
+
+  async function remove(profile: AuthenticationProfile) {
+    try { await api.deleteAuthenticationProfile(profile.id); setProfiles((current) => current.filter((item) => item.id !== profile.id)); if (editingId === profile.id) reset(); }
+    catch (error) { setError(normalizeError(error)); }
+  }
+
+  const matchingBrowserProfiles = browserProfiles.filter((profile) => profile.browser === browser);
+  return <section className="mb-8">
+    <div className="mb-3 flex items-center gap-2"><Cookie size={17} className="text-muted" /><h2 className="text-sm font-semibold">Per-site authentication</h2></div>
+    <div className="grid gap-5 xl:grid-cols-[minmax(360px,.8fr)_minmax(440px,1.2fr)]">
+      <div className="panel-shadow border border-line/60 bg-panel/75 p-5">
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-1 2xl:grid-cols-2">
+          <Field label="Profile name"><Input value={name} onChange={(event) => setName(event.target.value)} placeholder="Reddit account" /></Field>
+          <Field label="Site hostname" hint="Matches the hostname and its subdomains."><Input value={hostSuffix} onChange={(event) => setHostSuffix(event.target.value)} placeholder="reddit.com" spellCheck={false} /></Field>
+          <Field label="Browser cookies"><Select value={browser} onChange={(event) => { setBrowser(event.target.value as BrowserCookieSource); setBrowserProfile(""); }}>{browserOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</Select></Field>
+          <Field label="Discovered browser profile"><Select disabled={browser === "none"} value={browserProfile} onChange={(event) => setBrowserProfile(event.target.value)}><option value="">Automatic/default</option>{matchingBrowserProfiles.map((profile) => <option key={profile.path} value={profile.name}>{profile.name}</option>)}</Select></Field>
+          <Field label="Profile proxy"><Input value={proxyUrl} onChange={(event) => setProxyUrl(event.target.value)} placeholder="Optional SOCKS or HTTP proxy" spellCheck={false} /></Field>
+          <Field label="Managed cookies.txt" hint="Copied into private app storage with owner-only permissions on Linux."><div className="flex gap-2"><Input readOnly value={cookieFilePath || (cookieConfigured && !clearCookieFile ? "Stored securely" : "")} placeholder="No managed cookie file" /><Button variant="secondary" className="px-3" onClick={() => void pickCookieFile()}>Choose</Button></div>{cookieConfigured ? <label className="mt-2 flex items-center gap-2 text-xs text-muted"><input type="checkbox" checked={clearCookieFile} onChange={(event) => setClearCookieFile(event.target.checked)} /> Remove stored cookie file</label> : null}</Field>
+        </div>
+        <div className="mt-4 flex items-center justify-between border-t border-line/60 pt-4"><label className="flex items-center gap-2 text-xs text-muted"><input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} /> Enabled</label><div className="flex gap-2">{editingId ? <Button variant="secondary" onClick={reset}>Cancel</Button> : null}<Button disabled={saving || !name.trim() || !hostSuffix.trim()} onClick={() => void saveProfile()}><Save size={15} />{saving ? "Saving" : editingId ? "Update profile" : "Add profile"}</Button></div></div>
+      </div>
+      <div className="panel-shadow divide-y divide-line/60 overflow-hidden border border-line/60 bg-panel/70">
+        {profiles.map((profile) => <article key={profile.id} className="flex items-center gap-4 p-4"><div className={`size-2 shrink-0 rounded-full ${profile.enabled ? "bg-emerald-400" : "bg-muted"}`} /><div className="min-w-0 flex-1"><div className="flex items-center gap-2"><h3 className="truncate text-sm font-semibold">{profile.name}</h3>{profile.cookieFileConfigured ? <span className="bg-accent/10 px-1.5 py-0.5 text-[9px] font-semibold text-accent">COOKIE FILE</span> : null}</div><p className="mt-1 truncate text-xs text-muted">*.{profile.hostSuffix} · {profile.browserCookieSource === "none" ? "no browser" : profile.browserCookieSource}{profile.browserProfile ? ` / ${profile.browserProfile}` : ""}{profile.proxyUrl ? " · proxy" : ""}</p></div><Button variant="secondary" className="h-8 px-2.5 text-xs" onClick={() => edit(profile)}>Edit</Button><Button variant="secondary" className="h-8 px-2.5 text-red-400" onClick={() => void remove(profile)}><Trash2 size={14} /></Button></article>)}
+        {profiles.length === 0 ? <div className="p-8 text-center text-sm text-muted">No per-site profiles. Global access settings will be used.</div> : null}
+      </div>
+    </div>
+    <p className="mt-3 text-xs leading-5 text-muted">The longest matching hostname wins. Cookie contents and managed paths never cross the Tauri boundary or enter diagnostic exports.</p>
+  </section>;
 }
 
 export function PresetsPage() {

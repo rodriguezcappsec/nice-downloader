@@ -1,4 +1,5 @@
 use crate::{
+    authentication,
     database::Database,
     engines::{
         discovery,
@@ -10,9 +11,10 @@ use crate::{
     errors::AppError,
     library,
     models::{
-        BatchAnalysisItem, BatchAnalysisResponse, DiskSpaceInfo, DownloadArchiveMatch, DownloadJob,
-        EngineId, EngineInfo, EnginePreferences, GalleryItemList, LibraryItem, LibraryScanResult,
-        MediaAnalysis, Preset, QueueSettings, QueueSnapshot, SavePresetRequest,
+        AuthenticationProfile, BatchAnalysisItem, BatchAnalysisResponse, BrowserProfileInfo,
+        DiskSpaceInfo, DownloadArchiveMatch, DownloadJob, EngineId, EngineInfo, EnginePreferences,
+        GalleryItemList, LibraryItem, LibraryScanResult, MediaAnalysis, Preset, QueueSettings,
+        QueueSnapshot, SaveAuthenticationProfileRequest, SavePresetRequest,
         SaveSitePresetRuleRequest, SaveSubscriptionRequest, SitePresetRule, StartDownloadRequest,
         StartTransformationRequest, Subscription, SubscriptionCheckResult, TransformationTask,
         UpdateLibraryItemRequest,
@@ -102,6 +104,38 @@ pub fn restore_library(
 }
 
 #[tauri::command]
+pub fn list_authentication_profiles(
+    database: State<'_, Database>,
+) -> Result<Vec<AuthenticationProfile>, AppError> {
+    database.list_authentication_profiles()
+}
+
+#[tauri::command]
+pub fn save_authentication_profile(
+    app: AppHandle,
+    database: State<'_, Database>,
+    request: SaveAuthenticationProfileRequest,
+) -> Result<AuthenticationProfile, AppError> {
+    let data_directory = app.path().app_data_dir().map_err(|error| {
+        AppError::internal("could not resolve secure application storage", error)
+    })?;
+    authentication::save_profile(&database, &data_directory, request)
+}
+
+#[tauri::command]
+pub fn delete_authentication_profile(
+    database: State<'_, Database>,
+    id: String,
+) -> Result<(), AppError> {
+    authentication::delete_profile(&database, &id)
+}
+
+#[tauri::command]
+pub fn discover_browser_profiles() -> Vec<BrowserProfileInfo> {
+    authentication::discover_browser_profiles()
+}
+
+#[tauri::command]
 pub async fn detect_engines() -> Result<Vec<EngineInfo>, AppError> {
     Ok(discovery::detect_all().await)
 }
@@ -138,7 +172,8 @@ pub async fn test_site_access(
     database: State<'_, Database>,
     url: String,
 ) -> Result<MediaAnalysis, AppError> {
-    let preferences = database.load_engine_preferences()?;
+    let mut preferences = database.load_engine_preferences()?;
+    authentication::apply_profile(&database, &url, &mut preferences)?;
     router::analyze(&url, &preferences).await
 }
 
@@ -147,7 +182,8 @@ pub async fn analyze_url(
     database: State<'_, Database>,
     url: String,
 ) -> Result<MediaAnalysis, AppError> {
-    let preferences = database.load_engine_preferences()?;
+    let mut preferences = database.load_engine_preferences()?;
+    authentication::apply_profile(&database, &url, &mut preferences)?;
     router::analyze(&url, &preferences).await
 }
 
@@ -158,7 +194,8 @@ pub async fn list_gallery_items(
     offset: u32,
     limit: u32,
 ) -> Result<GalleryItemList, AppError> {
-    let preferences = database.load_engine_preferences()?;
+    let mut preferences = database.load_engine_preferences()?;
+    authentication::apply_profile(&database, &url, &mut preferences)?;
     GalleryDlEngine::discover()?
         .list_items(&url, &preferences, offset, limit)
         .await
@@ -179,7 +216,8 @@ pub async fn analyze_playlist(
     database: State<'_, Database>,
     url: String,
 ) -> Result<BatchAnalysisResponse, AppError> {
-    let preferences = database.load_engine_preferences()?;
+    let mut preferences = database.load_engine_preferences()?;
+    authentication::apply_profile(&database, &url, &mut preferences)?;
     let engine = YtDlpEngine::discover()?;
     let (title, urls) = engine.expand_playlist(&url, &preferences).await?;
     Ok(analyze_many(preferences, urls, title).await)
@@ -309,7 +347,8 @@ pub async fn start_download(
     database: State<'_, Database>,
     request: StartDownloadRequest,
 ) -> Result<DownloadJob, AppError> {
-    let preferences = database.load_engine_preferences()?;
+    let mut preferences = database.load_engine_preferences()?;
+    authentication::apply_profile(&database, &request.url, &mut preferences)?;
     queue.enqueue(app, request, preferences).await
 }
 
@@ -326,14 +365,11 @@ pub async fn start_downloads(
             format!("Queue between 1 and {MAX_BATCH_URLS} downloads at a time."),
         ));
     }
-    let preferences = database.load_engine_preferences()?;
     let mut jobs = Vec::with_capacity(requests.len());
     for request in requests {
-        jobs.push(
-            queue
-                .enqueue(app.clone(), request, preferences.clone())
-                .await?,
-        );
+        let mut preferences = database.load_engine_preferences()?;
+        authentication::apply_profile(&database, &request.url, &mut preferences)?;
+        jobs.push(queue.enqueue(app.clone(), request, preferences).await?);
     }
     Ok(jobs)
 }

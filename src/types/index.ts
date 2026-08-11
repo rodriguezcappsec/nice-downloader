@@ -69,6 +69,37 @@ export interface EnginePreferences {
   bandwidthLimitKib?: number | null;
 }
 
+export interface AuthenticationProfile {
+  id: string;
+  name: string;
+  hostSuffix: string;
+  browserCookieSource: BrowserCookieSource;
+  browserProfile?: string | null;
+  proxyUrl?: string | null;
+  cookieFileConfigured: boolean;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SaveAuthenticationProfileRequest {
+  id?: string | null;
+  name: string;
+  hostSuffix: string;
+  browserCookieSource: BrowserCookieSource;
+  browserProfile?: string | null;
+  proxyUrl?: string | null;
+  cookieFilePath?: string | null;
+  clearCookieFile: boolean;
+  enabled: boolean;
+}
+
+export interface BrowserProfileInfo {
+  browser: BrowserCookieSource;
+  name: string;
+  path: string;
+}
+
 export interface MediaFormat {
   id: string;
   extension?: string | null;
