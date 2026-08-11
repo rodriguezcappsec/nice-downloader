@@ -51,6 +51,8 @@ The frontend never receives a generic command-execution primitive. Tauri capabil
 - `stores`: Zustand state synchronized from Tauri commands/events.
 - `types`: TypeScript mirrors of the command/event contracts.
 
+Page components remain mounted and are hidden by navigation so in-progress analysis and collection selections are not lost. See `docs/UX.md` for the interaction contract, semantic status colors, recovery links, and progressive-disclosure rules.
+
 ## Download lifecycle
 
 Jobs progress through explicit states (with `Paused` available while waiting or running):

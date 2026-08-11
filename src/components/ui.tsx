@@ -64,11 +64,12 @@ export function Select({
   );
 }
 
-export function Progress({ value }: { value: number }) {
+export function Progress({ value, tone = "blue" }: { value: number; tone?: "blue" | "amber" | "green" | "red" }) {
+  const colors = { blue: "bg-accent", amber: "bg-amber-400", green: "bg-emerald-400", red: "bg-red-400" };
   return (
-    <div className="h-1.5 overflow-hidden rounded-full bg-line/70" aria-label={`${value.toFixed(0)}%`}>
+    <div className="h-2 overflow-hidden rounded-sm bg-line/70" aria-label={`${value.toFixed(0)}%`}>
       <div
-        className="h-full rounded-full bg-accent transition-[width] duration-300"
+        className={`h-full transition-[width] duration-300 ${colors[tone]}`}
         style={{ width: `${Math.max(0, Math.min(100, value))}%` }}
       />
     </div>

@@ -46,6 +46,7 @@ export function NewDownloadPage() {
   const [selectedBatchUrls, setSelectedBatchUrls] = useState<string[]>([]);
   const [selectedGalleryIndices, setSelectedGalleryIndices] = useState<number[]>([]);
   const [gallerySearch, setGallerySearch] = useState("");
+  const [galleryRange, setGalleryRange] = useState("");
   const [scheduledFor, setScheduledFor] = useState("");
   const [diskSpace, setDiskSpace] = useState<DiskSpaceInfo | null>(null);
   const [presets, setPresets] = useState<Preset[]>([]);
@@ -56,6 +57,7 @@ export function NewDownloadPage() {
   const [subtitles, setSubtitles] = useState(false);
   const [subtitleLanguages, setSubtitleLanguages] = useState("en.*,en");
   const [chapters, setChapters] = useState(false);
+  const [dragActive, setDragActive] = useState(false);
 
   useEffect(() => {
     void api.listPresets().then(setPresets).catch(() => setPresets([]));
@@ -109,6 +111,18 @@ export function NewDownloadPage() {
   const estimatedBytes = isGallery
     ? (selectedGallerySize || analysis?.totalSizeBytes || null)
     : (analysis?.totalSizeBytes || largestKnownSize(analysis?.formats ?? []));
+
+  function applyGalleryRange() {
+    const selected = new Set<number>();
+    for (const part of galleryRange.split(",")) {
+      const [startValue, endValue] = part.trim().split("-");
+      const start = Number(startValue);
+      const end = Number(endValue ?? startValue);
+      if (!Number.isInteger(start) || !Number.isInteger(end)) continue;
+      for (let index = Math.max(1, start); index <= Math.min(end, start + 1000); index += 1) selected.add(index);
+    }
+    setSelectedGalleryIndices(galleryItems?.items.filter((item) => selected.has(item.index)).map((item) => item.index) ?? []);
+  }
 
   useEffect(() => {
     if (!destination) {
@@ -221,7 +235,17 @@ export function NewDownloadPage() {
   const inputUrls = parseInputUrls(url);
 
   return (
-    <div className="mx-auto w-full max-w-6xl px-8 py-7">
+    <div
+      className={`mx-auto w-full max-w-6xl px-8 py-7 ${dragActive ? "outline outline-2 outline-accent/60" : ""}`}
+      onDragOver={(event) => { event.preventDefault(); setDragActive(true); }}
+      onDragLeave={() => setDragActive(false)}
+      onDrop={(event) => {
+        event.preventDefault();
+        setDragActive(false);
+        const value = event.dataTransfer.getData("text/uri-list") || event.dataTransfer.getData("text/plain");
+        if (value.trim()) { setUrl(value.trim()); clearAnalysis(); }
+      }}
+    >
       <header className="mb-7">
         <h1 className="text-xl font-semibold tracking-tight">New Download</h1>
         <p className="mt-1 text-sm text-muted">Paste a media or gallery URL to inspect it before downloading.</p>
@@ -278,7 +302,7 @@ export function NewDownloadPage() {
           <LoaderCircle className="animate-spin text-blue-400" size={24} />
           <div>
             <h2 className="text-sm font-semibold">Inspecting media</h2>
-            <p className="mt-1 text-xs text-muted">The appropriate local engine is retrieving structured metadata…</p>
+            <div className="mt-2 flex flex-wrap gap-3 text-xs text-muted"><span className="text-blue-400">Resolving URL</span><span>Reading metadata</span><span>Finding formats</span><span>Estimating sizes</span></div>
           </div>
         </section>
       ) : null}
@@ -317,7 +341,7 @@ export function NewDownloadPage() {
             </div>
           </section>
 
-          <section className="border border-line bg-panel p-5">
+          <section className="sticky top-5 self-start border border-line bg-panel p-5 shadow-panel">
             <h2 className="mb-5 text-sm font-semibold">Download options</h2>
             <div className="grid gap-4">
               {isGallery ? (
@@ -351,7 +375,9 @@ export function NewDownloadPage() {
                         <Button variant="secondary" className="h-8 px-2 text-xs" onClick={() => setSelectedGalleryIndices(galleryItems.items.map((item) => item.index))}>All</Button>
                         <Button variant="secondary" className="h-8 px-2 text-xs" onClick={() => setSelectedGalleryIndices(galleryItems.items.filter((item) => item.isVideo).map((item) => item.index))}>Videos</Button>
                         <Button variant="secondary" className="h-8 px-2 text-xs" onClick={() => setSelectedGalleryIndices([])}>Clear</Button>
+                        <Button variant="secondary" className="h-8 px-2 text-xs" onClick={() => setSelectedGalleryIndices(galleryItems.items.filter((item) => !selectedGalleryIndices.includes(item.index)).map((item) => item.index))}>Invert</Button>
                       </div>
+                      <div className="mt-2 flex gap-2"><Input className="h-8" value={galleryRange} onChange={(event) => setGalleryRange(event.target.value)} placeholder="Ranges: 1-12, 18, 25-30" /><Button variant="secondary" className="h-8 px-2 text-xs" onClick={applyGalleryRange}>Select</Button></div>
                       {galleryItems.truncated ? (
                         <Button
                           variant="secondary"
@@ -394,11 +420,17 @@ export function NewDownloadPage() {
                     </Field>
                   ) : null}
                   <Field label="Quality">
-                    <Select value={qualityId} onChange={(event) => setQualityId(event.target.value)}>
+                    <div className="flex flex-wrap gap-1 rounded-md bg-canvas p-1">
                       {analysis.qualityOptions.map((quality) => (
-                        <option key={quality.id} value={quality.id}>{quality.label} — {quality.description}</option>
+                        <button key={quality.id} type="button" onClick={() => setQualityId(quality.id)} className={`h-9 rounded px-3 text-xs font-semibold transition ${quality.id === qualityId ? "bg-accent text-white" : "text-muted hover:bg-elevated hover:text-ink"}`}>{quality.label}</button>
                       ))}
-                    </Select>
+                    </div>
+                  </Field>
+
+                  <Field label="Recommendation">
+                    <div className="grid grid-cols-2 gap-1 rounded-md bg-canvas p-1">
+                      {(["recommended", "compatibility", "quality", "smallest"] as const).map((strategy) => <button key={strategy} type="button" onClick={() => setFormatStrategy(strategy)} className={`h-9 rounded px-2 text-xs font-medium capitalize ${formatStrategy === strategy ? "bg-elevated text-ink shadow-sm" : "text-muted hover:text-ink"}`}>{strategy === "compatibility" ? "Best compatibility" : strategy === "quality" ? "Best quality" : strategy === "smallest" ? "Smallest file" : "Recommended"}</button>)}
+                    </div>
                   </Field>
 
                   <Field label="Container">
@@ -452,11 +484,6 @@ export function NewDownloadPage() {
                         <option value="any">Automatic</option><option value="h264">H.264 compatibility</option><option value="av1">AV1</option><option value="vp9">VP9</option>
                       </Select>
                     </Field>
-                    <Field label="Selection strategy">
-                      <Select value={formatStrategy} onChange={(event) => setFormatStrategy(event.target.value as DownloadOptions["formatStrategy"])}>
-                        <option value="recommended">Recommended</option><option value="compatibility">Best compatibility</option><option value="quality">Best quality</option><option value="smallest">Smallest file</option>
-                      </Select>
-                    </Field>
                     {audioOnly ? <Field label="Audio quality">
                       <Select value={audioQuality} onChange={(event) => setAudioQuality(event.target.value as DownloadOptions["audioQuality"])}>
                         {(["best", "320k", "256k", "192k", "128k"] as const).map((value) => <option key={value} value={value}>{value === "best" ? "Best available" : value}</option>)}
@@ -485,10 +512,14 @@ export function NewDownloadPage() {
                 ) : null}
               </div> : null}
 
-              <Button className="mt-1 w-full" disabled={!destination || starting || galleryItemsLoading || diskSpace?.sufficient === false || Boolean(isGallery && galleryItems && selectedGalleryItems.length === 0)} onClick={() => void submitDownload()}>
+              {!isGallery && !isDirect ? <div className="border border-line bg-canvas p-3 text-xs text-muted"><span className="font-semibold text-ink">{selectedQuality?.label}</span> · {container.toUpperCase()} · {videoCodecPreference === "any" ? "automatic codec" : videoCodecPreference.toUpperCase()} {estimatedBytes ? `· approximately ${formatBytes(estimatedBytes)}` : "· size estimated during download"}<p className="mt-1">{selectedQuality?.description}{formatStrategy === "compatibility" ? " with broadly compatible codecs" : formatStrategy === "smallest" ? " prioritizing smaller streams" : ""}.</p></div> : null}
+              <div className="sticky bottom-0 -mx-5 -mb-5 border-t border-line bg-panel p-5">
+              <Button className="w-full" disabled={!destination || starting || galleryItemsLoading || diskSpace?.sufficient === false || Boolean(isGallery && galleryItems && selectedGalleryItems.length === 0)} onClick={() => void submitDownload()}>
                 {starting ? <LoaderCircle className="animate-spin" size={17} /> : !isGallery && audioOnly ? <Music2 size={17} /> : <Download size={17} />}
                 {starting ? "Adding to queue" : isGallery && galleryItems && (galleryItems.truncated || selectedGalleryItems.length !== galleryItems.items.length) ? `Download ${selectedGalleryItems.length} selected` : isGallery ? "Download album" : "Download"}
               </Button>
+              <p className="mt-2 text-center text-[11px] text-muted">Cancellation keeps resumable partial data by default.</p>
+              </div>
             </div>
           </section>
         </div>

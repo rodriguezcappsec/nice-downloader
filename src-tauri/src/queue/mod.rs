@@ -177,6 +177,18 @@ impl QueueManager {
         .await
     }
 
+    pub async fn repeat(
+        &self,
+        app: AppHandle,
+        job_id: &str,
+        preferences: EnginePreferences,
+    ) -> Result<DownloadJob, AppError> {
+        let mut request = self.database.load_download_request(job_id)?;
+        request.options.output_conflict_policy = crate::models::OutputConflictPolicy::Overwrite;
+        self.enqueue_with_lineage(app, request, preferences, 1, Some(job_id.to_owned()))
+            .await
+    }
+
     async fn enqueue_with_lineage(
         &self,
         app: AppHandle,

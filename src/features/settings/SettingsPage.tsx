@@ -47,6 +47,7 @@ export function SettingsPage() {
   const [managed, setManaged] = useState<ManagedEngineStatus[]>([]);
   const [candidate, setCandidate] = useState<EngineUpdateCandidate | null>(null);
   const [managing, setManaging] = useState<EngineId | null>(null);
+  const [settingsTab, setSettingsTab] = useState<"access" | "engines">("access");
 
   useEffect(() => {
     void api.listManagedEngines().then(setManaged).catch((error) => setError(normalizeError(error)));
@@ -126,6 +127,10 @@ export function SettingsPage() {
         </Button>
       }
     >
+      <div className="mb-6 flex gap-1 border-b border-line" role="tablist" aria-label="Settings sections">
+        {([ ["access", "Network & cookies"], ["engines", "Engines & diagnostics"] ] as const).map(([id, label]) => <button key={id} role="tab" aria-selected={settingsTab === id} onClick={() => setSettingsTab(id)} className={`border-b-2 px-4 py-2.5 text-sm font-medium ${settingsTab === id ? "border-accent text-ink" : "border-transparent text-muted hover:text-ink"}`}>{label}</button>)}
+      </div>
+      {settingsTab === "access" ? (
       <section className="mb-8">
         <div className="mb-3 flex items-center gap-2">
           <ShieldCheck size={17} className="text-muted" />
@@ -256,7 +261,9 @@ export function SettingsPage() {
           </div>
         </div>
       </section>
+      ) : null}
 
+      {settingsTab === "engines" ? <>
       <section className="mb-8">
         <div className="mb-3 flex items-center gap-2">
           <DownloadCloud size={17} className="text-muted" />
@@ -354,6 +361,7 @@ export function SettingsPage() {
           <Button variant="secondary" onClick={() => void exportDiagnostics()}>Export diagnostics</Button>
         </div>
       </section>
+      </> : null}
     </Page>
   );
 }
