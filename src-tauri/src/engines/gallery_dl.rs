@@ -182,7 +182,9 @@ impl GalleryDlEngine {
             "--option".to_owned(),
             "output.shorten=false".to_owned(),
             "--option".to_owned(),
-            "downloader.http.retries=3".to_owned(),
+            "downloader.http.retries=12".to_owned(),
+            "--option".to_owned(),
+            "downloader.http.sleep-retries=1-3".to_owned(),
             "--option".to_owned(),
             "downloader.http.sleep-429=exp:2:0:120=15".to_owned(),
             "--option".to_owned(),
@@ -643,6 +645,14 @@ mod tests {
             .args
             .iter()
             .any(|arg| arg == "downloader.http.sleep-429=exp:2:0:120=15"));
+        assert!(prepared
+            .args
+            .iter()
+            .any(|arg| arg == "downloader.http.retries=12"));
+        assert!(prepared
+            .args
+            .iter()
+            .any(|arg| arg == "downloader.http.sleep-retries=1-3"));
         assert!(prepared
             .args
             .iter()
