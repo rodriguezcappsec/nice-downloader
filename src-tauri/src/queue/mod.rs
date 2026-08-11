@@ -482,6 +482,18 @@ impl QueueManager {
             return;
         }
 
+        if engine_kind == PreparedEngineKind::GalleryDl && is_incomplete_read_line(&line.text) {
+            self.update_job(app, id, |job| {
+                job.state = DownloadState::Downloading;
+                job.current_operation =
+                    "Connection interrupted; resuming the partial download".to_owned();
+                job.speed_bytes_per_second = None;
+                job.eta_seconds = None;
+            })
+            .await;
+            return;
+        }
+
         let operation = operation_from_engine_line(&line.text);
         if let Some((state, message)) = operation {
             self.update_job(app, id, |job| {
@@ -833,15 +845,27 @@ fn is_rate_limit_line(line: &str) -> bool {
     lowercase.contains("429") && lowercase.contains("too many requests")
 }
 
+fn is_incomplete_read_line(line: &str) -> bool {
+    let lowercase = line.to_ascii_lowercase();
+    lowercase.contains("incompleteread") || lowercase.contains("connection broken")
+}
+
 fn download_failure_message(
     engine_kind: PreparedEngineKind,
     engine_name: &str,
     diagnostics: &VecDeque<String>,
 ) -> String {
-    if engine_kind == PreparedEngineKind::GalleryDl
-        && diagnostics.iter().any(|line| is_rate_limit_line(line))
-    {
-        return "Bunkr rate-limited the media transfer after several retries. Wait a few minutes and retry, or configure a different network proxy in Settings.".to_owned();
+    if engine_kind == PreparedEngineKind::GalleryDl {
+        if let Some(transient) = diagnostics
+            .iter()
+            .rev()
+            .find(|line| is_rate_limit_line(line) || is_incomplete_read_line(line))
+        {
+            if is_incomplete_read_line(transient) {
+                return "Bunkr repeatedly interrupted the transfer. The partial file was preserved; retry this job to resume it.".to_owned();
+            }
+            return "Bunkr rate-limited the media transfer after several retries. Wait a few minutes and retry, or configure a different network proxy in Settings.".to_owned();
+        }
     }
     let detail = diagnostics
         .back()
@@ -944,6 +968,19 @@ mod tests {
             "Bunkr rate-limited the media transfer after several retries. Wait a few minutes and retry, or configure a different network proxy in Settings."
         );
         assert!(is_rate_limit_line(&diagnostics[0]));
+    }
+
+    #[test]
+    fn explains_that_interrupted_gallery_downloads_can_resume() {
+        let diagnostics = VecDeque::from([
+            "[downloader.http][warning] ('Connection broken: IncompleteRead(32043 bytes read, 138022172 more expected)') (13/13)".to_owned(),
+            "[download][error] Failed to download selected-file.mkv".to_owned(),
+        ]);
+        assert_eq!(
+            download_failure_message(PreparedEngineKind::GalleryDl, "gallery-dl", &diagnostics),
+            "Bunkr repeatedly interrupted the transfer. The partial file was preserved; retry this job to resume it."
+        );
+        assert!(is_incomplete_read_line(&diagnostics[0]));
     }
 
     #[tokio::test]
