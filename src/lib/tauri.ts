@@ -22,6 +22,11 @@ import type {
   SaveSubscriptionRequest,
   Subscription,
   SubscriptionCheckResult,
+  StartTransformationRequest,
+  TransformationTask,
+  LibraryItem,
+  LibraryScanResult,
+  UpdateLibraryItemRequest,
   StartDownloadRequest,
 } from "../types";
 
@@ -86,11 +91,24 @@ export const api = {
   deleteSubscription: (id: string) => invoke<void>("delete_subscription", { id }),
   checkSubscriptionNow: (id: string) =>
     invoke<SubscriptionCheckResult>("check_subscription_now", { id }),
+  listTransformationTasks: () => invoke<TransformationTask[]>("list_transformation_tasks"),
+  startTransformation: (request: StartTransformationRequest) =>
+    invoke<TransformationTask>("start_transformation", { request }),
+  cancelTransformation: (id: string) => invoke<void>("cancel_transformation", { id }),
+  listLibraryItems: () => invoke<LibraryItem[]>("list_library_items"),
+  importLibraryFiles: (paths: string[], tags: string[]) => invoke<LibraryItem[]>("import_library_files", { paths, tags }),
+  updateLibraryItem: (request: UpdateLibraryItemRequest) => invoke<LibraryItem>("update_library_item", { request }),
+  removeLibraryItem: (id: string) => invoke<void>("remove_library_item", { id }),
+  reconcileLibrary: () => invoke<LibraryScanResult>("reconcile_library"),
+  exportLibrary: (path: string) => invoke<void>("export_library", { path }),
+  restoreLibrary: (path: string) => invoke<LibraryItem[]>("restore_library", { path }),
   openDownloadOutput: (jobId: string, reveal: boolean) =>
     invoke<void>("open_download_output", { jobId, reveal }),
   exportDiagnostics: (path: string) => invoke<void>("export_diagnostics", { path }),
   onJobUpdated: (handler: (job: DownloadJob) => void): Promise<UnlistenFn> =>
     listen<DownloadJob>("download-job-updated", (event) => handler(event.payload)),
+  onTransformationUpdated: (handler: (task: TransformationTask) => void): Promise<UnlistenFn> =>
+    listen<TransformationTask>("transformation-task-updated", (event) => handler(event.payload)),
 };
 
 export function normalizeError(error: unknown): import("../types").AppError {

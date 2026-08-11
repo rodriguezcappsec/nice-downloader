@@ -8,15 +8,18 @@ use crate::{
         ytdlp::YtDlpEngine,
     },
     errors::AppError,
+    library,
     models::{
         BatchAnalysisItem, BatchAnalysisResponse, DiskSpaceInfo, DownloadArchiveMatch, DownloadJob,
-        EngineId, EngineInfo, EnginePreferences, GalleryItemList, MediaAnalysis, Preset,
-        QueueSettings, QueueSnapshot, SavePresetRequest, SaveSitePresetRuleRequest,
-        SaveSubscriptionRequest, SitePresetRule, StartDownloadRequest, Subscription,
-        SubscriptionCheckResult,
+        EngineId, EngineInfo, EnginePreferences, GalleryItemList, LibraryItem, LibraryScanResult,
+        MediaAnalysis, Preset, QueueSettings, QueueSnapshot, SavePresetRequest,
+        SaveSitePresetRuleRequest, SaveSubscriptionRequest, SitePresetRule, StartDownloadRequest,
+        StartTransformationRequest, Subscription, SubscriptionCheckResult, TransformationTask,
+        UpdateLibraryItemRequest,
     },
     queue::{disk_space, QueueManager},
     subscriptions,
+    transformations::TransformationManager,
     utils::validation::{
         normalize_engine_preferences, validate_destination, validate_destination_writable,
         validate_engine_preferences, validate_media_url,
@@ -28,6 +31,75 @@ use tokio::{sync::Semaphore, task::JoinSet};
 
 const MAX_BATCH_URLS: usize = 20;
 const BATCH_ANALYSIS_CONCURRENCY: usize = 3;
+
+#[tauri::command]
+pub fn list_transformation_tasks(
+    transformations: State<'_, TransformationManager>,
+) -> Result<Vec<TransformationTask>, AppError> {
+    transformations.list()
+}
+
+#[tauri::command]
+pub fn start_transformation(
+    app: AppHandle,
+    transformations: State<'_, TransformationManager>,
+    request: StartTransformationRequest,
+) -> Result<TransformationTask, AppError> {
+    transformations.start(app, request)
+}
+
+#[tauri::command]
+pub fn cancel_transformation(
+    transformations: State<'_, TransformationManager>,
+    id: String,
+) -> Result<(), AppError> {
+    transformations.cancel(&id)
+}
+
+#[tauri::command]
+pub fn list_library_items(database: State<'_, Database>) -> Result<Vec<LibraryItem>, AppError> {
+    database.list_library_items()
+}
+
+#[tauri::command]
+pub fn import_library_files(
+    database: State<'_, Database>,
+    paths: Vec<String>,
+    tags: Vec<String>,
+) -> Result<Vec<LibraryItem>, AppError> {
+    library::import_paths(&database, paths, tags)
+}
+
+#[tauri::command]
+pub fn update_library_item(
+    database: State<'_, Database>,
+    request: UpdateLibraryItemRequest,
+) -> Result<LibraryItem, AppError> {
+    database.update_library_item(request)
+}
+
+#[tauri::command]
+pub fn remove_library_item(database: State<'_, Database>, id: String) -> Result<(), AppError> {
+    database.remove_library_item(&id)
+}
+
+#[tauri::command]
+pub fn reconcile_library(database: State<'_, Database>) -> Result<LibraryScanResult, AppError> {
+    library::reconcile(&database)
+}
+
+#[tauri::command]
+pub fn export_library(database: State<'_, Database>, path: String) -> Result<(), AppError> {
+    library::export_backup(&database, &path)
+}
+
+#[tauri::command]
+pub fn restore_library(
+    database: State<'_, Database>,
+    path: String,
+) -> Result<Vec<LibraryItem>, AppError> {
+    library::restore_backup(&database, &path)
+}
 
 #[tauri::command]
 pub async fn detect_engines() -> Result<Vec<EngineInfo>, AppError> {
