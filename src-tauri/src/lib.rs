@@ -62,6 +62,7 @@ pub fn run() {
             commands::start_downloads,
             commands::cancel_download,
             commands::retry_download,
+            commands::repeat_download,
             commands::list_jobs,
             commands::get_queue_snapshot,
             commands::update_queue_settings,

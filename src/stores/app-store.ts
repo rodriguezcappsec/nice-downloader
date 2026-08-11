@@ -30,9 +30,11 @@ interface AppStore {
   engineLoading: boolean;
   historyLoading: boolean;
   error: AppError | null;
+  notice: { message: string; view?: ViewId } | null;
   defaultDestination: string;
   setView: (view: ViewId) => void;
   setError: (error: AppError | null) => void;
+  setNotice: (notice: AppStore["notice"]) => void;
   setEnginePreferences: (preferences: EnginePreferences) => void;
   saveEnginePreferences: () => Promise<boolean>;
   analyze: (url: string) => Promise<MediaAnalysis | null>;
@@ -47,14 +49,17 @@ interface AppStore {
   startDownloads: (requests: StartDownloadRequest[]) => Promise<DownloadJob[]>;
   cancelDownload: (jobId: string) => Promise<void>;
   retryDownload: (jobId: string) => Promise<void>;
+  repeatDownload: (jobId: string) => Promise<void>;
   pauseDownload: (jobId: string) => Promise<void>;
   resumeDownload: (jobId: string) => Promise<void>;
   updateQueueSettings: (settings: QueueSettings) => Promise<void>;
   moveQueuedDownload: (jobId: string, newIndex: number) => Promise<void>;
 }
 
+const savedView = typeof window !== "undefined" ? window.localStorage.getItem("nice-downloader.view") as ViewId | null : null;
+
 export const useAppStore = create<AppStore>((set, get) => ({
-  view: "new",
+  view: savedView && ["new", "downloads", "queue", "history", "presets", "settings"].includes(savedView) ? savedView : "new",
   engines: [],
   enginePreferences: {
     browserCookieSource: "none",
@@ -74,10 +79,15 @@ export const useAppStore = create<AppStore>((set, get) => ({
   engineLoading: false,
   historyLoading: false,
   error: null,
+  notice: null,
   defaultDestination: "",
 
-  setView: (view) => set({ view }),
+  setView: (view) => {
+    window.localStorage.setItem("nice-downloader.view", view);
+    set({ view });
+  },
   setError: (error) => set({ error }),
+  setNotice: (notice) => set({ notice }),
   setEnginePreferences: (enginePreferences) => set({ enginePreferences }),
 
   saveEnginePreferences: async () => {
@@ -232,7 +242,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
       const job = await api.startDownload(request);
       set((state) => ({
         jobs: { ...state.jobs, [job.id]: job },
-        view: "downloads",
+        notice: { message: "Added to the download queue.", view: "queue" },
       }));
       void api.getQueueSnapshot().then((queue) => set({ queue }));
       return job;
@@ -248,7 +258,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
       const jobs = await api.startDownloads(requests);
       set((state) => ({
         jobs: { ...state.jobs, ...Object.fromEntries(jobs.map((job) => [job.id, job])) },
-        view: "downloads",
+        notice: { message: `Added ${jobs.length} downloads to the queue.`, view: "queue" },
       }));
       void api.getQueueSnapshot().then((queue) => set({ queue }));
       return jobs;
@@ -273,6 +283,20 @@ export const useAppStore = create<AppStore>((set, get) => ({
       set((state) => ({
         jobs: { ...state.jobs, [job.id]: job },
         view: "downloads",
+      }));
+      set({ queue: await api.getQueueSnapshot() });
+    } catch (error) {
+      set({ error: normalizeError(error) });
+    }
+  },
+
+  repeatDownload: async (jobId) => {
+    set({ error: null });
+    try {
+      const job = await api.repeatDownload(jobId);
+      set((state) => ({
+        jobs: { ...state.jobs, [job.id]: job },
+        notice: { message: "Added another download using the saved options.", view: "queue" },
       }));
       set({ queue: await api.getQueueSnapshot() });
     } catch (error) {

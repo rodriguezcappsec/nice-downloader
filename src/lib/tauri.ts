@@ -46,6 +46,7 @@ export const api = {
     invoke<DownloadJob[]>("start_downloads", { requests }),
   cancelDownload: (jobId: string) => invoke<void>("cancel_download", { jobId }),
   retryDownload: (jobId: string) => invoke<DownloadJob>("retry_download", { jobId }),
+  repeatDownload: (jobId: string) => invoke<DownloadJob>("repeat_download", { jobId }),
   pauseDownload: (jobId: string) => invoke<void>("pause_download", { jobId }),
   resumeDownload: (jobId: string) => invoke<void>("resume_download", { jobId }),
   getQueueSnapshot: () => invoke<QueueSnapshot>("get_queue_snapshot"),

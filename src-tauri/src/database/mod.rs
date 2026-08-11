@@ -326,6 +326,28 @@ impl Database {
         Ok(std::path::PathBuf::from(output.unwrap_or(destination)))
     }
 
+    pub fn load_download_request(&self, job_id: &str) -> Result<StartDownloadRequest, AppError> {
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "Download records are unavailable.")
+        })?;
+        let value: Option<String> = connection
+            .query_row(
+                "SELECT request_json FROM downloads WHERE id = ?1 AND request_json IS NOT NULL",
+                [job_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let value = value.ok_or_else(|| {
+            AppError::new(
+                "repeat_unavailable",
+                "The original typed download options are no longer available.",
+            )
+        })?;
+        serde_json::from_str(&value).map_err(|error| {
+            AppError::internal("could not read the original download options", error)
+        })
+    }
+
     pub fn list_presets(&self) -> Result<Vec<Preset>, AppError> {
         let connection = self
             .connection
@@ -594,6 +616,10 @@ mod tests {
             scheduled_for: None,
         };
         database.save_job(&job, &request).expect("save history");
+        let repeated = database
+            .load_download_request(&job.id)
+            .expect("load repeat request");
+        assert_eq!(repeated.url, request.url);
         let history = database.list_history().expect("list history");
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].title, "Example");

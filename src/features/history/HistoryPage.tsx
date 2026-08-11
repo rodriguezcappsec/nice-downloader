@@ -1,4 +1,4 @@
-import { CheckCircle2, Copy, ExternalLink, FolderOpen, History, RefreshCw, Trash2 } from "lucide-react";
+import { CheckCircle2, Copy, ExternalLink, FolderOpen, History, RefreshCw, RotateCcw, Trash2 } from "lucide-react";
 import { useMemo, useState } from "react";
 import { Page } from "../../components/Page";
 import { Button, EmptyState, Input } from "../../components/ui";
@@ -11,6 +11,7 @@ export function HistoryPage() {
   const loading = useAppStore((state) => state.historyLoading);
   const loadHistory = useAppStore((state) => state.loadHistory);
   const setError = useAppStore((state) => state.setError);
+  const repeatDownload = useAppStore((state) => state.repeatDownload);
   const [search, setSearch] = useState("");
   const visible = useMemo(() => {
     const query = search.trim().toLocaleLowerCase();
@@ -39,6 +40,7 @@ export function HistoryPage() {
                 <div>{entry.outputFormat.toUpperCase()} · {entry.selectedQuality}</div>
                 <div className="mt-1">{entry.totalBytes ? formatBytes(entry.totalBytes) : "Completed"} · {formatDate(entry.completedAt)}</div>
                 <div className="mt-2 flex justify-end gap-1">
+                  <Button variant="ghost" className="h-7 px-2 text-xs" onClick={() => void repeatDownload(entry.id)}><RotateCcw size={13} /> Again</Button>
                   <Button variant="ghost" className="h-7 px-2 text-xs" onClick={() => void api.openDownloadOutput(entry.id, false).catch((error) => setError(normalizeError(error)))}><ExternalLink size={13} /> Open</Button>
                   <Button variant="ghost" className="h-7 px-2 text-xs" onClick={() => void api.openDownloadOutput(entry.id, true).catch((error) => setError(normalizeError(error)))}><FolderOpen size={13} /> Reveal</Button>
                   <Button variant="ghost" className="h-7 px-2 text-xs" onClick={() => void navigator.clipboard.writeText(entry.url)}><Copy size={13} /> URL</Button>
