@@ -56,7 +56,7 @@ Still planned:
 Delivered foundation:
 
 - Analyzer/router policy and strict URL classification.
-- gallery-dl analysis, per-file album selection, original-file download, cancellation, progress, and history for Bunkr albums.
+- gallery-dl analysis, lazy paced album browsing, per-file selection, resumable original-file download, cancellation, progress, and history for Bunkr albums.
 
 Still planned:
 

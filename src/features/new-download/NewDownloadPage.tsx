@@ -59,8 +59,14 @@ export function NewDownloadPage() {
   }, [batchAnalysis]);
 
   useEffect(() => {
-    setSelectedGalleryIndices(galleryItems?.items.map((item) => item.index) ?? []);
-    setGallerySearch("");
+    if (!galleryItems) {
+      setSelectedGalleryIndices([]);
+      setGallerySearch("");
+      return;
+    }
+    setSelectedGalleryIndices((selected) => [
+      ...new Set([...selected, ...galleryItems.items.map((item) => item.index)]),
+    ]);
   }, [galleryItems]);
 
   const selectedQuality = useMemo(
@@ -250,7 +256,7 @@ export function NewDownloadPage() {
                       variant="secondary"
                       className="mt-3 w-full"
                       disabled={galleryItemsLoading}
-                      onClick={() => void loadGalleryItems(analysis.downloadUrl)}
+                      onClick={() => void loadGalleryItems(analysis.downloadUrl, true)}
                     >
                       {galleryItemsLoading ? <LoaderCircle className="animate-spin" size={16} /> : <Film size={16} />}
                       {galleryItemsLoading ? "Loading album files" : "Choose specific files"}
@@ -259,7 +265,7 @@ export function NewDownloadPage() {
                     <div className="mt-3">
                       <div className="flex items-center justify-between gap-2">
                         <span className="text-xs font-medium text-ink">
-                          {selectedGalleryItems.length} of {galleryItems.totalCount} selected
+                          {selectedGalleryItems.length} selected · {galleryItems.items.length} of {galleryItems.totalCount} loaded
                         </span>
                         <span className="text-xs">{selectedGallerySize > 0 ? `~${formatBytes(selectedGallerySize)}` : "Size unknown"}</span>
                       </div>
@@ -275,7 +281,15 @@ export function NewDownloadPage() {
                         <Button variant="secondary" className="h-8 px-2 text-xs" onClick={() => setSelectedGalleryIndices([])}>Clear</Button>
                       </div>
                       {galleryItems.truncated ? (
-                        <p className="mt-2 text-xs text-amber-400">This album is very large. The first {galleryItems.items.length} files are available for individual selection.</p>
+                        <Button
+                          variant="secondary"
+                          className="mt-3 w-full"
+                          disabled={galleryItemsLoading}
+                          onClick={() => void loadGalleryItems(analysis.downloadUrl)}
+                        >
+                          {galleryItemsLoading ? <LoaderCircle className="animate-spin" size={16} /> : null}
+                          {galleryItemsLoading ? "Loading more files" : "Load 12 more files"}
+                        </Button>
                       ) : null}
                       <div className="mt-3 max-h-72 divide-y divide-line overflow-auto border border-line bg-panel">
                         {filteredGalleryItems.map((item) => (

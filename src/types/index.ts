@@ -103,6 +103,8 @@ export interface GalleryItemList {
   items: GalleryItem[];
   totalCount: number;
   truncated: boolean;
+  offset: number;
+  nextOffset?: number | null;
 }
 
 export interface GalleryItemSelection {

@@ -16,6 +16,7 @@ use url::Url;
 const MAX_ANALYSIS_BYTES: usize = 1_000_000;
 const MAX_ITEM_LIST_BYTES: usize = 5_000_000;
 const MAX_SELECTABLE_ITEMS: u32 = 1_000;
+const MAX_GALLERY_PAGE_SIZE: u32 = 24;
 
 #[derive(Debug, Clone)]
 pub struct GalleryDlEngine {
@@ -100,8 +101,18 @@ impl GalleryDlEngine {
         &self,
         url: &str,
         preferences: &EnginePreferences,
+        offset: u32,
+        limit: u32,
     ) -> Result<GalleryItemList, AppError> {
         let validated = validate_bunkr_album_url(url)?;
+        if offset >= MAX_SELECTABLE_ITEMS || !(1..=MAX_GALLERY_PAGE_SIZE).contains(&limit) {
+            return Err(AppError::new(
+                "invalid_gallery_page",
+                "Album pages must contain between 1 and 24 files and stay within the first 1000 entries.",
+            ));
+        }
+        let end = offset.saturating_add(limit).min(MAX_SELECTABLE_ITEMS);
+        let range = format!("{}-{end}", offset + 1);
         let mut command = Command::new(&self.executable);
         command.kill_on_drop(true).args([
             "--config-ignore",
@@ -109,7 +120,10 @@ impl GalleryDlEngine {
             "--no-input",
             "--no-download",
             "--range",
-            "1-1000",
+        ]);
+        command.arg(range).args([
+            "--sleep-request",
+            "0.15-0.35",
             "--option",
             r#"output.mode="null""#,
             "--Print",
@@ -147,7 +161,7 @@ impl GalleryDlEngine {
                 "This album contains more item metadata than the application can safely display.",
             ));
         }
-        parse_item_list(&String::from_utf8_lossy(&output.stdout))
+        parse_item_list(&String::from_utf8_lossy(&output.stdout), offset)
     }
 
     pub fn build_download(
@@ -167,6 +181,8 @@ impl GalleryDlEngine {
             "--config-ignore".to_owned(),
             "--no-colors".to_owned(),
             "--no-input".to_owned(),
+            "--sleep-request".to_owned(),
+            "0.15-0.35".to_owned(),
             "--restrict-filenames".to_owned(),
             "unix".to_owned(),
             "--directory".to_owned(),
@@ -221,7 +237,7 @@ struct RawGalleryItem {
     thumbnail: Option<String>,
 }
 
-fn parse_item_list(value: &str) -> Result<GalleryItemList, AppError> {
+fn parse_item_list(value: &str, offset: u32) -> Result<GalleryItemList, AppError> {
     let mut items = Vec::new();
     let mut seen = HashSet::new();
     let mut total_count = 0;
@@ -236,7 +252,10 @@ fn parse_item_list(value: &str) -> Result<GalleryItemList, AppError> {
             AppError::internal("gallery-dl returned invalid album item JSON", error)
         })?;
         total_count = total_count.max(raw.count);
-        if raw.index == 0 || !seen.insert(raw.index) {
+        let Some(index) = offset.checked_add(raw.index) else {
+            continue;
+        };
+        if raw.index == 0 || !seen.insert(index) {
             continue;
         }
         let extension = raw.extension.and_then(clean_extension);
@@ -245,10 +264,10 @@ fn parse_item_list(value: &str) -> Result<GalleryItemList, AppError> {
             .as_deref()
             .map(clean_title)
             .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| format!("Album item {}", raw.index));
+            .unwrap_or_else(|| format!("Album item {index}"));
         let thumbnail = raw.thumbnail.filter(|url| validate_media_url(url).is_ok());
         items.push(GalleryItem {
-            index: raw.index,
+            index,
             id: raw.id.as_deref().map(clean_title).unwrap_or_default(),
             filename,
             is_video: extension.as_deref().is_some_and(is_video_extension),
@@ -267,10 +286,15 @@ fn parse_item_list(value: &str) -> Result<GalleryItemList, AppError> {
     if total_count == 0 {
         total_count = u32::try_from(items.len()).unwrap_or(u32::MAX);
     }
+    let loaded_through = offset.saturating_add(u32::try_from(items.len()).unwrap_or(u32::MAX));
+    let next_offset = (loaded_through < total_count && loaded_through < MAX_SELECTABLE_ITEMS)
+        .then_some(loaded_through);
     Ok(GalleryItemList {
-        truncated: total_count > u32::try_from(items.len()).unwrap_or(u32::MAX),
+        truncated: next_offset.is_some(),
         total_count,
         items,
+        offset,
+        next_offset,
     })
 }
 
@@ -576,10 +600,12 @@ mod tests {
         let items = parse_item_list(
             r#"{"index":1,"count":2,"id":"one","filename":"First video","extension":"MP4","size":42,"thumbnail":"https://i.example/one.png"}
 {"index":2,"count":2,"id":"two","filename":"Poster","extension":"jpg","size":12,"thumbnail":null}"#,
+            3,
         )
         .unwrap();
         assert_eq!(items.total_count, 2);
         assert!(!items.truncated);
+        assert_eq!(items.items[0].index, 4);
         assert!(items.items[0].is_video);
         assert!(!items.items[1].is_video);
         assert_eq!(items.items[0].extension.as_deref(), Some("mp4"));
@@ -677,7 +703,12 @@ mod tests {
     async fn lists_public_bunkr_album_items_without_media_urls() {
         let items = GalleryDlEngine::discover()
             .unwrap()
-            .list_items("https://bunkr.cr/a/ul3n82nu", &EnginePreferences::default())
+            .list_items(
+                "https://bunkr.cr/a/ul3n82nu",
+                &EnginePreferences::default(),
+                0,
+                12,
+            )
             .await
             .unwrap();
         assert!(items.items.len() > 1);
@@ -686,6 +717,24 @@ mod tests {
             .iter()
             .all(|item| !item.filename.contains("token=")));
         assert!(items.items.iter().any(|item| item.is_video));
+        let second_page = GalleryDlEngine::discover()
+            .unwrap()
+            .list_items(
+                "https://bunkr.cr/a/ul3n82nu",
+                &EnginePreferences::default(),
+                3,
+                2,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            second_page
+                .items
+                .iter()
+                .map(|item| item.index)
+                .collect::<Vec<_>>(),
+            [4, 5]
+        );
     }
 
     #[tokio::test]
