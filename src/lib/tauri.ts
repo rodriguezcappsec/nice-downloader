@@ -3,11 +3,14 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   BatchAnalysisResponse,
   DownloadJob,
+  DiskSpaceInfo,
   EngineInfo,
   EnginePreferences,
   GalleryItemList,
   HistoryEntry,
   MediaAnalysis,
+  QueueSettings,
+  QueueSnapshot,
   StartDownloadRequest,
 } from "../types";
 
@@ -28,6 +31,15 @@ export const api = {
     invoke<DownloadJob[]>("start_downloads", { requests }),
   cancelDownload: (jobId: string) => invoke<void>("cancel_download", { jobId }),
   retryDownload: (jobId: string) => invoke<DownloadJob>("retry_download", { jobId }),
+  pauseDownload: (jobId: string) => invoke<void>("pause_download", { jobId }),
+  resumeDownload: (jobId: string) => invoke<void>("resume_download", { jobId }),
+  getQueueSnapshot: () => invoke<QueueSnapshot>("get_queue_snapshot"),
+  updateQueueSettings: (settings: QueueSettings) =>
+    invoke<QueueSnapshot>("update_queue_settings", { settings }),
+  moveQueuedDownload: (jobId: string, newIndex: number) =>
+    invoke<QueueSnapshot>("move_queued_download", { jobId, newIndex }),
+  checkDiskSpace: (destination: string, requiredBytes?: number | null) =>
+    invoke<DiskSpaceInfo>("check_disk_space", { destination, requiredBytes }),
   listJobs: () => invoke<DownloadJob[]>("list_jobs"),
   listHistory: () => invoke<HistoryEntry[]>("list_history"),
   onJobUpdated: (handler: (job: DownloadJob) => void): Promise<UnlistenFn> =>

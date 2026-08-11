@@ -3,11 +3,14 @@ use crate::{
     engines::{discovery, gallery_dl::GalleryDlEngine, router, ytdlp::YtDlpEngine},
     errors::AppError,
     models::{
-        BatchAnalysisItem, BatchAnalysisResponse, DownloadJob, EngineInfo, EnginePreferences,
-        GalleryItemList, MediaAnalysis, StartDownloadRequest,
+        BatchAnalysisItem, BatchAnalysisResponse, DiskSpaceInfo, DownloadJob, EngineInfo,
+        EnginePreferences, GalleryItemList, MediaAnalysis, QueueSettings, QueueSnapshot,
+        StartDownloadRequest,
     },
-    queue::QueueManager,
-    utils::validation::{normalize_engine_preferences, validate_engine_preferences},
+    queue::{disk_space, QueueManager},
+    utils::validation::{
+        normalize_engine_preferences, validate_destination, validate_engine_preferences,
+    },
 };
 use std::{collections::HashSet, sync::Arc};
 use tauri::{AppHandle, Manager, State};
@@ -217,6 +220,55 @@ pub async fn cancel_download(
 #[tauri::command]
 pub async fn list_jobs(queue: State<'_, QueueManager>) -> Result<Vec<DownloadJob>, AppError> {
     Ok(queue.list().await)
+}
+
+#[tauri::command]
+pub async fn get_queue_snapshot(queue: State<'_, QueueManager>) -> Result<QueueSnapshot, AppError> {
+    Ok(queue.snapshot().await)
+}
+
+#[tauri::command]
+pub async fn update_queue_settings(
+    queue: State<'_, QueueManager>,
+    settings: QueueSettings,
+) -> Result<QueueSnapshot, AppError> {
+    queue.update_settings(settings).await
+}
+
+#[tauri::command]
+pub async fn move_queued_download(
+    queue: State<'_, QueueManager>,
+    job_id: String,
+    new_index: usize,
+) -> Result<QueueSnapshot, AppError> {
+    queue.move_pending(&job_id, new_index).await
+}
+
+#[tauri::command]
+pub async fn pause_download(
+    app: AppHandle,
+    queue: State<'_, QueueManager>,
+    job_id: String,
+) -> Result<(), AppError> {
+    queue.pause(&app, &job_id).await
+}
+
+#[tauri::command]
+pub async fn resume_download(
+    app: AppHandle,
+    queue: State<'_, QueueManager>,
+    job_id: String,
+) -> Result<(), AppError> {
+    queue.resume(&app, &job_id).await
+}
+
+#[tauri::command]
+pub fn check_disk_space(
+    destination: String,
+    required_bytes: Option<u64>,
+) -> Result<DiskSpaceInfo, AppError> {
+    let destination = validate_destination(&destination)?;
+    disk_space(&destination, required_bytes)
 }
 
 #[tauri::command]

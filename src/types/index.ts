@@ -143,6 +143,7 @@ export interface DownloadOptions {
 
 export type DownloadState =
   | "Queued"
+  | "Paused"
   | "Analyzing"
   | "Preparing"
   | "Downloading"
@@ -181,6 +182,24 @@ export interface StartDownloadRequest {
   url: string;
   analysis: MediaAnalysis;
   options: DownloadOptions;
+  scheduledFor?: string | null;
+}
+
+export interface QueueSettings {
+  concurrentDownloads: number;
+  paused: boolean;
+}
+
+export interface QueueSnapshot {
+  settings: QueueSettings;
+  orderedJobIds: string[];
+  activeJobIds: string[];
+}
+
+export interface DiskSpaceInfo {
+  availableBytes: number;
+  requiredBytes?: number | null;
+  sufficient: boolean;
 }
 
 export type HistoryEntry = DownloadJob;

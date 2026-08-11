@@ -28,7 +28,7 @@ pub fn run() {
                 format!("could not create the application data directory: {error}")
             })?;
             let database = Database::open(&data_directory.join("nice-downloader.sqlite3"))?;
-            let queue = QueueManager::new(database.clone(), 2)?;
+            let queue = QueueManager::new(database.clone())?;
             let recovery_queue = queue.clone();
             let recovery_app = app.handle().clone();
             let recovery_preferences = database.load_engine_preferences()?;
@@ -56,6 +56,12 @@ pub fn run() {
             commands::cancel_download,
             commands::retry_download,
             commands::list_jobs,
+            commands::get_queue_snapshot,
+            commands::update_queue_settings,
+            commands::move_queued_download,
+            commands::pause_download,
+            commands::resume_download,
+            commands::check_disk_space,
             commands::list_history,
         ])
         .run(tauri::generate_context!());

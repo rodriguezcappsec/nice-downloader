@@ -291,11 +291,46 @@ pub struct StartDownloadRequest {
     pub url: String,
     pub analysis: MediaAnalysis,
     pub options: DownloadOptions,
+    #[serde(default)]
+    pub scheduled_for: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueSettings {
+    pub concurrent_downloads: usize,
+    pub paused: bool,
+}
+
+impl Default for QueueSettings {
+    fn default() -> Self {
+        Self {
+            concurrent_downloads: 2,
+            paused: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueSnapshot {
+    pub settings: QueueSettings,
+    pub ordered_job_ids: Vec<String>,
+    pub active_job_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiskSpaceInfo {
+    pub available_bytes: u64,
+    pub required_bytes: Option<u64>,
+    pub sufficient: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum DownloadState {
     Queued,
+    Paused,
     Analyzing,
     Preparing,
     Downloading,

@@ -656,6 +656,7 @@ mod tests {
                 output_conflict_policy: OutputConflictPolicy::Skip,
                 gallery_selection: None,
             },
+            scheduled_for: None,
         };
         let prepared = engine
             .build_download(&request, &EnginePreferences::default())
@@ -774,6 +775,7 @@ mod tests {
                 ]),
             },
             analysis,
+            scheduled_for: None,
         };
         let mut prepared = engine
             .build_download(&request, &EnginePreferences::default())

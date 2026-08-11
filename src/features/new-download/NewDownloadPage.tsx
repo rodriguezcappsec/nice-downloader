@@ -14,8 +14,9 @@ import {
 import { useEffect, useMemo, useState } from "react";
 import { Button, Field, Input, Select, Textarea } from "../../components/ui";
 import { formatBytes, formatDuration } from "../../lib/format";
+import { api } from "../../lib/tauri";
 import { useAppStore } from "../../stores/app-store";
-import type { DownloadOptions, GalleryItem, MediaAnalysis, StartDownloadRequest } from "../../types";
+import type { DiskSpaceInfo, DownloadOptions, GalleryItem, MediaAnalysis, StartDownloadRequest } from "../../types";
 
 export function NewDownloadPage() {
   const analysis = useAppStore((state) => state.analysis);
@@ -43,6 +44,8 @@ export function NewDownloadPage() {
   const [selectedBatchUrls, setSelectedBatchUrls] = useState<string[]>([]);
   const [selectedGalleryIndices, setSelectedGalleryIndices] = useState<number[]>([]);
   const [gallerySearch, setGallerySearch] = useState("");
+  const [scheduledFor, setScheduledFor] = useState("");
+  const [diskSpace, setDiskSpace] = useState<DiskSpaceInfo | null>(null);
 
   useEffect(() => {
     if (!destination && defaultDestination) setDestination(defaultDestination);
@@ -88,6 +91,28 @@ export function NewDownloadPage() {
     [galleryItems, selectedGalleryIndices],
   );
   const selectedGallerySize = selectedGalleryItems.reduce((total, item) => total + (item.sizeBytes ?? 0), 0);
+  const estimatedBytes = isGallery
+    ? (selectedGallerySize || analysis?.totalSizeBytes || null)
+    : (analysis?.totalSizeBytes || largestKnownSize(analysis?.formats ?? []));
+
+  useEffect(() => {
+    if (!destination) {
+      setDiskSpace(null);
+      return;
+    }
+    let active = true;
+    const timer = window.setTimeout(() => {
+      void api.checkDiskSpace(destination, estimatedBytes).then((value) => {
+        if (active) setDiskSpace(value);
+      }).catch(() => {
+        if (active) setDiskSpace(null);
+      });
+    }, 250);
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+    };
+  }, [destination, estimatedBytes]);
 
   useEffect(() => {
     if (audioOnly && !["mp3", "m4a", "opus"].includes(container)) setContainer("mp3");
@@ -133,7 +158,12 @@ export function NewDownloadPage() {
         ? selectedGalleryItems.map((item) => ({ index: item.index, sizeBytes: item.sizeBytes }))
         : null,
     };
-    await startDownload({ url: analysis.downloadUrl || analysis.webpageUrl || url, analysis, options });
+    await startDownload({
+      url: analysis.downloadUrl || analysis.webpageUrl || url,
+      analysis,
+      options,
+      scheduledFor: scheduledFor ? new Date(scheduledFor).toISOString() : null,
+    });
     setStarting(false);
   }
 
@@ -145,6 +175,7 @@ export function NewDownloadPage() {
         url: item.analysis.downloadUrl || item.analysis.webpageUrl || item.inputUrl,
         analysis: item.analysis,
         options: defaultBatchOptions(item.analysis, destination, outputConflictPolicy),
+        scheduledFor: scheduledFor ? new Date(scheduledFor).toISOString() : null,
       }];
     });
     if (requests.length === 0) return;
@@ -335,6 +366,16 @@ export function NewDownloadPage() {
                   </Button>
                 </div>
               </Field>
+              {diskSpace ? (
+                <p className={`text-xs ${diskSpace.sufficient ? "text-muted" : "text-red-400"}`}>
+                  {formatBytes(diskSpace.availableBytes)} free
+                  {diskSpace.requiredBytes != null ? ` · ${formatBytes(diskSpace.requiredBytes)} recommended including temporary-file margin` : " · output size unknown"}
+                </p>
+              ) : null}
+
+              <Field label="Schedule" hint="Optional. The Rust queue will wait until this local date and time.">
+                <Input type="datetime-local" value={scheduledFor} onChange={(event) => setScheduledFor(event.target.value)} />
+              </Field>
 
               <Field label="If the output already exists">
                 <Select value={outputConflictPolicy} onChange={(event) => setOutputConflictPolicy(event.target.value as DownloadOptions["outputConflictPolicy"])}>
@@ -365,7 +406,7 @@ export function NewDownloadPage() {
                 ) : null}
               </div> : null}
 
-              <Button className="mt-1 w-full" disabled={!destination || starting || galleryItemsLoading || Boolean(isGallery && galleryItems && selectedGalleryItems.length === 0)} onClick={() => void submitDownload()}>
+              <Button className="mt-1 w-full" disabled={!destination || starting || galleryItemsLoading || diskSpace?.sufficient === false || Boolean(isGallery && galleryItems && selectedGalleryItems.length === 0)} onClick={() => void submitDownload()}>
                 {starting ? <LoaderCircle className="animate-spin" size={17} /> : !isGallery && audioOnly ? <Music2 size={17} /> : <Download size={17} />}
                 {starting ? "Adding to queue" : isGallery && galleryItems && (galleryItems.truncated || selectedGalleryItems.length !== galleryItems.items.length) ? `Download ${selectedGalleryItems.length} selected` : isGallery ? "Download album" : "Download"}
               </Button>
@@ -412,6 +453,9 @@ export function NewDownloadPage() {
                 <option value="skip">Skip</option>
                 <option value="overwrite">Overwrite</option>
               </Select>
+            </Field>
+            <Field label="Schedule">
+              <Input type="datetime-local" value={scheduledFor} onChange={(event) => setScheduledFor(event.target.value)} />
             </Field>
             <Button disabled={starting || selectedBatchUrls.length === 0 || !destination} onClick={() => void submitBatch()}>
               {starting ? <LoaderCircle className="animate-spin" size={17} /> : <Download size={17} />}
