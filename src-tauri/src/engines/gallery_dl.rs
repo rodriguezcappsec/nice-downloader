@@ -181,6 +181,12 @@ impl GalleryDlEngine {
             r#"output.mode={"start":"nicedl:gallery:output:{}\n","skip":"nicedl:gallery:output:{}\n","success":"nicedl:gallery:output:{}\n","progress":"\nnicedl:gallery:progress:NA|{0}|{1}|NA","progress-total":"\nnicedl:gallery:progress:{3}|{0}|{1}|{2}"}"#.to_owned(),
             "--option".to_owned(),
             "output.shorten=false".to_owned(),
+            "--option".to_owned(),
+            "downloader.http.retries=3".to_owned(),
+            "--option".to_owned(),
+            "downloader.http.sleep-429=exp:2:0:120=15".to_owned(),
+            "--option".to_owned(),
+            "downloader.http.retry-codes=[429]".to_owned(),
         ];
         if let Some(selection) = &request.options.gallery_selection {
             let range = build_range(
@@ -633,6 +639,14 @@ mod tests {
             .args
             .iter()
             .any(|arg| arg.starts_with("output.mode={") && arg.contains("progress-total")));
+        assert!(prepared
+            .args
+            .iter()
+            .any(|arg| arg == "downloader.http.sleep-429=exp:2:0:120=15"));
+        assert!(prepared
+            .args
+            .iter()
+            .any(|arg| arg == "downloader.http.retry-codes=[429]"));
     }
 
     #[tokio::test]
