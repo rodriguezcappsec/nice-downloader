@@ -7,6 +7,7 @@
 - Safe filename templates with local previews and backend validation.
 - Typed SponsorBlock category controls.
 - Durable archive records independent of deletable History rows, with explicit Download again overrides.
+- Backend-owned channel and playlist subscriptions with bounded checks, preset reuse, archive-aware deduplication, pause/resume, and Check now controls.
 
 ## Milestone 1: yt-dlp vertical slice
 

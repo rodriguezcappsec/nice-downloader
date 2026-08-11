@@ -446,6 +446,46 @@ pub struct DownloadArchiveMatch {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct Subscription {
+    pub id: String,
+    pub name: String,
+    pub url: String,
+    pub preset_id: String,
+    pub destination: String,
+    pub check_interval_minutes: u32,
+    pub max_entries: u32,
+    pub enabled: bool,
+    pub last_checked_at: Option<DateTime<Utc>>,
+    pub next_check_at: DateTime<Utc>,
+    pub last_error: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveSubscriptionRequest {
+    pub id: Option<String>,
+    pub name: String,
+    pub url: String,
+    pub preset_id: String,
+    pub destination: String,
+    pub check_interval_minutes: u32,
+    pub max_entries: u32,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubscriptionCheckResult {
+    pub subscription: Subscription,
+    pub discovered_count: usize,
+    pub queued_count: usize,
+    pub skipped_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct QueueSnapshot {
     pub settings: QueueSettings,
     pub ordered_job_ids: Vec<String>,

@@ -11,10 +11,12 @@ use crate::{
     models::{
         BatchAnalysisItem, BatchAnalysisResponse, DiskSpaceInfo, DownloadArchiveMatch, DownloadJob,
         EngineId, EngineInfo, EnginePreferences, GalleryItemList, MediaAnalysis, Preset,
-        QueueSettings, QueueSnapshot, SavePresetRequest, SaveSitePresetRuleRequest, SitePresetRule,
-        StartDownloadRequest,
+        QueueSettings, QueueSnapshot, SavePresetRequest, SaveSitePresetRuleRequest,
+        SaveSubscriptionRequest, SitePresetRule, StartDownloadRequest, Subscription,
+        SubscriptionCheckResult,
     },
     queue::{disk_space, QueueManager},
+    subscriptions,
     utils::validation::{
         normalize_engine_preferences, validate_destination, validate_engine_preferences,
         validate_media_url,
@@ -392,6 +394,34 @@ pub fn find_download_archive_match(
     validate_media_url(&url)?;
     let destination = validate_destination(&destination)?;
     database.archive_match(&url, &destination.to_string_lossy())
+}
+
+#[tauri::command]
+pub fn list_subscriptions(database: State<'_, Database>) -> Result<Vec<Subscription>, AppError> {
+    database.list_subscriptions()
+}
+
+#[tauri::command]
+pub fn save_subscription(
+    database: State<'_, Database>,
+    request: SaveSubscriptionRequest,
+) -> Result<Subscription, AppError> {
+    database.save_subscription(request)
+}
+
+#[tauri::command]
+pub fn delete_subscription(database: State<'_, Database>, id: String) -> Result<(), AppError> {
+    database.delete_subscription(&id)
+}
+
+#[tauri::command]
+pub async fn check_subscription_now(
+    app: AppHandle,
+    database: State<'_, Database>,
+    queue: State<'_, QueueManager>,
+    id: String,
+) -> Result<SubscriptionCheckResult, AppError> {
+    subscriptions::check_subscription(app, &database, &queue, &id).await
 }
 
 #[tauri::command]

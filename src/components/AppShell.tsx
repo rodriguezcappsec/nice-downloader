@@ -7,6 +7,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Plus,
+  Rss,
   Settings,
   SlidersHorizontal,
 } from "lucide-react";
@@ -18,6 +19,7 @@ const workspaceNavigation: { id: ViewId; label: string; icon: typeof Plus }[] = 
   { id: "downloads", label: "Downloads", icon: Download },
   { id: "queue", label: "Queue", icon: ListOrdered },
   { id: "history", label: "History", icon: History },
+  { id: "subscriptions", label: "Subscriptions", icon: Rss },
   { id: "presets", label: "Presets", icon: SlidersHorizontal },
 ];
 
