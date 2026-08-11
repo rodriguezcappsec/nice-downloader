@@ -400,18 +400,8 @@ impl QueueManager {
             self.cancellations.lock().await.remove(&id);
             tracing::info!(job_id = %id, "download completed");
         } else {
-            let detail = diagnostics
-                .back()
-                .map(|line| sanitize_diagnostic(line))
-                .filter(|line| !line.is_empty())
-                .unwrap_or_else(|| {
-                    format!(
-                        "{} exited without a diagnostic message",
-                        prepared.engine_name
-                    )
-                });
-            self.transition_failed(&app, &id, format!("Download failed: {detail}"))
-                .await;
+            let error = download_failure_message(prepared.kind, prepared.engine_name, &diagnostics);
+            self.transition_failed(&app, &id, error).await;
         }
     }
 
@@ -478,6 +468,18 @@ impl QueueManager {
                 job.diagnostics.push(diagnostic);
             })
             .await;
+        }
+
+        if engine_kind == PreparedEngineKind::GalleryDl && is_rate_limit_line(&line.text) {
+            self.update_job(app, id, |job| {
+                job.state = DownloadState::Downloading;
+                job.current_operation =
+                    "Bunkr rate limited the transfer; waiting before retry".to_owned();
+                job.speed_bytes_per_second = None;
+                job.eta_seconds = None;
+            })
+            .await;
+            return;
         }
 
         let operation = operation_from_engine_line(&line.text);
@@ -826,6 +828,29 @@ fn operation_from_engine_line(line: &str) -> Option<(DownloadState, &'static str
     }
 }
 
+fn is_rate_limit_line(line: &str) -> bool {
+    let lowercase = line.to_ascii_lowercase();
+    lowercase.contains("429") && lowercase.contains("too many requests")
+}
+
+fn download_failure_message(
+    engine_kind: PreparedEngineKind,
+    engine_name: &str,
+    diagnostics: &VecDeque<String>,
+) -> String {
+    if engine_kind == PreparedEngineKind::GalleryDl
+        && diagnostics.iter().any(|line| is_rate_limit_line(line))
+    {
+        return "Bunkr rate-limited the media transfer after several retries. Wait a few minutes and retry, or configure a different network proxy in Settings.".to_owned();
+    }
+    let detail = diagnostics
+        .back()
+        .map(|line| sanitize_diagnostic(line))
+        .filter(|line| !line.is_empty())
+        .unwrap_or_else(|| format!("{engine_name} exited without a diagnostic message"));
+    format!("Download failed: {detail}")
+}
+
 fn emit_job(app: &AppHandle, job: &DownloadJob) {
     if let Err(error) = app.emit(JOB_EVENT, job) {
         tracing::warn!(job_id = %job.id, %error, "could not emit job update");
@@ -906,6 +931,19 @@ mod tests {
             gallery_album_percent(&tracker, 50.0, Some(1_000), 250),
             25.0
         );
+    }
+
+    #[test]
+    fn preserves_rate_limit_context_when_gallery_dl_exits() {
+        let diagnostics = VecDeque::from([
+            "[downloader.http][warning] '429 Too Many Requests' (3/4)".to_owned(),
+            "[download][error] Failed to download selected-file.mkv".to_owned(),
+        ]);
+        assert_eq!(
+            download_failure_message(PreparedEngineKind::GalleryDl, "gallery-dl", &diagnostics),
+            "Bunkr rate-limited the media transfer after several retries. Wait a few minutes and retry, or configure a different network proxy in Settings."
+        );
+        assert!(is_rate_limit_line(&diagnostics[0]));
     }
 
     #[tokio::test]
