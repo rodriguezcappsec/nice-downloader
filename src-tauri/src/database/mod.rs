@@ -2,14 +2,15 @@ use crate::{
     errors::AppError,
     models::{
         DownloadArchiveMatch, DownloadJob, DownloadState, EnginePreferences, Preset, PresetIntent,
-        QueueSettings, SavePresetRequest, SaveSitePresetRuleRequest, SitePresetRule,
-        StartDownloadRequest,
+        QueueSettings, SavePresetRequest, SaveSitePresetRuleRequest, SaveSubscriptionRequest,
+        SitePresetRule, StartDownloadRequest, Subscription,
     },
     utils::validation::{
-        normalize_engine_preferences, validate_engine_preferences, validate_filename_template,
+        normalize_engine_preferences, validate_destination, validate_engine_preferences,
+        validate_filename_template, validate_media_url,
     },
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::{
     path::Path,
@@ -20,6 +21,7 @@ use uuid::Uuid;
 const MIGRATION_0001: &str = include_str!("migrations/0001_initial.sql");
 const MIGRATION_0002: &str = include_str!("migrations/0002_durable_queue.sql");
 const MIGRATION_0003: &str = include_str!("migrations/0003_workflow_intelligence.sql");
+const MIGRATION_0004: &str = include_str!("migrations/0004_subscriptions.sql");
 const ENGINE_PREFERENCES_KEY: &str = "engine.preferences";
 const QUEUE_SETTINGS_KEY: &str = "queue.settings";
 
@@ -54,6 +56,7 @@ impl Database {
             (1, MIGRATION_0001),
             (2, MIGRATION_0002),
             (3, MIGRATION_0003),
+            (4, MIGRATION_0004),
         ] {
             let migrated: bool = transaction.query_row(
                 "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = ?1)",
@@ -639,6 +642,237 @@ impl Database {
         });
         Ok(rules.into_iter().next())
     }
+
+    pub fn list_subscriptions(&self) -> Result<Vec<Subscription>, AppError> {
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "Subscription storage is unavailable.",
+            )
+        })?;
+        let mut statement = connection.prepare(
+            "SELECT id, name, url, preset_id, destination, check_interval_minutes,
+                    max_entries, enabled, last_checked_at, next_check_at, last_error,
+                    created_at, updated_at
+             FROM subscriptions ORDER BY name COLLATE NOCASE, created_at",
+        )?;
+        let rows = statement.query_map([], subscription_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+    }
+
+    pub fn load_subscription(&self, id: &str) -> Result<Subscription, AppError> {
+        let id = parse_uuid(
+            id,
+            "invalid_subscription_id",
+            "The subscription ID is invalid.",
+        )?;
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "Subscription storage is unavailable.",
+            )
+        })?;
+        connection
+            .query_row(
+                "SELECT id, name, url, preset_id, destination, check_interval_minutes,
+                        max_entries, enabled, last_checked_at, next_check_at, last_error,
+                        created_at, updated_at
+                 FROM subscriptions WHERE id = ?1",
+                [&id],
+                subscription_from_row,
+            )
+            .optional()?
+            .ok_or_else(|| {
+                AppError::new("subscription_not_found", "The subscription was not found.")
+            })
+    }
+
+    pub fn save_subscription(
+        &self,
+        request: SaveSubscriptionRequest,
+    ) -> Result<Subscription, AppError> {
+        let name = request.name.trim();
+        if name.is_empty() || name.chars().count() > 100 {
+            return Err(AppError::new(
+                "invalid_subscription_name",
+                "Subscription names must contain between 1 and 100 characters.",
+            ));
+        }
+        let url = validate_media_url(&request.url)?.to_string();
+        let destination = validate_destination(&request.destination)?
+            .to_string_lossy()
+            .into_owned();
+        if !(15..=10_080).contains(&request.check_interval_minutes) {
+            return Err(AppError::new(
+                "invalid_subscription_interval",
+                "Check intervals must be between 15 minutes and 7 days.",
+            ));
+        }
+        if !(1..=20).contains(&request.max_entries) {
+            return Err(AppError::new(
+                "invalid_subscription_limit",
+                "Subscriptions can inspect between 1 and 20 recent entries per check.",
+            ));
+        }
+        let preset_id = parse_uuid(
+            &request.preset_id,
+            "invalid_preset_id",
+            "The selected preset is invalid.",
+        )?;
+        let id = match request.id {
+            Some(id) => parse_uuid(
+                &id,
+                "invalid_subscription_id",
+                "The subscription ID is invalid.",
+            )?,
+            None => Uuid::new_v4().to_string(),
+        };
+        let now = Utc::now();
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "Subscription storage is unavailable.",
+            )
+        })?;
+        let preset_exists: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM presets WHERE id = ?1)",
+            [&preset_id],
+            |row| row.get(0),
+        )?;
+        if !preset_exists {
+            return Err(AppError::new(
+                "preset_not_found",
+                "Save the selected preset before creating a subscription.",
+            ));
+        }
+        connection.execute(
+            "INSERT INTO subscriptions
+                (id, name, url, preset_id, destination, check_interval_minutes, max_entries,
+                 enabled, last_checked_at, next_check_at, last_error, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, ?9, NULL, ?9, ?9)
+             ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                url = excluded.url,
+                preset_id = excluded.preset_id,
+                destination = excluded.destination,
+                check_interval_minutes = excluded.check_interval_minutes,
+                max_entries = excluded.max_entries,
+                enabled = excluded.enabled,
+                next_check_at = CASE
+                    WHEN excluded.enabled = 1 AND subscriptions.enabled = 0 THEN excluded.updated_at
+                    ELSE subscriptions.next_check_at
+                END,
+                updated_at = excluded.updated_at",
+            params![
+                id,
+                name,
+                url,
+                preset_id,
+                destination,
+                request.check_interval_minutes,
+                request.max_entries,
+                request.enabled,
+                now.timestamp_millis(),
+            ],
+        )?;
+        drop(connection);
+        self.load_subscription(&id)
+    }
+
+    pub fn delete_subscription(&self, id: &str) -> Result<(), AppError> {
+        let id = parse_uuid(
+            id,
+            "invalid_subscription_id",
+            "The subscription ID is invalid.",
+        )?;
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "Subscription storage is unavailable.",
+            )
+        })?;
+        if connection.execute("DELETE FROM subscriptions WHERE id = ?1", [&id])? == 0 {
+            return Err(AppError::new(
+                "subscription_not_found",
+                "The subscription was not found.",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn due_subscriptions(&self, limit: usize) -> Result<Vec<Subscription>, AppError> {
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "Subscription storage is unavailable.",
+            )
+        })?;
+        let mut statement = connection.prepare(
+            "SELECT id, name, url, preset_id, destination, check_interval_minutes,
+                    max_entries, enabled, last_checked_at, next_check_at, last_error,
+                    created_at, updated_at
+             FROM subscriptions
+             WHERE enabled = 1 AND next_check_at <= ?1
+             ORDER BY next_check_at LIMIT ?2",
+        )?;
+        let rows = statement.query_map(
+            params![
+                Utc::now().timestamp_millis(),
+                i64::try_from(limit).unwrap_or(20)
+            ],
+            subscription_from_row,
+        )?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+    }
+
+    pub fn record_subscription_check(
+        &self,
+        id: &str,
+        error: Option<&str>,
+    ) -> Result<Subscription, AppError> {
+        let subscription = self.load_subscription(id)?;
+        let now = Utc::now();
+        let next = now + Duration::minutes(i64::from(subscription.check_interval_minutes));
+        let error = error.map(|value| value.chars().take(500).collect::<String>());
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "Subscription storage is unavailable.",
+            )
+        })?;
+        connection.execute(
+            "UPDATE subscriptions
+             SET last_checked_at = ?2, next_check_at = ?3, last_error = ?4, updated_at = ?2
+             WHERE id = ?1",
+            params![id, now.timestamp_millis(), next.timestamp_millis(), error],
+        )?;
+        drop(connection);
+        self.load_subscription(id)
+    }
+}
+
+fn subscription_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Subscription> {
+    Ok(Subscription {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        url: row.get(2)?,
+        preset_id: row.get(3)?,
+        destination: row.get(4)?,
+        check_interval_minutes: u32::try_from(row.get::<_, i64>(5)?).unwrap_or(360),
+        max_entries: u32::try_from(row.get::<_, i64>(6)?).unwrap_or(10),
+        enabled: row.get(7)?,
+        last_checked_at: row.get::<_, Option<i64>>(8)?.map(timestamp_or_epoch),
+        next_check_at: timestamp_or_epoch(row.get(9)?),
+        last_error: row.get(10)?,
+        created_at: timestamp_or_epoch(row.get(11)?),
+        updated_at: timestamp_or_epoch(row.get(12)?),
+    })
+}
+
+fn parse_uuid(value: &str, code: &'static str, message: &'static str) -> Result<String, AppError> {
+    Uuid::parse_str(value)
+        .map(|value| value.to_string())
+        .map_err(|_| AppError::new(code, message))
 }
 
 fn site_preset_rule_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SitePresetRule> {
@@ -971,6 +1205,57 @@ mod tests {
             .list_site_preset_rules()
             .expect("cascade site rules")
             .is_empty());
+    }
+
+    #[test]
+    fn schedules_and_records_subscriptions() {
+        use crate::models::{
+            AudioQuality, OutputConflictPolicy, OutputContainer, PresetIntent, SavePresetRequest,
+            SaveSubscriptionRequest, VideoCodecPreference,
+        };
+        let directory = tempdir().expect("temporary directory");
+        let database =
+            Database::open(&directory.path().join("subscriptions.sqlite3")).expect("database");
+        let preset = database
+            .save_preset(SavePresetRequest {
+                id: None,
+                name: "Subscription default".to_owned(),
+                intent: PresetIntent {
+                    quality: "best".to_owned(),
+                    container: OutputContainer::Mkv,
+                    video_codec_preference: VideoCodecPreference::Any,
+                    audio_quality: AudioQuality::Best,
+                    embed_thumbnail: false,
+                    embed_metadata: true,
+                    output_conflict_policy: OutputConflictPolicy::Skip,
+                    sponsorblock_categories: vec![],
+                    filename_template: None,
+                },
+            })
+            .expect("preset");
+        let subscription = database
+            .save_subscription(SaveSubscriptionRequest {
+                id: None,
+                name: "Example channel".to_owned(),
+                url: "https://example.com/channel".to_owned(),
+                preset_id: preset.id,
+                destination: directory.path().to_string_lossy().into_owned(),
+                check_interval_minutes: 60,
+                max_entries: 5,
+                enabled: true,
+            })
+            .expect("subscription");
+        assert_eq!(database.due_subscriptions(10).expect("due").len(), 1);
+        let checked = database
+            .record_subscription_check(&subscription.id, Some("temporary failure"))
+            .expect("record check");
+        assert!(checked.last_checked_at.is_some());
+        assert_eq!(checked.last_error.as_deref(), Some("temporary failure"));
+        assert!(database.due_subscriptions(10).expect("not due").is_empty());
+        database
+            .delete_subscription(&subscription.id)
+            .expect("delete subscription");
+        assert!(database.list_subscriptions().expect("list").is_empty());
     }
 
     #[test]

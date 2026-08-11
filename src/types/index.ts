@@ -3,6 +3,7 @@ export type ViewId =
   | "downloads"
   | "queue"
   | "history"
+  | "subscriptions"
   | "presets"
   | "settings";
 
@@ -287,6 +288,40 @@ export interface DownloadArchiveMatch {
   destination: string;
   outputPath?: string | null;
   completedAt: string;
+}
+
+export interface Subscription {
+  id: string;
+  name: string;
+  url: string;
+  presetId: string;
+  destination: string;
+  checkIntervalMinutes: number;
+  maxEntries: number;
+  enabled: boolean;
+  lastCheckedAt?: string | null;
+  nextCheckAt: string;
+  lastError?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SaveSubscriptionRequest {
+  id?: string | null;
+  name: string;
+  url: string;
+  presetId: string;
+  destination: string;
+  checkIntervalMinutes: number;
+  maxEntries: number;
+  enabled: boolean;
+}
+
+export interface SubscriptionCheckResult {
+  subscription: Subscription;
+  discoveredCount: number;
+  queuedCount: number;
+  skippedCount: number;
 }
 
 export type HistoryEntry = DownloadJob;

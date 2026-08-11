@@ -4,6 +4,7 @@ mod engines;
 mod errors;
 mod models;
 mod queue;
+mod subscriptions;
 mod utils;
 
 use crate::{database::Database, engines::managed, queue::QueueManager};
@@ -38,6 +39,7 @@ pub fn run() {
                     .recover_pending(recovery_app, recovery_preferences)
                     .await;
             });
+            subscriptions::spawn_scheduler(app.handle().clone(), database.clone(), queue.clone());
             app.manage(database);
             app.manage(queue);
             tracing::info!(path = %data_directory.display(), "application backend initialized");
@@ -80,6 +82,10 @@ pub fn run() {
             commands::delete_site_preset_rule,
             commands::match_site_preset_rule,
             commands::find_download_archive_match,
+            commands::list_subscriptions,
+            commands::save_subscription,
+            commands::delete_subscription,
+            commands::check_subscription_now,
             commands::open_download_output,
             commands::export_diagnostics,
         ])

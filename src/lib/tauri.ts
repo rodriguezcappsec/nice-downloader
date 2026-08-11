@@ -19,6 +19,9 @@ import type {
   SaveSitePresetRuleRequest,
   SitePresetRule,
   DownloadArchiveMatch,
+  SaveSubscriptionRequest,
+  Subscription,
+  SubscriptionCheckResult,
   StartDownloadRequest,
 } from "../types";
 
@@ -73,6 +76,12 @@ export const api = {
     invoke<SitePresetRule | null>("match_site_preset_rule", { url }),
   findDownloadArchiveMatch: (url: string, destination: string) =>
     invoke<DownloadArchiveMatch | null>("find_download_archive_match", { url, destination }),
+  listSubscriptions: () => invoke<Subscription[]>("list_subscriptions"),
+  saveSubscription: (request: SaveSubscriptionRequest) =>
+    invoke<Subscription>("save_subscription", { request }),
+  deleteSubscription: (id: string) => invoke<void>("delete_subscription", { id }),
+  checkSubscriptionNow: (id: string) =>
+    invoke<SubscriptionCheckResult>("check_subscription_now", { id }),
   openDownloadOutput: (jobId: string, reveal: boolean) =>
     invoke<void>("open_download_output", { jobId, reveal }),
   exportDiagnostics: (path: string) => invoke<void>("export_diagnostics", { path }),
