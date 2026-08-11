@@ -1,5 +1,11 @@
 # Nice Downloader Architecture
 
+## Intelligent workflow persistence
+
+Migration 0003 adds `site_preset_rules` and `download_archive`. Site rules associate a saved typed preset with a normalized host suffix and optional path prefix; matching never evaluates regular expressions or executable actions. Completed downloads are upserted into the archive independently of History rows, so record-only History deletion does not disable destination-scoped duplicate detection.
+
+Filename templates remain typed intent. Rust rejects empty templates, path separators, control characters, and values longer than 240 characters before spawning an engine. SponsorBlock categories are represented by a Rust enum and mapped to a fixed yt-dlp category allowlist.
+
 Nice Downloader is a Linux-first Tauri desktop application that presents a stable, task-oriented interface over mature media tools. React renders the desktop experience; Rust owns every privileged or authoritative operation.
 
 ## Design principles

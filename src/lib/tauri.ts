@@ -16,6 +16,9 @@ import type {
   QueueSnapshot,
   Preset,
   SavePresetRequest,
+  SaveSitePresetRuleRequest,
+  SitePresetRule,
+  DownloadArchiveMatch,
   StartDownloadRequest,
 } from "../types";
 
@@ -62,6 +65,14 @@ export const api = {
   listPresets: () => invoke<Preset[]>("list_presets"),
   savePreset: (request: SavePresetRequest) => invoke<Preset>("save_preset", { request }),
   deletePreset: (id: string) => invoke<void>("delete_preset", { id }),
+  listSitePresetRules: () => invoke<SitePresetRule[]>("list_site_preset_rules"),
+  saveSitePresetRule: (request: SaveSitePresetRuleRequest) =>
+    invoke<SitePresetRule>("save_site_preset_rule", { request }),
+  deleteSitePresetRule: (id: string) => invoke<void>("delete_site_preset_rule", { id }),
+  matchSitePresetRule: (url: string) =>
+    invoke<SitePresetRule | null>("match_site_preset_rule", { url }),
+  findDownloadArchiveMatch: (url: string, destination: string) =>
+    invoke<DownloadArchiveMatch | null>("find_download_archive_match", { url, destination }),
   openDownloadOutput: (jobId: string, reveal: boolean) =>
     invoke<void>("open_download_output", { jobId, reveal }),
   exportDiagnostics: (path: string) => invoke<void>("export_diagnostics", { path }),

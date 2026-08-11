@@ -9,13 +9,15 @@ use crate::{
     },
     errors::AppError,
     models::{
-        BatchAnalysisItem, BatchAnalysisResponse, DiskSpaceInfo, DownloadJob, EngineId, EngineInfo,
-        EnginePreferences, GalleryItemList, MediaAnalysis, Preset, QueueSettings, QueueSnapshot,
-        SavePresetRequest, StartDownloadRequest,
+        BatchAnalysisItem, BatchAnalysisResponse, DiskSpaceInfo, DownloadArchiveMatch, DownloadJob,
+        EngineId, EngineInfo, EnginePreferences, GalleryItemList, MediaAnalysis, Preset,
+        QueueSettings, QueueSnapshot, SavePresetRequest, SaveSitePresetRuleRequest, SitePresetRule,
+        StartDownloadRequest,
     },
     queue::{disk_space, QueueManager},
     utils::validation::{
         normalize_engine_preferences, validate_destination, validate_engine_preferences,
+        validate_media_url,
     },
 };
 use std::{collections::HashSet, sync::Arc};
@@ -350,6 +352,46 @@ pub fn save_preset(
 #[tauri::command]
 pub fn delete_preset(database: State<'_, Database>, id: String) -> Result<(), AppError> {
     database.delete_preset(&id)
+}
+
+#[tauri::command]
+pub fn list_site_preset_rules(
+    database: State<'_, Database>,
+) -> Result<Vec<SitePresetRule>, AppError> {
+    database.list_site_preset_rules()
+}
+
+#[tauri::command]
+pub fn save_site_preset_rule(
+    database: State<'_, Database>,
+    request: SaveSitePresetRuleRequest,
+) -> Result<SitePresetRule, AppError> {
+    database.save_site_preset_rule(request)
+}
+
+#[tauri::command]
+pub fn delete_site_preset_rule(database: State<'_, Database>, id: String) -> Result<(), AppError> {
+    database.delete_site_preset_rule(&id)
+}
+
+#[tauri::command]
+pub fn match_site_preset_rule(
+    database: State<'_, Database>,
+    url: String,
+) -> Result<Option<SitePresetRule>, AppError> {
+    validate_media_url(&url)?;
+    database.match_site_preset_rule(&url)
+}
+
+#[tauri::command]
+pub fn find_download_archive_match(
+    database: State<'_, Database>,
+    url: String,
+    destination: String,
+) -> Result<Option<DownloadArchiveMatch>, AppError> {
+    validate_media_url(&url)?;
+    let destination = validate_destination(&destination)?;
+    database.archive_match(&url, &destination.to_string_lossy())
 }
 
 #[tauri::command]

@@ -1,10 +1,13 @@
 use crate::{
     errors::AppError,
     models::{
-        DownloadJob, DownloadState, EnginePreferences, Preset, PresetIntent, QueueSettings,
-        SavePresetRequest, StartDownloadRequest,
+        DownloadArchiveMatch, DownloadJob, DownloadState, EnginePreferences, Preset, PresetIntent,
+        QueueSettings, SavePresetRequest, SaveSitePresetRuleRequest, SitePresetRule,
+        StartDownloadRequest,
     },
-    utils::validation::{normalize_engine_preferences, validate_engine_preferences},
+    utils::validation::{
+        normalize_engine_preferences, validate_engine_preferences, validate_filename_template,
+    },
 };
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -16,6 +19,7 @@ use uuid::Uuid;
 
 const MIGRATION_0001: &str = include_str!("migrations/0001_initial.sql");
 const MIGRATION_0002: &str = include_str!("migrations/0002_durable_queue.sql");
+const MIGRATION_0003: &str = include_str!("migrations/0003_workflow_intelligence.sql");
 const ENGINE_PREFERENCES_KEY: &str = "engine.preferences";
 const QUEUE_SETTINGS_KEY: &str = "queue.settings";
 
@@ -46,7 +50,11 @@ impl Database {
         transaction.execute_batch(
             "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY NOT NULL);",
         )?;
-        for (version, migration) in [(1, MIGRATION_0001), (2, MIGRATION_0002)] {
+        for (version, migration) in [
+            (1, MIGRATION_0001),
+            (2, MIGRATION_0002),
+            (3, MIGRATION_0003),
+        ] {
             let migrated: bool = transaction.query_row(
                 "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = ?1)",
                 [version],
@@ -123,6 +131,23 @@ impl Database {
                 job.retry_of_id,
             ],
         )?;
+        if job.state == DownloadState::Completed {
+            connection.execute(
+                "INSERT INTO download_archive (url, destination, output_path, completed_at)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(url, destination) DO UPDATE SET
+                    output_path = excluded.output_path,
+                    completed_at = excluded.completed_at",
+                params![
+                    job.url,
+                    job.destination,
+                    job.output_path,
+                    job.completed_at
+                        .unwrap_or(job.updated_at)
+                        .timestamp_millis(),
+                ],
+            )?;
+        }
         Ok(())
     }
 
@@ -267,11 +292,37 @@ impl Database {
         })?;
         connection
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM downloads
-                 WHERE state = 'Completed' AND url = ?1 AND destination = ?2)",
+                "SELECT EXISTS(SELECT 1 FROM download_archive
+                 WHERE url = ?1 AND destination = ?2)",
                 params![url, destination],
                 |row| row.get(0),
             )
+            .map_err(AppError::from)
+    }
+
+    pub fn archive_match(
+        &self,
+        url: &str,
+        destination: &str,
+    ) -> Result<Option<DownloadArchiveMatch>, AppError> {
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "Download archive is unavailable.")
+        })?;
+        connection
+            .query_row(
+                "SELECT url, destination, output_path, completed_at
+                 FROM download_archive WHERE url = ?1 AND destination = ?2",
+                params![url, destination],
+                |row| {
+                    Ok(DownloadArchiveMatch {
+                        url: row.get(0)?,
+                        destination: row.get(1)?,
+                        output_path: row.get(2)?,
+                        completed_at: timestamp_or_epoch(row.get(3)?),
+                    })
+                },
+            )
+            .optional()
             .map_err(AppError::from)
     }
 
@@ -399,6 +450,14 @@ impl Database {
                 "The preset quality is not supported.",
             ));
         }
+        if let Some(template) = request
+            .intent
+            .filename_template
+            .as_deref()
+            .filter(|template| !template.is_empty())
+        {
+            validate_filename_template(template)?;
+        }
         let id = match request.id {
             Some(id) => Uuid::parse_str(&id)
                 .map_err(|_| AppError::new("invalid_preset_id", "The preset ID is invalid."))?
@@ -450,6 +509,191 @@ impl Database {
         }
         Ok(())
     }
+
+    pub fn list_site_preset_rules(&self) -> Result<Vec<SitePresetRule>, AppError> {
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "Site rule storage is unavailable.")
+        })?;
+        let mut statement = connection.prepare(
+            "SELECT id, name, host_suffix, path_prefix, preset_id, enabled, created_at, updated_at
+             FROM site_preset_rules ORDER BY name COLLATE NOCASE, created_at",
+        )?;
+        let rows = statement.query_map([], site_preset_rule_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+    }
+
+    pub fn save_site_preset_rule(
+        &self,
+        request: SaveSitePresetRuleRequest,
+    ) -> Result<SitePresetRule, AppError> {
+        let name = request.name.trim();
+        if name.is_empty() || name.chars().count() > 80 {
+            return Err(AppError::new(
+                "invalid_site_rule_name",
+                "Rule names must contain between 1 and 80 characters.",
+            ));
+        }
+        let host_suffix = normalize_host_suffix(&request.host_suffix)?;
+        let path_prefix = normalize_path_prefix(request.path_prefix.as_deref())?;
+        let preset_id = Uuid::parse_str(&request.preset_id)
+            .map_err(|_| AppError::new("invalid_preset_id", "The selected preset is invalid."))?
+            .to_string();
+        let id = match request.id {
+            Some(id) => Uuid::parse_str(&id)
+                .map_err(|_| AppError::new("invalid_site_rule_id", "The site rule ID is invalid."))?
+                .to_string(),
+            None => Uuid::new_v4().to_string(),
+        };
+        let now = Utc::now();
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "Site rule storage is unavailable.")
+        })?;
+        let preset_exists: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM presets WHERE id = ?1)",
+            [&preset_id],
+            |row| row.get(0),
+        )?;
+        if !preset_exists {
+            return Err(AppError::new(
+                "preset_not_found",
+                "Save the selected preset before creating this rule.",
+            ));
+        }
+        connection.execute(
+            "INSERT INTO site_preset_rules
+                (id, name, host_suffix, path_prefix, preset_id, enabled, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+             ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                host_suffix = excluded.host_suffix,
+                path_prefix = excluded.path_prefix,
+                preset_id = excluded.preset_id,
+                enabled = excluded.enabled,
+                updated_at = excluded.updated_at",
+            params![
+                id,
+                name,
+                host_suffix,
+                path_prefix,
+                preset_id,
+                request.enabled,
+                now.timestamp_millis(),
+            ],
+        )?;
+        let created_at = connection.query_row(
+            "SELECT created_at FROM site_preset_rules WHERE id = ?1",
+            [&id],
+            |row| row.get::<_, i64>(0),
+        )?;
+        Ok(SitePresetRule {
+            id,
+            name: name.to_owned(),
+            host_suffix,
+            path_prefix,
+            preset_id,
+            enabled: request.enabled,
+            created_at: timestamp_or_epoch(created_at),
+            updated_at: now,
+        })
+    }
+
+    pub fn delete_site_preset_rule(&self, id: &str) -> Result<(), AppError> {
+        let id = Uuid::parse_str(id)
+            .map_err(|_| AppError::new("invalid_site_rule_id", "The site rule ID is invalid."))?
+            .to_string();
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "Site rule storage is unavailable.")
+        })?;
+        if connection.execute("DELETE FROM site_preset_rules WHERE id = ?1", [&id])? == 0 {
+            return Err(AppError::new(
+                "site_rule_not_found",
+                "The site rule was not found.",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn match_site_preset_rule(&self, url: &str) -> Result<Option<SitePresetRule>, AppError> {
+        let parsed = url::Url::parse(url)
+            .map_err(|_| AppError::new("invalid_url", "Enter a valid HTTP or HTTPS URL."))?;
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| AppError::new("invalid_url", "The URL must include a host."))?
+            .trim_end_matches('.')
+            .to_ascii_lowercase();
+        let path = parsed.path();
+        let mut rules = self.list_site_preset_rules()?;
+        rules.retain(|rule| {
+            rule.enabled
+                && (host == rule.host_suffix || host.ends_with(&format!(".{}", rule.host_suffix)))
+                && rule
+                    .path_prefix
+                    .as_deref()
+                    .is_none_or(|prefix| path.starts_with(prefix))
+        });
+        rules.sort_by_key(|rule| {
+            std::cmp::Reverse((
+                rule.host_suffix.len(),
+                rule.path_prefix.as_deref().map_or(0, str::len),
+            ))
+        });
+        Ok(rules.into_iter().next())
+    }
+}
+
+fn site_preset_rule_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SitePresetRule> {
+    Ok(SitePresetRule {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        host_suffix: row.get(2)?,
+        path_prefix: row.get(3)?,
+        preset_id: row.get(4)?,
+        enabled: row.get(5)?,
+        created_at: timestamp_or_epoch(row.get(6)?),
+        updated_at: timestamp_or_epoch(row.get(7)?),
+    })
+}
+
+fn normalize_host_suffix(value: &str) -> Result<String, AppError> {
+    let value = value.trim().trim_start_matches("*.").trim_end_matches('.');
+    if value.is_empty() || value.len() > 253 || value.contains(['/', ':', '?', '#']) {
+        return Err(AppError::new(
+            "invalid_host_suffix",
+            "Enter a hostname such as youtube.com, without a URL path.",
+        ));
+    }
+    let parsed = url::Url::parse(&format!("https://{value}/"))
+        .map_err(|_| AppError::new("invalid_host_suffix", "Enter a valid hostname."))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| AppError::new("invalid_host_suffix", "Enter a valid hostname."))?
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    if host != value.to_ascii_lowercase() {
+        return Err(AppError::new(
+            "invalid_host_suffix",
+            "Enter a hostname such as youtube.com.",
+        ));
+    }
+    Ok(host)
+}
+
+fn normalize_path_prefix(value: Option<&str>) -> Result<Option<String>, AppError> {
+    let value = value.map(str::trim).filter(|value| !value.is_empty());
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if !value.starts_with('/')
+        || value.len() > 256
+        || value.contains(['?', '#'])
+        || value.chars().any(char::is_control)
+    {
+        return Err(AppError::new(
+            "invalid_path_prefix",
+            "Path prefixes must start with / and cannot contain a query or fragment.",
+        ));
+    }
+    Ok(Some(value.to_owned()))
 }
 
 fn job_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DownloadJob> {
@@ -588,6 +832,7 @@ mod tests {
             embed_metadata: true,
             chapters: false,
             sponsorblock: false,
+            sponsorblock_categories: vec![],
             destination: job.destination.clone(),
             filename_template: "%(title)s.%(ext)s".to_owned(),
             output_conflict_policy: OutputConflictPolicy::Skip,
@@ -625,6 +870,20 @@ mod tests {
         assert_eq!(history[0].title, "Example");
         assert_eq!(history[0].diagnostics, ["finished"]);
         assert_eq!(history[0].attempt_count, 2);
+        assert!(database
+            .archive_match(&job.url, &job.destination)
+            .expect("archive lookup")
+            .is_some());
+        database
+            .connection
+            .lock()
+            .expect("database lock")
+            .execute("DELETE FROM downloads WHERE id = ?1", [&job.id])
+            .expect("delete history record");
+        assert!(database
+            .archive_match(&job.url, &job.destination)
+            .expect("archive survives history deletion")
+            .is_some());
     }
 
     #[test]
@@ -661,7 +920,7 @@ mod tests {
     fn creates_lists_and_deletes_presets() {
         use crate::models::{
             AudioQuality, OutputConflictPolicy, OutputContainer, PresetIntent, SavePresetRequest,
-            VideoCodecPreference,
+            SaveSitePresetRuleRequest, VideoCodecPreference,
         };
         let directory = tempdir().expect("temporary directory");
         let database = Database::open(&directory.path().join("presets.sqlite3")).expect("database");
@@ -677,13 +936,41 @@ mod tests {
                     embed_thumbnail: false,
                     embed_metadata: true,
                     output_conflict_policy: OutputConflictPolicy::Skip,
+                    sponsorblock_categories: vec![],
+                    filename_template: None,
                 },
             })
             .expect("save preset");
         assert_eq!(preset.name, "Living room");
         assert_eq!(database.list_presets().expect("list presets").len(), 1);
+        let rule = database
+            .save_site_preset_rule(SaveSitePresetRuleRequest {
+                id: None,
+                name: "YouTube shorts".to_owned(),
+                host_suffix: "*.YouTube.com".to_owned(),
+                path_prefix: Some("/shorts/".to_owned()),
+                preset_id: preset.id.clone(),
+                enabled: true,
+            })
+            .expect("save site rule");
+        assert_eq!(rule.host_suffix, "youtube.com");
+        assert_eq!(
+            database
+                .match_site_preset_rule("https://www.youtube.com/shorts/example")
+                .expect("match rule")
+                .map(|matched| matched.id),
+            Some(rule.id.clone())
+        );
+        assert!(database
+            .match_site_preset_rule("https://www.youtube.com/watch?v=example")
+            .expect("path mismatch")
+            .is_none());
         database.delete_preset(&preset.id).expect("delete preset");
         assert!(database.list_presets().expect("list presets").is_empty());
+        assert!(database
+            .list_site_preset_rules()
+            .expect("cascade site rules")
+            .is_empty());
     }
 
     #[test]

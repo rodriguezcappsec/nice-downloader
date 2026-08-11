@@ -343,7 +343,16 @@ impl DownloadEngine for YtDlpEngine {
                 ]);
             }
         }
-        if options.sponsorblock {
+        if !options.sponsorblock_categories.is_empty() {
+            let categories = options
+                .sponsorblock_categories
+                .iter()
+                .map(|category| category.as_ytdlp())
+                .collect::<Vec<_>>()
+                .join(",");
+            args.extend(["--sponsorblock-remove".to_owned(), categories]);
+        } else if options.sponsorblock {
+            // Backward compatibility for persisted requests created before category selection.
             args.extend(["--sponsorblock-remove".to_owned(), "all".to_owned()]);
         }
         match options.format_strategy {
@@ -559,7 +568,9 @@ fn friendly_engine_error(details: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{AudioQuality, BrowserCookieSource, OutputContainer, QualityOption};
+    use crate::models::{
+        AudioQuality, BrowserCookieSource, OutputContainer, QualityOption, SponsorBlockCategory,
+    };
 
     fn options(kind: QualityKind, height: Option<u32>, audio_only: bool) -> DownloadOptions {
         DownloadOptions {
@@ -585,6 +596,7 @@ mod tests {
             embed_metadata: true,
             chapters: false,
             sponsorblock: false,
+            sponsorblock_categories: vec![],
             destination: "/tmp".to_owned(),
             filename_template: "%(title)s.%(ext)s".to_owned(),
             output_conflict_policy: OutputConflictPolicy::Skip,
@@ -640,6 +652,31 @@ mod tests {
         assert!(overwrite_args
             .iter()
             .any(|argument| argument == "--force-overwrites"));
+    }
+
+    #[test]
+    fn maps_typed_sponsorblock_categories() {
+        let engine = YtDlpEngine {
+            executable: PathBuf::from("yt-dlp"),
+        };
+        let mut download_options = options(QualityKind::Best, None, false);
+        download_options.sponsorblock_categories = vec![
+            SponsorBlockCategory::Sponsor,
+            SponsorBlockCategory::SelfPromotion,
+            SponsorBlockCategory::MusicOfftopic,
+        ];
+        let args = engine
+            .build_download_args(
+                "https://example.com/video",
+                &download_options,
+                None,
+                &EnginePreferences::default(),
+                &YtDlpRuntimeCapabilities::default(),
+            )
+            .expect("typed SponsorBlock arguments");
+        assert!(args
+            .windows(2)
+            .any(|pair| { pair == ["--sponsorblock-remove", "sponsor,selfpromo,music_offtopic"] }));
     }
 
     #[test]

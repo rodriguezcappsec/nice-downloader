@@ -1,5 +1,13 @@
 # Nice Downloader Roadmap
 
+## Intelligent repeat workflows delivered
+
+- Opt-in clipboard URL detection that never analyzes or downloads automatically.
+- SQLite-backed host/path rules that apply saved presets and remain manually overridable.
+- Safe filename templates with local previews and backend validation.
+- Typed SponsorBlock category controls.
+- Durable archive records independent of deletable History rows, with explicit Download again overrides.
+
 ## Milestone 1: yt-dlp vertical slice
 
 Deliver a runnable Linux desktop application that proves the complete path:
@@ -83,4 +91,4 @@ Linux `.deb` and AppImage bundle targets plus first-run required-engine guidance
 
 ## Deferred by design
 
-Browser extensions, subscriptions, standalone cookie-file importing, SponsorBlock UI, automatic binary downloads, and broad platform packaging are intentionally outside milestone 1.
+Browser extensions, subscriptions, standalone cookie-file importing, and broad platform packaging remain outside milestone 1.
