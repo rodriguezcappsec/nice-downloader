@@ -2,18 +2,21 @@ import {
   CheckCircle2,
   CircleX,
   Cookie,
+  DownloadCloud,
   Network,
   RefreshCw,
+  RotateCcw,
   Save,
   Settings2,
   ShieldCheck,
   Wrench,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Page } from "../../components/Page";
 import { Button, Field, Input, Select } from "../../components/ui";
 import { useAppStore } from "../../stores/app-store";
-import type { BrowserCookieSource } from "../../types";
+import { api, normalizeError } from "../../lib/tauri";
+import type { BrowserCookieSource, EngineId, EngineUpdateCandidate, ManagedEngineStatus } from "../../types";
 
 const browserOptions: { value: BrowserCookieSource; label: string }[] = [
   { value: "none", label: "Do not use browser cookies" },
@@ -33,14 +36,68 @@ export function SettingsPage() {
   const savePreferences = useAppStore((state) => state.saveEnginePreferences);
   const loading = useAppStore((state) => state.engineLoading);
   const detect = useAppStore((state) => state.detectEngines);
+  const setError = useAppStore((state) => state.setError);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [testUrl, setTestUrl] = useState("");
+  const [testResult, setTestResult] = useState("");
+  const [testing, setTesting] = useState(false);
+  const [managed, setManaged] = useState<ManagedEngineStatus[]>([]);
+  const [candidate, setCandidate] = useState<EngineUpdateCandidate | null>(null);
+  const [managing, setManaging] = useState<EngineId | null>(null);
+
+  useEffect(() => {
+    void api.listManagedEngines().then(setManaged).catch((error) => setError(normalizeError(error)));
+  }, [setError]);
 
   async function save() {
     setSaving(true);
     setSaved(false);
     setSaved(await savePreferences());
     setSaving(false);
+  }
+
+  function replaceManaged(status: ManagedEngineStatus) {
+    setManaged((items) => items.map((item) => item.engine === status.engine ? status : item));
+  }
+
+  async function checkUpdate(engine: EngineId) {
+    setManaging(engine);
+    setCandidate(null);
+    try {
+      setCandidate(await api.checkEngineUpdate(engine));
+    } catch (error) {
+      setError(normalizeError(error));
+    } finally {
+      setManaging(null);
+    }
+  }
+
+  async function installUpdate(update: EngineUpdateCandidate) {
+    setManaging(update.engine);
+    try {
+      replaceManaged(await api.installEngineUpdate(update));
+      setCandidate(null);
+      await detect();
+    } catch (error) {
+      setError(normalizeError(error));
+    } finally {
+      setManaging(null);
+    }
+  }
+
+  async function testAccess() {
+    if (!testUrl.trim()) return;
+    setTesting(true);
+    setTestResult("");
+    try {
+      const result = await api.testSiteAccess(testUrl.trim());
+      setTestResult(`Access succeeded: ${result.siteName} — ${result.title}`);
+    } catch (error) {
+      setError(normalizeError(error));
+    } finally {
+      setTesting(false);
+    }
   }
 
   return (
@@ -151,7 +208,72 @@ export function SettingsPage() {
               </Button>
             </div>
           </div>
+          <div className="mt-4 border-t border-line pt-4">
+            <Field
+              label="Test cookies and site access"
+              hint="Runs a bounded metadata-only analysis with the saved browser/profile/proxy settings. No cookie values are returned or logged."
+            >
+              <div className="flex gap-2">
+                <Input value={testUrl} onChange={(event) => setTestUrl(event.target.value)} placeholder="https://www.reddit.com/r/..." spellCheck={false} />
+                <Button variant="secondary" disabled={testing || !testUrl.trim()} onClick={() => void testAccess()}>
+                  {testing ? <RefreshCw className="animate-spin" size={15} /> : <ShieldCheck size={15} />}
+                  Test access
+                </Button>
+              </div>
+            </Field>
+            {testResult ? <p className="mt-2 text-xs text-emerald-400">{testResult}</p> : null}
+          </div>
         </div>
+      </section>
+
+      <section className="mb-8">
+        <div className="mb-3 flex items-center gap-2">
+          <DownloadCloud size={17} className="text-muted" />
+          <h2 className="text-sm font-semibold">Managed engine versions</h2>
+        </div>
+        <div className="divide-y divide-line border border-line bg-panel">
+          {managed.map((item) => (
+            <article key={item.engine} className="flex flex-wrap items-center gap-3 p-4">
+              <div className="min-w-48 flex-1">
+                <h3 className="text-sm font-semibold">{item.engine === "ytDlp" ? "yt-dlp" : "gallery-dl"}</h3>
+                <p className="mt-1 text-xs text-muted">
+                  {item.activeVersion ? `Managed ${item.activeVersion} active` : "Using the executable from PATH"}
+                  {item.pinned ? " · pinned" : ""}
+                </p>
+              </div>
+              <Button variant="secondary" className="h-8 px-2.5" disabled={managing === item.engine} onClick={() => void checkUpdate(item.engine)}>
+                <RefreshCw className={managing === item.engine ? "animate-spin" : ""} size={14} /> Check
+              </Button>
+              <Button
+                variant="ghost"
+                className="h-8 px-2.5"
+                onClick={() => void api.pinManagedEngine(item.engine, !item.pinned).then(replaceManaged).catch((error) => setError(normalizeError(error)))}
+              >
+                {item.pinned ? "Unpin" : "Pin version"}
+              </Button>
+              <Button
+                variant="ghost"
+                className="h-8 px-2.5"
+                disabled={!item.previousVersion}
+                onClick={() => void api.rollbackManagedEngine(item.engine).then((status) => { replaceManaged(status); void detect(); }).catch((error) => setError(normalizeError(error)))}
+              >
+                <RotateCcw size={14} /> Roll back
+              </Button>
+            </article>
+          ))}
+          {candidate ? (
+            <div className="flex items-center gap-3 bg-elevated p-4 text-sm">
+              <div className="flex-1">
+                Verified release <span className="font-semibold text-ink">{candidate.version}</span> is available.
+                <p className="mt-1 font-mono text-[10px] text-muted">SHA-256 {candidate.sha256}</p>
+              </div>
+              <Button disabled={managing === candidate.engine} onClick={() => void installUpdate(candidate)}>
+                <DownloadCloud size={15} /> Install verified update
+              </Button>
+            </div>
+          ) : null}
+        </div>
+        <p className="mt-3 text-xs leading-5 text-muted">Managed files are checked against vendor-published SHA-256 manifests, version-tested, and retained for one-click rollback. FFmpeg remains system-managed.</p>
       </section>
 
       <section>
@@ -195,7 +317,7 @@ export function SettingsPage() {
           ))}
           {!loading && engines.length === 0 ? <div className="p-5 text-sm text-muted">No engine status is available.</div> : null}
         </div>
-        <p className="mt-3 text-xs leading-5 text-muted">Executables are discovered from PATH. Managed sidecars and automatic updates remain planned work.</p>
+        <p className="mt-3 text-xs leading-5 text-muted">Managed yt-dlp/gallery-dl versions take priority over PATH. Other engines are discovered from PATH.</p>
       </section>
     </Page>
   );

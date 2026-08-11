@@ -13,7 +13,7 @@ struct EngineDefinition {
     required: bool,
 }
 
-const ENGINES: [EngineDefinition; 4] = [
+const ENGINES: [EngineDefinition; 6] = [
     EngineDefinition {
         id: EngineId::YtDlp,
         executable: "yt-dlp",
@@ -36,6 +36,20 @@ const ENGINES: [EngineDefinition; 4] = [
         required: false,
     },
     EngineDefinition {
+        id: EngineId::Aria2,
+        executable: "aria2c",
+        display_name: "aria2",
+        version_arg: "--version",
+        required: false,
+    },
+    EngineDefinition {
+        id: EngineId::Curl,
+        executable: "curl",
+        display_name: "curl",
+        version_arg: "--version",
+        required: false,
+    },
+    EngineDefinition {
         id: EngineId::GalleryDl,
         executable: "gallery-dl",
         display_name: "gallery-dl",
@@ -53,9 +67,9 @@ pub async fn detect_all() -> Vec<EngineInfo> {
 }
 
 async fn detect(definition: EngineDefinition) -> EngineInfo {
-    let path = match which::which(definition.executable) {
-        Ok(path) => path,
-        Err(_) => {
+    let path = match crate::engines::managed::resolve(definition.executable) {
+        Some(path) => path,
+        None => {
             return EngineInfo {
                 id: definition.id,
                 display_name: definition.display_name.to_owned(),
@@ -65,6 +79,8 @@ async fn detect(definition: EngineDefinition) -> EngineInfo {
                 required: definition.required,
                 status_message: match definition.id {
                     EngineId::GalleryDl => "gallery-dl was not found in PATH. Install it to enable Bunkr album downloads.".to_owned(),
+                    EngineId::Aria2 => "aria2c was not found; direct downloads will use curl when available.".to_owned(),
+                    EngineId::Curl => "curl was not found; install aria2c or curl for direct downloads.".to_owned(),
                     _ => format!("{} was not found in PATH", definition.executable),
                 },
                 capabilities: match definition.id {
@@ -73,6 +89,12 @@ async fn detect(definition: EngineDefinition) -> EngineInfo {
                         display_name: "Bunkr albums".to_owned(),
                         available: false,
                         status_message: "Install gallery-dl to enable this capability".to_owned(),
+                    }],
+                    EngineId::Aria2 | EngineId::Curl => vec![EngineCapability {
+                        id: "directTransfers".to_owned(),
+                        display_name: "Resumable direct transfers".to_owned(),
+                        available: false,
+                        status_message: "Install this engine to enable the transfer fallback".to_owned(),
                     }],
                     _ => Vec::new(),
                 },
@@ -109,6 +131,16 @@ async fn detect(definition: EngineDefinition) -> EngineInfo {
             display_name: "Bunkr albums".to_owned(),
             available: true,
             status_message: "Album analysis and original-file downloads are available".to_owned(),
+        }],
+        EngineId::Aria2 | EngineId::Curl => vec![EngineCapability {
+            id: "directTransfers".to_owned(),
+            display_name: "Resumable direct transfers".to_owned(),
+            available: true,
+            status_message: if matches!(definition.id, EngineId::Aria2) {
+                "Preferred direct HTTP transfer engine".to_owned()
+            } else {
+                "Automatic fallback when aria2c is unavailable".to_owned()
+            },
         }],
         EngineId::Ffmpeg | EngineId::Ffprobe => Vec::new(),
     };

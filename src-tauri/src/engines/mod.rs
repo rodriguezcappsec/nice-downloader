@@ -1,6 +1,7 @@
 pub mod aria2;
 pub mod discovery;
 pub mod gallery_dl;
+pub mod managed;
 pub mod router;
 pub mod ytdlp;
 

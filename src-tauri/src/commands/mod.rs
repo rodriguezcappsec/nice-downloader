@@ -1,9 +1,15 @@
 use crate::{
     database::Database,
-    engines::{discovery, gallery_dl::GalleryDlEngine, router, ytdlp::YtDlpEngine},
+    engines::{
+        discovery,
+        gallery_dl::GalleryDlEngine,
+        managed::{self, EngineUpdateCandidate, ManagedEngineStatus},
+        router,
+        ytdlp::YtDlpEngine,
+    },
     errors::AppError,
     models::{
-        BatchAnalysisItem, BatchAnalysisResponse, DiskSpaceInfo, DownloadJob, EngineInfo,
+        BatchAnalysisItem, BatchAnalysisResponse, DiskSpaceInfo, DownloadJob, EngineId, EngineInfo,
         EnginePreferences, GalleryItemList, MediaAnalysis, QueueSettings, QueueSnapshot,
         StartDownloadRequest,
     },
@@ -22,6 +28,42 @@ const BATCH_ANALYSIS_CONCURRENCY: usize = 3;
 #[tauri::command]
 pub async fn detect_engines() -> Result<Vec<EngineInfo>, AppError> {
     Ok(discovery::detect_all().await)
+}
+
+#[tauri::command]
+pub fn list_managed_engines() -> Result<Vec<ManagedEngineStatus>, AppError> {
+    managed::list_statuses()
+}
+
+#[tauri::command]
+pub async fn check_engine_update(engine: EngineId) -> Result<EngineUpdateCandidate, AppError> {
+    managed::check_update(engine).await
+}
+
+#[tauri::command]
+pub async fn install_engine_update(
+    candidate: EngineUpdateCandidate,
+) -> Result<ManagedEngineStatus, AppError> {
+    managed::install(candidate).await
+}
+
+#[tauri::command]
+pub fn pin_managed_engine(engine: EngineId, pinned: bool) -> Result<ManagedEngineStatus, AppError> {
+    managed::set_pinned(engine, pinned)
+}
+
+#[tauri::command]
+pub fn rollback_managed_engine(engine: EngineId) -> Result<ManagedEngineStatus, AppError> {
+    managed::rollback(engine)
+}
+
+#[tauri::command]
+pub async fn test_site_access(
+    database: State<'_, Database>,
+    url: String,
+) -> Result<MediaAnalysis, AppError> {
+    let preferences = database.load_engine_preferences()?;
+    router::analyze(&url, &preferences).await
 }
 
 #[tauri::command]
