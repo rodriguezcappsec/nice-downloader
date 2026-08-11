@@ -17,7 +17,8 @@ export const api = {
   updateEnginePreferences: (preferences: EnginePreferences) =>
     invoke<EnginePreferences>("update_engine_preferences", { preferences }),
   analyzeUrl: (url: string) => invoke<MediaAnalysis>("analyze_url", { url }),
-  listGalleryItems: (url: string) => invoke<GalleryItemList>("list_gallery_items", { url }),
+  listGalleryItems: (url: string, offset: number, limit: number) =>
+    invoke<GalleryItemList>("list_gallery_items", { url, offset, limit }),
   analyzeUrls: (urls: string[]) => invoke<BatchAnalysisResponse>("analyze_urls", { urls }),
   analyzePlaylist: (url: string) => invoke<BatchAnalysisResponse>("analyze_playlist", { url }),
   getDefaultDestination: () => invoke<string>("get_default_destination"),

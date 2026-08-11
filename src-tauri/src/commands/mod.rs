@@ -34,10 +34,12 @@ pub async fn analyze_url(
 pub async fn list_gallery_items(
     database: State<'_, Database>,
     url: String,
+    offset: u32,
+    limit: u32,
 ) -> Result<GalleryItemList, AppError> {
     let preferences = database.load_engine_preferences()?;
     GalleryDlEngine::discover()?
-        .list_items(&url, &preferences)
+        .list_items(&url, &preferences, offset, limit)
         .await
 }
 

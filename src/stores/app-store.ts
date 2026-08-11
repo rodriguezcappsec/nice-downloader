@@ -33,7 +33,7 @@ interface AppStore {
   setEnginePreferences: (preferences: EnginePreferences) => void;
   saveEnginePreferences: () => Promise<boolean>;
   analyze: (url: string) => Promise<MediaAnalysis | null>;
-  loadGalleryItems: (url: string) => Promise<GalleryItemList | null>;
+  loadGalleryItems: (url: string, reset?: boolean) => Promise<GalleryItemList | null>;
   analyzeBatch: (urls: string[]) => Promise<BatchAnalysisResponse | null>;
   analyzePlaylist: (url: string) => Promise<BatchAnalysisResponse | null>;
   clearAnalysis: () => void;
@@ -96,10 +96,22 @@ export const useAppStore = create<AppStore>((set, get) => ({
     }
   },
 
-  loadGalleryItems: async (url) => {
+  loadGalleryItems: async (url, reset = false) => {
+    const current = get().galleryItems;
+    const offset = reset ? 0 : (current?.nextOffset ?? 0);
+    if (!reset && current && current.nextOffset == null) return current;
     set({ galleryItemsLoading: true, error: null });
     try {
-      const galleryItems = await api.listGalleryItems(url);
+      const page = await api.listGalleryItems(url, offset, 12);
+      const galleryItems = reset || !current
+        ? page
+        : {
+            ...page,
+            offset: 0,
+            items: [...current.items, ...page.items.filter((item) =>
+              !current.items.some((existing) => existing.index === item.index),
+            )],
+          };
       set({ galleryItems });
       return galleryItems;
     } catch (error) {

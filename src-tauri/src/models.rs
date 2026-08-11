@@ -166,6 +166,8 @@ pub struct GalleryItemList {
     pub items: Vec<GalleryItem>,
     pub total_count: u32,
     pub truncated: bool,
+    pub offset: u32,
+    pub next_offset: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
