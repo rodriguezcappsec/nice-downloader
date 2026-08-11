@@ -303,6 +303,8 @@ pub struct StartDownloadRequest {
 pub struct QueueSettings {
     pub concurrent_downloads: usize,
     pub paused: bool,
+    #[serde(default = "default_true")]
+    pub notify_on_completion: bool,
 }
 
 impl Default for QueueSettings {
@@ -310,8 +312,43 @@ impl Default for QueueSettings {
         Self {
             concurrent_downloads: 2,
             paused: false,
+            notify_on_completion: true,
         }
     }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PresetIntent {
+    pub quality: String,
+    pub container: OutputContainer,
+    pub video_codec_preference: VideoCodecPreference,
+    pub audio_quality: AudioQuality,
+    pub embed_thumbnail: bool,
+    pub embed_metadata: bool,
+    pub output_conflict_policy: OutputConflictPolicy,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Preset {
+    pub id: String,
+    pub name: String,
+    pub intent: PresetIntent,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavePresetRequest {
+    pub id: Option<String>,
+    pub name: String,
+    pub intent: PresetIntent,
 }
 
 #[derive(Debug, Clone, Serialize)]

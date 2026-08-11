@@ -1,6 +1,9 @@
 use crate::{
     errors::AppError,
-    models::{DownloadJob, DownloadState, EnginePreferences, QueueSettings, StartDownloadRequest},
+    models::{
+        DownloadJob, DownloadState, EnginePreferences, Preset, PresetIntent, QueueSettings,
+        SavePresetRequest, StartDownloadRequest,
+    },
     utils::validation::{normalize_engine_preferences, validate_engine_preferences},
 };
 use chrono::{DateTime, Utc};
@@ -9,6 +12,7 @@ use std::{
     path::Path,
     sync::{Arc, Mutex},
 };
+use uuid::Uuid;
 
 const MIGRATION_0001: &str = include_str!("migrations/0001_initial.sql");
 const MIGRATION_0002: &str = include_str!("migrations/0002_durable_queue.sql");
@@ -256,6 +260,140 @@ impl Database {
         let rows = statement.query_map([], job_from_row)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
     }
+
+    pub fn list_recent_jobs(&self) -> Result<Vec<DownloadJob>, AppError> {
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "Download records are unavailable.")
+        })?;
+        let mut statement = connection.prepare(
+            "SELECT id, url, title, thumbnail, state, progress_percent, downloaded_bytes,
+                    total_bytes, speed_bytes_per_second, eta_seconds, selected_quality,
+                    output_format, destination, output_path, current_operation, error,
+                    created_at, updated_at, completed_at, diagnostics_json, attempt_count,
+                    retry_of_id FROM downloads ORDER BY updated_at DESC LIMIT 100",
+        )?;
+        let rows = statement.query_map([], job_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+    }
+
+    pub fn download_output_path(&self, job_id: &str) -> Result<std::path::PathBuf, AppError> {
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "Download records are unavailable.")
+        })?;
+        let value: Option<(Option<String>, String)> = connection
+            .query_row(
+                "SELECT output_path, destination FROM downloads WHERE id = ?1",
+                [job_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let (output, destination) = value
+            .ok_or_else(|| AppError::new("job_not_found", "The download record was not found."))?;
+        Ok(std::path::PathBuf::from(output.unwrap_or(destination)))
+    }
+
+    pub fn list_presets(&self) -> Result<Vec<Preset>, AppError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| AppError::new("database_unavailable", "Preset storage is unavailable."))?;
+        let mut statement = connection.prepare(
+            "SELECT id, name, options_json, created_at, updated_at
+             FROM presets ORDER BY name COLLATE NOCASE ASC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
+        })?;
+        let mut presets = Vec::new();
+        for row in rows {
+            let (id, name, intent_json, created_at, updated_at) = row?;
+            let intent: PresetIntent = serde_json::from_str(&intent_json)
+                .map_err(|error| AppError::internal("could not read a saved preset", error))?;
+            presets.push(Preset {
+                id,
+                name,
+                intent,
+                created_at: timestamp_or_epoch(created_at),
+                updated_at: timestamp_or_epoch(updated_at),
+            });
+        }
+        Ok(presets)
+    }
+
+    pub fn save_preset(&self, request: SavePresetRequest) -> Result<Preset, AppError> {
+        let name = request.name.trim();
+        if name.is_empty() || name.chars().count() > 80 {
+            return Err(AppError::new(
+                "invalid_preset_name",
+                "Preset names must contain between 1 and 80 characters.",
+            ));
+        }
+        if !matches!(
+            request.intent.quality.as_str(),
+            "best" | "2160" | "1440" | "1080" | "720" | "480" | "audio"
+        ) {
+            return Err(AppError::new(
+                "invalid_preset_quality",
+                "The preset quality is not supported.",
+            ));
+        }
+        let id = match request.id {
+            Some(id) => Uuid::parse_str(&id)
+                .map_err(|_| AppError::new("invalid_preset_id", "The preset ID is invalid."))?
+                .to_string(),
+            None => Uuid::new_v4().to_string(),
+        };
+        let now = Utc::now();
+        let intent_json = serde_json::to_string(&request.intent)
+            .map_err(|error| AppError::internal("could not serialize the preset", error))?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| AppError::new("database_unavailable", "Preset storage is unavailable."))?;
+        connection.execute(
+            "INSERT INTO presets (id, name, options_json, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?4)
+             ON CONFLICT(id) DO UPDATE SET name = excluded.name,
+                                                   options_json = excluded.options_json,
+                                                   updated_at = excluded.updated_at",
+            params![id, name, intent_json, now.timestamp_millis()],
+        )?;
+        let created_at = connection.query_row(
+            "SELECT created_at FROM presets WHERE id = ?1",
+            [&id],
+            |row| row.get::<_, i64>(0),
+        )?;
+        Ok(Preset {
+            id,
+            name: name.to_owned(),
+            intent: request.intent,
+            created_at: timestamp_or_epoch(created_at),
+            updated_at: now,
+        })
+    }
+
+    pub fn delete_preset(&self, id: &str) -> Result<(), AppError> {
+        let id = Uuid::parse_str(id)
+            .map_err(|_| AppError::new("invalid_preset_id", "The preset ID is invalid."))?
+            .to_string();
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| AppError::new("database_unavailable", "Preset storage is unavailable."))?;
+        if connection.execute("DELETE FROM presets WHERE id = ?1", [&id])? == 0 {
+            return Err(AppError::new(
+                "preset_not_found",
+                "The preset was not found.",
+            ));
+        }
+        Ok(())
+    }
 }
 
 fn job_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DownloadJob> {
@@ -453,6 +591,35 @@ mod tests {
             database.load_engine_preferences().expect("saved settings"),
             preferences
         );
+    }
+
+    #[test]
+    fn creates_lists_and_deletes_presets() {
+        use crate::models::{
+            AudioQuality, OutputConflictPolicy, OutputContainer, PresetIntent, SavePresetRequest,
+            VideoCodecPreference,
+        };
+        let directory = tempdir().expect("temporary directory");
+        let database = Database::open(&directory.path().join("presets.sqlite3")).expect("database");
+        let preset = database
+            .save_preset(SavePresetRequest {
+                id: None,
+                name: "  Living room  ".to_owned(),
+                intent: PresetIntent {
+                    quality: "1080".to_owned(),
+                    container: OutputContainer::Mp4,
+                    video_codec_preference: VideoCodecPreference::H264,
+                    audio_quality: AudioQuality::Best,
+                    embed_thumbnail: false,
+                    embed_metadata: true,
+                    output_conflict_policy: OutputConflictPolicy::Skip,
+                },
+            })
+            .expect("save preset");
+        assert_eq!(preset.name, "Living room");
+        assert_eq!(database.list_presets().expect("list presets").len(), 1);
+        database.delete_preset(&preset.id).expect("delete preset");
+        assert!(database.list_presets().expect("list presets").is_empty());
     }
 
     #[test]

@@ -14,6 +14,8 @@ import type {
   ManagedEngineStatus,
   QueueSettings,
   QueueSnapshot,
+  Preset,
+  SavePresetRequest,
   StartDownloadRequest,
 } from "../types";
 
@@ -55,6 +57,12 @@ export const api = {
     invoke<DiskSpaceInfo>("check_disk_space", { destination, requiredBytes }),
   listJobs: () => invoke<DownloadJob[]>("list_jobs"),
   listHistory: () => invoke<HistoryEntry[]>("list_history"),
+  listPresets: () => invoke<Preset[]>("list_presets"),
+  savePreset: (request: SavePresetRequest) => invoke<Preset>("save_preset", { request }),
+  deletePreset: (id: string) => invoke<void>("delete_preset", { id }),
+  openDownloadOutput: (jobId: string, reveal: boolean) =>
+    invoke<void>("open_download_output", { jobId, reveal }),
+  exportDiagnostics: (path: string) => invoke<void>("export_diagnostics", { path }),
   onJobUpdated: (handler: (job: DownloadJob) => void): Promise<UnlistenFn> =>
     listen<DownloadJob>("download-job-updated", (event) => handler(event.payload)),
 };

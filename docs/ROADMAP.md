@@ -38,17 +38,21 @@ Delivered:
 
 Still planned:
 
-- Queue reordering and configurable concurrency.
-- File reveal/open actions through narrow backend commands.
-- Disk-space estimation and low-space warnings.
 - Automatic retry with bounded exponential backoff.
+
+Additional reliability delivered:
+
+- Authoritative queue reordering, persisted dynamic concurrency, whole-queue pause, per-job pause/resume, and scheduled starts.
+- Disk-space estimation and backend preflight with temporary-file margin.
+- Narrow file open/reveal actions and configurable Linux completion notifications.
+- Sanitized diagnostic export for support.
 
 ## Milestone 3: richer media intent
 
 - Compatibility/quality/size recommendations per resolution.
 - Audio formats and bitrate choices.
 - Subtitle, metadata, thumbnail, chapters, and playlist controls.
-- Reusable presets.
+- Reusable SQLite-backed presets with New Download integration.
 - ffprobe-based inspection of completed output.
 
 ## Milestone 4: additional engines
@@ -61,13 +65,15 @@ Delivered foundation:
 Still planned:
 
 - Extend gallery-dl routing to additional tested image/gallery sites.
-- aria2 implementation for direct HTTP transfers.
 - HLS/DASH diagnostics and engine routing improvements.
+
+Delivered:
+
+- Direct HTTP analysis and resumable transfers, preferring aria2c with a curl fallback.
 
 ## Milestone 5: engine lifecycle and distribution
 
-- Optional managed sidecars with signed/checksummed releases.
-- Explicit update policy and rollback.
+- Managed yt-dlp/gallery-dl storage with vendor SHA-256 verification, version probing, pinning, and rollback.
 - Linux packaging and desktop integration.
 - Windows and macOS platform adapters and packaging.
 

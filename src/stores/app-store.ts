@@ -64,7 +64,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   },
   jobs: {},
   history: [],
-  queue: { settings: { concurrentDownloads: 2, paused: false }, orderedJobIds: [], activeJobIds: [] },
+  queue: { settings: { concurrentDownloads: 2, paused: false, notifyOnCompletion: true }, orderedJobIds: [], activeJobIds: [] },
   analysis: null,
   galleryItems: null,
   batchAnalysis: null,

@@ -680,6 +680,9 @@ impl QueueManager {
                 .await;
             if let Some(job) = completed {
                 self.persist_job(&job).await;
+                if self.scheduler.lock().await.settings.notify_on_completion {
+                    send_completion_notification(&job);
+                }
             }
             self.cancellations.lock().await.remove(&id);
             tracing::info!(job_id = %id, "download completed");
@@ -1277,6 +1280,27 @@ async fn terminate_child(child: &mut Child) {
     }
     let _ = child.start_kill();
     let _ = child.wait().await;
+}
+
+fn send_completion_notification(job: &DownloadJob) {
+    #[cfg(target_os = "linux")]
+    {
+        let Ok(mut command) = std::process::Command::new("notify-send")
+            .args([
+                "--app-name",
+                "Nice Downloader",
+                "--",
+                "Download completed",
+                &job.title.chars().take(120).collect::<String>(),
+            ])
+            .spawn()
+        else {
+            return;
+        };
+        std::thread::spawn(move || {
+            let _ = command.wait();
+        });
+    }
 }
 
 #[cfg(test)]

@@ -70,6 +70,11 @@ pub fn run() {
             commands::resume_download,
             commands::check_disk_space,
             commands::list_history,
+            commands::list_presets,
+            commands::save_preset,
+            commands::delete_preset,
+            commands::open_download_output,
+            commands::export_diagnostics,
         ])
         .run(tauri::generate_context!());
     if let Err(error) = result {

@@ -9,14 +9,16 @@ import {
   Save,
   Settings2,
   ShieldCheck,
+  Trash2,
   Wrench,
 } from "lucide-react";
+import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { useEffect, useState } from "react";
 import { Page } from "../../components/Page";
 import { Button, Field, Input, Select } from "../../components/ui";
 import { useAppStore } from "../../stores/app-store";
 import { api, normalizeError } from "../../lib/tauri";
-import type { BrowserCookieSource, EngineId, EngineUpdateCandidate, ManagedEngineStatus } from "../../types";
+import type { BrowserCookieSource, EngineId, EngineUpdateCandidate, ManagedEngineStatus, Preset, PresetIntent } from "../../types";
 
 const browserOptions: { value: BrowserCookieSource; label: string }[] = [
   { value: "none", label: "Do not use browser cookies" },
@@ -97,6 +99,19 @@ export function SettingsPage() {
       setError(normalizeError(error));
     } finally {
       setTesting(false);
+    }
+  }
+
+  async function exportDiagnostics() {
+    const path = await saveDialog({
+      defaultPath: "nice-downloader-diagnostics.json",
+      filters: [{ name: "JSON diagnostic bundle", extensions: ["json"] }],
+    });
+    if (!path) return;
+    try {
+      await api.exportDiagnostics(path);
+    } catch (error) {
+      setError(normalizeError(error));
     }
   }
 
@@ -318,20 +333,74 @@ export function SettingsPage() {
           {!loading && engines.length === 0 ? <div className="p-5 text-sm text-muted">No engine status is available.</div> : null}
         </div>
         <p className="mt-3 text-xs leading-5 text-muted">Managed yt-dlp/gallery-dl versions take priority over PATH. Other engines are discovered from PATH.</p>
+        <div className="mt-5 flex items-center justify-between border border-line bg-panel p-4">
+          <div><h3 className="text-sm font-semibold">Support diagnostics</h3><p className="mt-1 text-xs text-muted">Export engine status and sanitized recent errors. URLs, cookies, proxy values, and profile names are excluded.</p></div>
+          <Button variant="secondary" onClick={() => void exportDiagnostics()}>Export diagnostics</Button>
+        </div>
       </section>
     </Page>
   );
 }
 
 export function PresetsPage() {
+  const setError = useAppStore((state) => state.setError);
+  const [presets, setPresets] = useState<Preset[]>([]);
+  const [name, setName] = useState("");
+  const [intent, setIntent] = useState<PresetIntent>({
+    quality: "best",
+    container: "mp4",
+    videoCodecPreference: "any",
+    audioQuality: "best",
+    embedThumbnail: false,
+    embedMetadata: true,
+    outputConflictPolicy: "skip",
+  });
+
+  useEffect(() => {
+    void api.listPresets().then(setPresets).catch((error) => setError(normalizeError(error)));
+  }, [setError]);
+
+  async function createPreset() {
+    try {
+      const preset = await api.savePreset({ name, intent });
+      setPresets((items) => [...items, preset].sort((a, b) => a.name.localeCompare(b.name)));
+      setName("");
+    } catch (error) {
+      setError(normalizeError(error));
+    }
+  }
+
   return (
-    <Page title="Presets" description="Reusable download intentions will arrive in a later milestone.">
-      <div className="grid min-h-64 place-items-center border border-dashed border-line text-center">
-        <div>
-          <Settings2 className="mx-auto text-muted" size={24} />
-          <h2 className="mt-3 text-sm font-semibold">Presets are coming next</h2>
-          <p className="mt-1 text-sm text-muted">The intent model is already designed for saved presets.</p>
+    <Page title="Presets" description="Reusable download intentions stored locally in SQLite.">
+      <section className="border border-line bg-panel p-5">
+        <div className="mb-4 flex items-center gap-2"><Settings2 size={17} className="text-muted" /><h2 className="text-sm font-semibold">New preset</h2></div>
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+          <Field label="Name"><Input value={name} onChange={(event) => setName(event.target.value)} placeholder="1080p compatibility" /></Field>
+          <Field label="Quality"><Select value={intent.quality} onChange={(event) => setIntent({ ...intent, quality: event.target.value as PresetIntent["quality"] })}>
+            <option value="best">Best</option><option value="2160">2160p</option><option value="1440">1440p</option><option value="1080">1080p</option><option value="720">720p</option><option value="480">480p</option><option value="audio">Audio only</option>
+          </Select></Field>
+          <Field label="Container"><Select value={intent.container} onChange={(event) => setIntent({ ...intent, container: event.target.value as PresetIntent["container"] })}>
+            {(["mp4", "mkv", "webm", "mp3", "m4a", "opus"] as const).map((value) => <option key={value} value={value}>{value.toUpperCase()}</option>)}
+          </Select></Field>
+          <Field label="Video codec"><Select value={intent.videoCodecPreference} onChange={(event) => setIntent({ ...intent, videoCodecPreference: event.target.value as PresetIntent["videoCodecPreference"] })}>
+            <option value="any">Automatic</option><option value="h264">H.264</option><option value="av1">AV1</option><option value="vp9">VP9</option>
+          </Select></Field>
         </div>
+        <div className="mt-4 flex flex-wrap items-center gap-5 text-sm text-muted">
+          <label className="flex items-center gap-2"><input type="checkbox" checked={intent.embedMetadata} onChange={(event) => setIntent({ ...intent, embedMetadata: event.target.checked })} /> Embed metadata</label>
+          <label className="flex items-center gap-2"><input type="checkbox" checked={intent.embedThumbnail} onChange={(event) => setIntent({ ...intent, embedThumbnail: event.target.checked })} /> Embed thumbnail</label>
+          <Button className="ml-auto" disabled={!name.trim()} onClick={() => void createPreset()}>Save preset</Button>
+        </div>
+      </section>
+      <div className="mt-5 divide-y divide-line border border-line bg-panel">
+        {presets.map((preset) => (
+          <article key={preset.id} className="flex items-center gap-4 p-4">
+            <Settings2 size={18} className="text-muted" />
+            <div className="min-w-0 flex-1"><h3 className="text-sm font-semibold">{preset.name}</h3><p className="mt-1 text-xs text-muted">{preset.intent.quality === "audio" ? "Audio only" : preset.intent.quality === "best" ? "Best quality" : `${preset.intent.quality}p`} · {preset.intent.container.toUpperCase()} · {preset.intent.videoCodecPreference.toUpperCase()}</p></div>
+            <Button variant="danger" className="h-8 px-2.5" onClick={() => void api.deletePreset(preset.id).then(() => setPresets((items) => items.filter((item) => item.id !== preset.id))).catch((error) => setError(normalizeError(error)))}><Trash2 size={14} /> Delete</Button>
+          </article>
+        ))}
+        {presets.length === 0 ? <p className="p-5 text-sm text-muted">No presets saved yet.</p> : null}
       </div>
     </Page>
   );
