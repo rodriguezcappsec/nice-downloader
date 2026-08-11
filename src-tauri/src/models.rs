@@ -484,6 +484,117 @@ pub struct SubscriptionCheckResult {
     pub skipped_count: usize,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum TransformationOperation {
+    Trim {
+        start_seconds: f64,
+        end_seconds: f64,
+    },
+    ExtractAudio {
+        codec: AudioTransformCodec,
+    },
+    Transcode {
+        container: String,
+        video_codec: TransformVideoCodec,
+        audio_codec: TransformAudioCodec,
+    },
+    SplitChapters,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum AudioTransformCodec {
+    Mp3,
+    Aac,
+    Opus,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum TransformVideoCodec {
+    Copy,
+    H264,
+    Hevc,
+    Vp9,
+    Av1,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum TransformAudioCodec {
+    Copy,
+    Aac,
+    Opus,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TransformationState {
+    Queued,
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartTransformationRequest {
+    pub input_path: String,
+    pub output_path: String,
+    pub operation: TransformationOperation,
+    #[serde(default)]
+    pub overwrite: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransformationTask {
+    pub id: String,
+    pub input_path: String,
+    pub output_path: String,
+    pub operation: TransformationOperation,
+    pub state: TransformationState,
+    pub progress_percent: f64,
+    pub current_operation: String,
+    pub error: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryItem {
+    pub id: String,
+    pub path: String,
+    pub title: String,
+    pub source_url: Option<String>,
+    pub thumbnail: Option<String>,
+    pub duration_seconds: Option<f64>,
+    pub site: Option<String>,
+    pub tags: Vec<String>,
+    pub metadata: serde_json::Value,
+    pub missing: bool,
+    pub added_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateLibraryItemRequest {
+    pub id: String,
+    pub title: String,
+    pub tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryScanResult {
+    pub checked_count: usize,
+    pub missing_count: usize,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueueSnapshot {

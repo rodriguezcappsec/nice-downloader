@@ -2,12 +2,17 @@ mod commands;
 mod database;
 mod engines;
 mod errors;
+mod library;
 mod models;
 mod queue;
 mod subscriptions;
+mod transformations;
 mod utils;
 
-use crate::{database::Database, engines::managed, queue::QueueManager};
+use crate::{
+    database::Database, engines::managed, queue::QueueManager,
+    transformations::TransformationManager,
+};
 use tauri::Manager;
 use tracing_subscriber::EnvFilter;
 
@@ -31,6 +36,7 @@ pub fn run() {
             managed::initialize(&data_directory)?;
             let database = Database::open(&data_directory.join("nice-downloader.sqlite3"))?;
             let queue = QueueManager::new(database.clone())?;
+            let transformations = TransformationManager::new(database.clone())?;
             let recovery_queue = queue.clone();
             let recovery_app = app.handle().clone();
             let recovery_preferences = database.load_engine_preferences()?;
@@ -42,6 +48,7 @@ pub fn run() {
             subscriptions::spawn_scheduler(app.handle().clone(), database.clone(), queue.clone());
             app.manage(database);
             app.manage(queue);
+            app.manage(transformations);
             tracing::info!(path = %data_directory.display(), "application backend initialized");
             Ok(())
         })
@@ -90,6 +97,16 @@ pub fn run() {
             commands::check_subscription_now,
             commands::open_download_output,
             commands::export_diagnostics,
+            commands::list_transformation_tasks,
+            commands::start_transformation,
+            commands::cancel_transformation,
+            commands::list_library_items,
+            commands::import_library_files,
+            commands::update_library_item,
+            commands::remove_library_item,
+            commands::reconcile_library,
+            commands::export_library,
+            commands::restore_library,
         ])
         .run(tauri::generate_context!());
     if let Err(error) = result {

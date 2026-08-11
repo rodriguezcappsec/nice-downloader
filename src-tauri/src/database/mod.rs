@@ -1,9 +1,10 @@
 use crate::{
     errors::AppError,
     models::{
-        DownloadArchiveMatch, DownloadJob, DownloadState, EnginePreferences, Preset, PresetIntent,
-        QueueSettings, SavePresetRequest, SaveSitePresetRuleRequest, SaveSubscriptionRequest,
-        SitePresetRule, StartDownloadRequest, Subscription,
+        DownloadArchiveMatch, DownloadJob, DownloadState, EnginePreferences, LibraryItem, Preset,
+        PresetIntent, QueueSettings, SavePresetRequest, SaveSitePresetRuleRequest,
+        SaveSubscriptionRequest, SitePresetRule, StartDownloadRequest, Subscription,
+        TransformationOperation, TransformationState, TransformationTask, UpdateLibraryItemRequest,
     },
     utils::validation::{
         normalize_engine_preferences, validate_destination, validate_engine_preferences,
@@ -22,6 +23,8 @@ const MIGRATION_0001: &str = include_str!("migrations/0001_initial.sql");
 const MIGRATION_0002: &str = include_str!("migrations/0002_durable_queue.sql");
 const MIGRATION_0003: &str = include_str!("migrations/0003_workflow_intelligence.sql");
 const MIGRATION_0004: &str = include_str!("migrations/0004_subscriptions.sql");
+const MIGRATION_0005: &str = include_str!("migrations/0005_transformations.sql");
+const MIGRATION_0006: &str = include_str!("migrations/0006_media_library.sql");
 const ENGINE_PREFERENCES_KEY: &str = "engine.preferences";
 const QUEUE_SETTINGS_KEY: &str = "queue.settings";
 
@@ -57,6 +60,8 @@ impl Database {
             (2, MIGRATION_0002),
             (3, MIGRATION_0003),
             (4, MIGRATION_0004),
+            (5, MIGRATION_0005),
+            (6, MIGRATION_0006),
         ] {
             let migrated: bool = transaction.query_row(
                 "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = ?1)",
@@ -848,6 +853,226 @@ impl Database {
         )?;
         drop(connection);
         self.load_subscription(id)
+    }
+
+    pub fn save_transformation_task(&self, task: &TransformationTask) -> Result<(), AppError> {
+        let operation = serde_json::to_string(&task.operation)
+            .map_err(|error| AppError::internal("could not serialize transformation", error))?;
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "Transformation history is unavailable.",
+            )
+        })?;
+        connection.execute(
+            "INSERT INTO transformation_tasks
+                (id, input_path, output_path, operation_json, state, progress_percent,
+                 current_operation, error, created_at, updated_at, completed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             ON CONFLICT(id) DO UPDATE SET
+                state = excluded.state,
+                progress_percent = excluded.progress_percent,
+                current_operation = excluded.current_operation,
+                error = excluded.error,
+                updated_at = excluded.updated_at,
+                completed_at = excluded.completed_at",
+            params![
+                task.id,
+                task.input_path,
+                task.output_path,
+                operation,
+                transformation_state_name(task.state),
+                task.progress_percent,
+                task.current_operation,
+                task.error,
+                task.created_at.timestamp_millis(),
+                task.updated_at.timestamp_millis(),
+                task.completed_at.map(|value| value.timestamp_millis()),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_transformation_tasks(&self) -> Result<Vec<TransformationTask>, AppError> {
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "Transformation history is unavailable.",
+            )
+        })?;
+        let mut statement = connection.prepare(
+            "SELECT id, input_path, output_path, operation_json, state, progress_percent,
+                    current_operation, error, created_at, updated_at, completed_at
+             FROM transformation_tasks ORDER BY created_at DESC LIMIT 500",
+        )?;
+        let rows = statement.query_map([], transformation_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+    }
+
+    pub fn upsert_library_item(&self, item: &LibraryItem) -> Result<(), AppError> {
+        let tags = serde_json::to_string(&item.tags)
+            .map_err(|error| AppError::internal("could not serialize media tags", error))?;
+        let metadata = serde_json::to_string(&item.metadata)
+            .map_err(|error| AppError::internal("could not serialize media metadata", error))?;
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "The media library is unavailable.")
+        })?;
+        connection.execute(
+            "INSERT INTO media_library
+                (id, path, title, source_url, thumbnail, duration_seconds, site, tags_json,
+                 metadata_json, missing, added_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+             ON CONFLICT(path) DO UPDATE SET
+                title = excluded.title,
+                source_url = COALESCE(excluded.source_url, media_library.source_url),
+                thumbnail = COALESCE(excluded.thumbnail, media_library.thumbnail),
+                duration_seconds = COALESCE(excluded.duration_seconds, media_library.duration_seconds),
+                site = COALESCE(excluded.site, media_library.site),
+                tags_json = excluded.tags_json,
+                metadata_json = excluded.metadata_json,
+                missing = excluded.missing,
+                updated_at = excluded.updated_at",
+            params![
+                item.id, item.path, item.title, item.source_url, item.thumbnail,
+                item.duration_seconds, item.site, tags, metadata, item.missing,
+                item.added_at.timestamp_millis(), item.updated_at.timestamp_millis(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_library_items(&self) -> Result<Vec<LibraryItem>, AppError> {
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "The media library is unavailable.")
+        })?;
+        let mut statement = connection.prepare(
+            "SELECT id, path, title, source_url, thumbnail, duration_seconds, site, tags_json,
+                    metadata_json, missing, added_at, updated_at
+             FROM media_library ORDER BY added_at DESC LIMIT 5000",
+        )?;
+        let rows = statement.query_map([], library_item_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+    }
+
+    pub fn update_library_item(
+        &self,
+        request: UpdateLibraryItemRequest,
+    ) -> Result<LibraryItem, AppError> {
+        let tags = serde_json::to_string(&request.tags)
+            .map_err(|error| AppError::internal("could not serialize media tags", error))?;
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "The media library is unavailable.")
+        })?;
+        if connection.execute(
+            "UPDATE media_library SET title = ?2, tags_json = ?3, updated_at = ?4 WHERE id = ?1",
+            params![
+                request.id,
+                request.title,
+                tags,
+                Utc::now().timestamp_millis()
+            ],
+        )? == 0
+        {
+            return Err(AppError::new(
+                "library_item_not_found",
+                "The library item was not found.",
+            ));
+        }
+        connection
+            .query_row(
+                "SELECT id, path, title, source_url, thumbnail, duration_seconds, site, tags_json,
+                    metadata_json, missing, added_at, updated_at FROM media_library WHERE id = ?1",
+                [&request.id],
+                library_item_from_row,
+            )
+            .map_err(AppError::from)
+    }
+
+    pub fn remove_library_item(&self, id: &str) -> Result<(), AppError> {
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "The media library is unavailable.")
+        })?;
+        if connection.execute("DELETE FROM media_library WHERE id = ?1", [id])? == 0 {
+            return Err(AppError::new(
+                "library_item_not_found",
+                "The library item was not found.",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn set_library_missing(&self, id: &str, missing: bool) -> Result<(), AppError> {
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "The media library is unavailable.")
+        })?;
+        connection.execute(
+            "UPDATE media_library SET missing = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, missing, Utc::now().timestamp_millis()],
+        )?;
+        Ok(())
+    }
+}
+
+fn library_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LibraryItem> {
+    let tags_json: String = row.get(7)?;
+    let metadata_json: String = row.get(8)?;
+    let tags = serde_json::from_str(&tags_json).unwrap_or_default();
+    let metadata = serde_json::from_str(&metadata_json).unwrap_or(serde_json::Value::Null);
+    Ok(LibraryItem {
+        id: row.get(0)?,
+        path: row.get(1)?,
+        title: row.get(2)?,
+        source_url: row.get(3)?,
+        thumbnail: row.get(4)?,
+        duration_seconds: row.get(5)?,
+        site: row.get(6)?,
+        tags,
+        metadata,
+        missing: row.get(9)?,
+        added_at: timestamp_or_epoch(row.get(10)?),
+        updated_at: timestamp_or_epoch(row.get(11)?),
+    })
+}
+
+fn transformation_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TransformationTask> {
+    let operation_json: String = row.get(3)?;
+    let operation: TransformationOperation =
+        serde_json::from_str(&operation_json).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                operation_json.len(),
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?;
+    let state: String = row.get(4)?;
+    Ok(TransformationTask {
+        id: row.get(0)?,
+        input_path: row.get(1)?,
+        output_path: row.get(2)?,
+        operation,
+        state: match state.as_str() {
+            "Queued" => TransformationState::Queued,
+            "Running" => TransformationState::Running,
+            "Completed" => TransformationState::Completed,
+            "Cancelled" => TransformationState::Cancelled,
+            _ => TransformationState::Failed,
+        },
+        progress_percent: row.get(5)?,
+        current_operation: row.get(6)?,
+        error: row.get(7)?,
+        created_at: timestamp_or_epoch(row.get(8)?),
+        updated_at: timestamp_or_epoch(row.get(9)?),
+        completed_at: row.get::<_, Option<i64>>(10)?.map(timestamp_or_epoch),
+    })
+}
+
+fn transformation_state_name(state: TransformationState) -> &'static str {
+    match state {
+        TransformationState::Queued => "Queued",
+        TransformationState::Running => "Running",
+        TransformationState::Completed => "Completed",
+        TransformationState::Failed => "Failed",
+        TransformationState::Cancelled => "Cancelled",
     }
 }
 

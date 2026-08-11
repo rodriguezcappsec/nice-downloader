@@ -4,6 +4,8 @@ export type ViewId =
   | "queue"
   | "history"
   | "subscriptions"
+  | "transformations"
+  | "library"
   | "presets"
   | "settings";
 
@@ -322,6 +324,59 @@ export interface SubscriptionCheckResult {
   discoveredCount: number;
   queuedCount: number;
   skippedCount: number;
+}
+
+export type TransformationOperation =
+  | { type: "trim"; startSeconds: number; endSeconds: number }
+  | { type: "extractAudio"; codec: "mp3" | "aac" | "opus" }
+  | { type: "transcode"; container: string; videoCodec: "copy" | "h264" | "hevc" | "vp9" | "av1"; audioCodec: "copy" | "aac" | "opus" }
+  | { type: "splitChapters" };
+
+export interface StartTransformationRequest {
+  inputPath: string;
+  outputPath: string;
+  operation: TransformationOperation;
+  overwrite: boolean;
+}
+
+export interface TransformationTask {
+  id: string;
+  inputPath: string;
+  outputPath: string;
+  operation: TransformationOperation;
+  state: "Queued" | "Running" | "Completed" | "Failed" | "Cancelled";
+  progressPercent: number;
+  currentOperation: string;
+  error?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string | null;
+}
+
+export interface LibraryItem {
+  id: string;
+  path: string;
+  title: string;
+  sourceUrl?: string | null;
+  thumbnail?: string | null;
+  durationSeconds?: number | null;
+  site?: string | null;
+  tags: string[];
+  metadata: Record<string, unknown>;
+  missing: boolean;
+  addedAt: string;
+  updatedAt: string;
+}
+
+export interface UpdateLibraryItemRequest {
+  id: string;
+  title: string;
+  tags: string[];
+}
+
+export interface LibraryScanResult {
+  checkedCount: number;
+  missingCount: number;
 }
 
 export type HistoryEntry = DownloadJob;

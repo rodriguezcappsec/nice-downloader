@@ -4,12 +4,14 @@ import {
   Download,
   History,
   ListOrdered,
+  Library,
   PanelLeftClose,
   PanelLeftOpen,
   Plus,
   Rss,
   Settings,
   SlidersHorizontal,
+  WandSparkles,
 } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { useAppStore } from "../stores/app-store";
@@ -20,6 +22,8 @@ const workspaceNavigation: { id: ViewId; label: string; icon: typeof Plus }[] = 
   { id: "queue", label: "Queue", icon: ListOrdered },
   { id: "history", label: "History", icon: History },
   { id: "subscriptions", label: "Subscriptions", icon: Rss },
+  { id: "transformations", label: "Transform", icon: WandSparkles },
+  { id: "library", label: "Library", icon: Library },
   { id: "presets", label: "Presets", icon: SlidersHorizontal },
 ];
 

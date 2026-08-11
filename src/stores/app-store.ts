@@ -59,7 +59,7 @@ interface AppStore {
 const savedView = typeof window !== "undefined" ? window.localStorage.getItem("nice-downloader.view") as ViewId | null : null;
 
 export const useAppStore = create<AppStore>((set, get) => ({
-  view: savedView && ["new", "downloads", "queue", "history", "subscriptions", "presets", "settings"].includes(savedView) ? savedView : "new",
+  view: savedView && ["new", "downloads", "queue", "history", "subscriptions", "transformations", "library", "presets", "settings"].includes(savedView) ? savedView : "new",
   engines: [],
   enginePreferences: {
     browserCookieSource: "none",

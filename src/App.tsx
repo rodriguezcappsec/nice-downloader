@@ -3,9 +3,11 @@ import { useEffect } from "react";
 import { AppShell } from "./components/AppShell";
 import { DownloadsPage } from "./features/downloads/DownloadsPage";
 import { HistoryPage } from "./features/history/HistoryPage";
+import { LibraryPage } from "./features/library/LibraryPage";
 import { NewDownloadPage } from "./features/new-download/NewDownloadPage";
 import { PresetsPage, SettingsPage } from "./features/settings/SettingsPage";
 import { SubscriptionsPage } from "./features/subscriptions/SubscriptionsPage";
+import { TransformationsPage } from "./features/transformations/TransformationsPage";
 import { useAppStore } from "./stores/app-store";
 
 export default function App() {
@@ -78,6 +80,8 @@ export default function App() {
       <div className={view === "queue" ? "" : "hidden"}><DownloadsPage queueOnly /></div>
       <div className={view === "history" ? "" : "hidden"}><HistoryPage /></div>
       <div className={view === "subscriptions" ? "" : "hidden"}><SubscriptionsPage /></div>
+      <div className={view === "transformations" ? "" : "hidden"}><TransformationsPage /></div>
+      <div className={view === "library" ? "" : "hidden"}><LibraryPage /></div>
       <div className={view === "presets" ? "" : "hidden"}><PresetsPage /></div>
       <div className={view === "settings" ? "" : "hidden"}><SettingsPage /></div>
       {notice ? (
