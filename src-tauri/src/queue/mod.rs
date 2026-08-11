@@ -314,6 +314,47 @@ impl QueueManager {
         }
     }
 
+    pub async fn dismiss(&self, job_ids: Vec<String>) -> Result<Vec<String>, AppError> {
+        if job_ids.is_empty() || job_ids.len() > 500 {
+            return Err(AppError::new(
+                "invalid_dismiss_selection",
+                "Choose between 1 and 500 finished downloads to remove.",
+            ));
+        }
+        let mut unique = Vec::new();
+        let mut seen = HashSet::new();
+        {
+            let jobs = self.jobs.read().await;
+            for id in job_ids {
+                if !seen.insert(id.clone()) {
+                    continue;
+                }
+                let job = jobs.get(&id).ok_or_else(|| {
+                    AppError::new("job_not_found", "A selected download job was not found.")
+                })?;
+                if !is_terminal_state(job.state) {
+                    return Err(AppError::new(
+                        "download_not_removable",
+                        "Cancel or wait for active downloads before removing them.",
+                    ));
+                }
+                unique.push(id);
+            }
+        }
+        for id in &unique {
+            self.database.dismiss_download_record(id)?;
+        }
+        {
+            let mut jobs = self.jobs.write().await;
+            let mut requests = self.requests.write().await;
+            for id in &unique {
+                jobs.remove(id);
+                requests.remove(id);
+            }
+        }
+        Ok(unique)
+    }
+
     pub async fn list(&self) -> Vec<DownloadJob> {
         let mut jobs: Vec<_> = self.jobs.read().await.values().cloned().collect();
         jobs.sort_by_key(|job| Reverse(job.created_at));

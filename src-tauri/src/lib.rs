@@ -111,6 +111,7 @@ pub fn run() {
             commands::start_download,
             commands::start_downloads,
             commands::cancel_download,
+            commands::dismiss_downloads,
             commands::retry_download,
             commands::repeat_download,
             commands::list_jobs,

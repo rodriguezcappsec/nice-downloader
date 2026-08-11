@@ -28,6 +28,7 @@ const MIGRATION_0004: &str = include_str!("migrations/0004_subscriptions.sql");
 const MIGRATION_0005: &str = include_str!("migrations/0005_transformations.sql");
 const MIGRATION_0006: &str = include_str!("migrations/0006_media_library.sql");
 const MIGRATION_0007: &str = include_str!("migrations/0007_authentication_profiles.sql");
+const MIGRATION_0008: &str = include_str!("migrations/0008_download_visibility.sql");
 const ENGINE_PREFERENCES_KEY: &str = "engine.preferences";
 const QUEUE_SETTINGS_KEY: &str = "queue.settings";
 const DESKTOP_PREFERENCES_KEY: &str = "desktop.preferences";
@@ -68,6 +69,7 @@ impl Database {
             (5, MIGRATION_0005),
             (6, MIGRATION_0006),
             (7, MIGRATION_0007),
+            (8, MIGRATION_0008),
         ] {
             let migrated: bool = transaction.query_row(
                 "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = ?1)",
@@ -114,9 +116,10 @@ impl Database {
                 total_bytes, speed_bytes_per_second, eta_seconds, selected_quality,
                 output_format, destination, output_path, current_operation, error,
                 created_at, updated_at, completed_at, options_json, request_json,
-                diagnostics_json, attempt_count, retry_of_id
+                diagnostics_json, attempt_count, retry_of_id, visible_in_downloads
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
-                       ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
+                       ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24,
+                       COALESCE((SELECT visible_in_downloads FROM downloads WHERE id = ?1), 1))",
             params![
                 job.id,
                 job.url,
@@ -206,7 +209,7 @@ impl Database {
                     created_at, updated_at, completed_at, diagnostics_json, attempt_count,
                     retry_of_id, request_json
              FROM downloads
-             WHERE state != 'Completed' AND request_json IS NOT NULL
+             WHERE state != 'Completed' AND request_json IS NOT NULL AND visible_in_downloads = 1
              ORDER BY created_at ASC LIMIT 500",
         )?;
         let rows = statement.query_map([], |row| {
@@ -434,6 +437,24 @@ impl Database {
             )
             .optional()
             .map_err(AppError::from)
+    }
+
+    pub fn dismiss_download_record(&self, id: &str) -> Result<(), AppError> {
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "Download records are unavailable.")
+        })?;
+        let changed = connection.execute(
+            "UPDATE downloads SET visible_in_downloads = 0, updated_at = ?2
+             WHERE id = ?1 AND state IN ('Completed', 'Failed', 'Cancelled')",
+            params![id, Utc::now().timestamp_millis()],
+        )?;
+        if changed == 0 {
+            return Err(AppError::new(
+                "download_not_removable",
+                "Only completed, failed, or cancelled downloads can be removed.",
+            ));
+        }
+        Ok(())
     }
 
     pub fn delete_history_entry(&self, id: &str) -> Result<(), AppError> {
@@ -1614,6 +1635,10 @@ mod tests {
         let library = database.list_library_items().expect("auto-indexed library");
         assert_eq!(library.len(), 1);
         assert_eq!(library[0].title, "Example");
+        database
+            .dismiss_download_record(&job.id)
+            .expect("dismiss completed download");
+        assert_eq!(database.list_history().expect("history remains").len(), 1);
         assert!(database
             .archive_match(&job.url, &job.destination)
             .expect("archive lookup")

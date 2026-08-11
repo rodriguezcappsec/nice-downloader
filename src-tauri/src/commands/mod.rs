@@ -428,6 +428,14 @@ pub async fn cancel_download(
 }
 
 #[tauri::command]
+pub async fn dismiss_downloads(
+    queue: State<'_, QueueManager>,
+    job_ids: Vec<String>,
+) -> Result<Vec<String>, AppError> {
+    queue.dismiss(job_ids).await
+}
+
+#[tauri::command]
 pub async fn list_jobs(queue: State<'_, QueueManager>) -> Result<Vec<DownloadJob>, AppError> {
     Ok(queue.list().await)
 }
