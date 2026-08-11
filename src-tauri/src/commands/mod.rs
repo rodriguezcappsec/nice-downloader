@@ -18,8 +18,8 @@ use crate::{
     queue::{disk_space, QueueManager},
     subscriptions,
     utils::validation::{
-        normalize_engine_preferences, validate_destination, validate_engine_preferences,
-        validate_media_url,
+        normalize_engine_preferences, validate_destination, validate_destination_writable,
+        validate_engine_preferences, validate_media_url,
     },
 };
 use std::{collections::HashSet, sync::Arc};
@@ -397,6 +397,44 @@ pub fn find_download_archive_match(
 }
 
 #[tauri::command]
+pub fn find_download_archive_matches(
+    database: State<'_, Database>,
+    urls: Vec<String>,
+    destination: String,
+) -> Result<Vec<String>, AppError> {
+    if urls.len() > MAX_BATCH_URLS {
+        return Err(AppError::new(
+            "archive_batch_too_large",
+            format!("Check at most {MAX_BATCH_URLS} URLs at a time."),
+        ));
+    }
+    let destination = validate_destination(&destination)?;
+    let destination = destination.to_string_lossy();
+    let mut matches = Vec::new();
+    for url in urls {
+        let url = validate_media_url(&url)?.to_string();
+        if database.archive_match(&url, &destination)?.is_some() {
+            matches.push(url);
+        }
+    }
+    Ok(matches)
+}
+
+#[tauri::command]
+pub fn prepare_collection_destination(
+    destination: String,
+    collection_title: String,
+) -> Result<String, AppError> {
+    let destination = validate_destination(&destination)?;
+    let directory_name = safe_collection_directory(&collection_title);
+    let collection = destination.join(directory_name);
+    std::fs::create_dir_all(&collection)
+        .map_err(|error| AppError::internal("could not create collection folder", error))?;
+    validate_destination_writable(&collection)?;
+    Ok(collection.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
 pub fn list_subscriptions(database: State<'_, Database>) -> Result<Vec<Subscription>, AppError> {
     database.list_subscriptions()
 }
@@ -422,6 +460,26 @@ pub async fn check_subscription_now(
     id: String,
 ) -> Result<SubscriptionCheckResult, AppError> {
     subscriptions::check_subscription(app, &database, &queue, &id).await
+}
+
+fn safe_collection_directory(value: &str) -> String {
+    let clean = value
+        .chars()
+        .map(|character| {
+            if character.is_alphanumeric() || matches!(character, ' ' | '-' | '_' | '.') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .take(100)
+        .collect::<String>();
+    let clean = clean.trim().trim_matches('.');
+    if clean.is_empty() || !clean.chars().any(char::is_alphanumeric) {
+        "Collection".to_owned()
+    } else {
+        clean.to_owned()
+    }
 }
 
 #[tauri::command]
@@ -578,6 +636,21 @@ mod tests {
             .map(|index| format!("https://example.com/{index}"))
             .collect();
         assert!(normalize_batch_urls(urls).is_err());
+    }
+
+    #[test]
+    fn collection_directories_remove_path_syntax() {
+        assert_eq!(
+            safe_collection_directory(" My/Collection: 2026? "),
+            "My_Collection_ 2026_"
+        );
+        assert_eq!(safe_collection_directory("../../"), "Collection");
+    }
+
+    #[test]
+    fn collection_directories_are_bounded() {
+        let directory = safe_collection_directory(&"a".repeat(160));
+        assert_eq!(directory.chars().count(), 100);
     }
 
     #[test]

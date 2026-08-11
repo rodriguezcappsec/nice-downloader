@@ -79,6 +79,11 @@ export function NewDownloadPage() {
     () => window.localStorage.getItem("nice-downloader.clipboardWatch") === "true",
   );
   const [dragActive, setDragActive] = useState(false);
+  const [batchSearch, setBatchSearch] = useState("");
+  const [archivedBatchUrls, setArchivedBatchUrls] = useState<string[]>([]);
+  const [hideArchived, setHideArchived] = useState(false);
+  const [groupCollection, setGroupCollection] = useState(true);
+  const [lastBatchSelectionIndex, setLastBatchSelectionIndex] = useState<number | null>(null);
   const isGallery = analysis?.engine === "galleryDl";
   const isDirect = analysis?.engine === "directHttp";
 
@@ -153,7 +158,34 @@ export function NewDownloadPage() {
     setSelectedBatchUrls(
       batchAnalysis?.items.filter((item) => item.analysis).map((item) => item.inputUrl) ?? [],
     );
+    setBatchSearch("");
+    setArchivedBatchUrls([]);
+    setLastBatchSelectionIndex(null);
   }, [batchAnalysis]);
+
+  useEffect(() => {
+    if (!batchAnalysis || !destination) {
+      setArchivedBatchUrls([]);
+      return;
+    }
+    let cancelled = false;
+    const urls = batchAnalysis.items.flatMap((item) =>
+      item.analysis ? [item.analysis.downloadUrl || item.analysis.webpageUrl || item.inputUrl] : [],
+    );
+    const timer = window.setTimeout(() => {
+      void api.findDownloadArchiveMatches(urls, destination)
+        .then((matches) => {
+          if (!cancelled) setArchivedBatchUrls(matches);
+        })
+        .catch(() => {
+          if (!cancelled) setArchivedBatchUrls([]);
+        });
+    }, 250);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [batchAnalysis, destination]);
 
   useEffect(() => {
     if (!galleryItems) {
@@ -184,6 +216,17 @@ export function NewDownloadPage() {
     [galleryItems, selectedGalleryIndices],
   );
   const selectedGallerySize = selectedGalleryItems.reduce((total, item) => total + (item.sizeBytes ?? 0), 0);
+  const filteredBatchItems = useMemo(() => {
+    const query = batchSearch.trim().toLocaleLowerCase();
+    return (batchAnalysis?.items ?? []).filter((item) => {
+      const effectiveUrl = item.analysis?.downloadUrl || item.analysis?.webpageUrl || item.inputUrl;
+      if (hideArchived && archivedBatchUrls.includes(effectiveUrl)) return false;
+      if (!query) return true;
+      return `${item.analysis?.title || ""} ${item.analysis?.uploader || ""} ${item.analysis?.siteName || ""} ${item.inputUrl}`
+        .toLocaleLowerCase()
+        .includes(query);
+    });
+  }, [archivedBatchUrls, batchAnalysis, batchSearch, hideArchived]);
   const estimatedBytes = isGallery
     ? (selectedGallerySize || analysis?.totalSizeBytes || null)
     : (analysis?.totalSizeBytes || largestKnownSize(analysis?.formats ?? []));
@@ -296,12 +339,15 @@ export function NewDownloadPage() {
 
   async function submitBatch() {
     if (!batchAnalysis || !destination) return;
+    const batchDestination = groupCollection && batchAnalysis.collectionTitle
+      ? await api.prepareCollectionDestination(destination, batchAnalysis.collectionTitle)
+      : destination;
     const requests = batchAnalysis.items.flatMap((item): StartDownloadRequest[] => {
       if (!item.analysis || !selectedBatchUrls.includes(item.inputUrl)) return [];
       return [{
         url: item.analysis.downloadUrl || item.analysis.webpageUrl || item.inputUrl,
         analysis: item.analysis,
-        options: defaultBatchOptions(item.analysis, destination, outputConflictPolicy),
+        options: defaultBatchOptions(item.analysis, batchDestination, outputConflictPolicy),
         scheduledFor: scheduledFor ? new Date(scheduledFor).toISOString() : null,
       }];
     });
@@ -673,22 +719,59 @@ export function NewDownloadPage() {
             </div>
             <span className="text-xs text-muted">{selectedBatchUrls.length} selected</span>
           </div>
-          <div className="mt-4 max-h-80 divide-y divide-line overflow-auto border border-line">
-            {batchAnalysis.items.map((item) => (
-              <label key={item.inputUrl} className="flex items-center gap-3 p-3 text-sm">
+          <div className="mt-4 flex flex-wrap items-center gap-2">
+            <div className="relative min-w-56 flex-1">
+              <Search className="absolute left-3 top-2.5 text-muted" size={15} />
+              <Input className="h-9 pl-9" value={batchSearch} onChange={(event) => setBatchSearch(event.target.value)} placeholder="Filter title, creator, or site" />
+            </div>
+            <Button variant="secondary" className="h-9 px-3 text-xs" onClick={() => setSelectedBatchUrls((selected) => [
+              ...new Set([...selected, ...filteredBatchItems.filter((item) => item.analysis).map((item) => item.inputUrl)]),
+            ])}>Select visible</Button>
+            <Button variant="secondary" className="h-9 px-3 text-xs" onClick={() => setSelectedBatchUrls(batchAnalysis.items.flatMap((item) => {
+              const effectiveUrl = item.analysis?.downloadUrl || item.analysis?.webpageUrl || item.inputUrl;
+              return item.analysis && !archivedBatchUrls.includes(effectiveUrl) ? [item.inputUrl] : [];
+            }))}>Select new only</Button>
+            <Button variant="secondary" className="h-9 px-3 text-xs" onClick={() => setSelectedBatchUrls((selected) => filteredBatchItems.flatMap((item) =>
+              item.analysis && !selected.includes(item.inputUrl) ? [item.inputUrl] : [],
+            ))}>Invert visible</Button>
+          </div>
+          <div className="mt-3 flex flex-wrap gap-5 text-xs text-muted">
+            <label className="flex items-center gap-2"><input type="checkbox" checked={hideArchived} onChange={(event) => setHideArchived(event.target.checked)} /> Hide downloaded ({archivedBatchUrls.length})</label>
+            <label className="flex items-center gap-2"><input type="checkbox" checked={groupCollection} onChange={(event) => setGroupCollection(event.target.checked)} /> Create collection folder</label>
+            <span>Shift-click to select a range</span>
+          </div>
+          <div className="mt-3 max-h-[28rem] divide-y divide-line overflow-auto border border-line">
+            {filteredBatchItems.map((item) => {
+              const originalIndex = batchAnalysis.items.findIndex((candidate) => candidate.inputUrl === item.inputUrl);
+              const effectiveUrl = item.analysis?.downloadUrl || item.analysis?.webpageUrl || item.inputUrl;
+              const archived = archivedBatchUrls.includes(effectiveUrl);
+              return (
+              <label key={item.inputUrl} className="flex cursor-pointer items-center gap-3 p-3 text-sm hover:bg-elevated/60">
                 <input
                   type="checkbox"
                   disabled={!item.analysis}
                   checked={selectedBatchUrls.includes(item.inputUrl)}
-                  onChange={(event) => setSelectedBatchUrls((selected) => event.target.checked ? [...selected, item.inputUrl] : selected.filter((urlValue) => urlValue !== item.inputUrl))}
+                  onClick={(event) => {
+                    if (!event.shiftKey || lastBatchSelectionIndex == null || !item.analysis) return;
+                    event.preventDefault();
+                    const [start, end] = [lastBatchSelectionIndex, originalIndex].sort((a, b) => a - b);
+                    const range = batchAnalysis.items.slice(start, end + 1).flatMap((entry) => entry.analysis ? [entry.inputUrl] : []);
+                    setSelectedBatchUrls((selected) => [...new Set([...selected, ...range])]);
+                  }}
+                  onChange={(event) => {
+                    setLastBatchSelectionIndex(originalIndex);
+                    setSelectedBatchUrls((selected) => event.target.checked ? [...new Set([...selected, item.inputUrl])] : selected.filter((urlValue) => urlValue !== item.inputUrl));
+                  }}
                 />
+                {item.analysis?.thumbnail ? <img className="h-12 w-20 shrink-0 rounded-[6px] object-cover" src={item.analysis.thumbnail} alt="" /> : <div className="grid h-12 w-20 shrink-0 place-items-center rounded-[6px] bg-elevated text-muted"><Film size={17} /></div>}
                 <div className="min-w-0 flex-1">
-                  <div className="truncate font-medium">{item.analysis?.title || item.inputUrl}</div>
-                  <div className={`mt-1 truncate text-xs ${item.error ? "text-red-400" : "text-muted"}`}>{item.error?.message || item.analysis?.siteName}</div>
+                  <div className="flex items-center gap-2"><span className="truncate font-medium">{item.analysis?.title || item.inputUrl}</span>{archived ? <span className="shrink-0 rounded bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-400">Downloaded</span> : null}</div>
+                  <div className={`mt-1 truncate text-xs ${item.error ? "text-red-400" : "text-muted"}`}>{item.error?.message || [item.analysis?.uploader, item.analysis?.siteName].filter(Boolean).join(" · ")}</div>
                 </div>
                 {item.analysis?.durationSeconds != null ? <span className="text-xs text-muted">{formatDuration(item.analysis.durationSeconds)}</span> : null}
               </label>
-            ))}
+            );})}
+            {filteredBatchItems.length === 0 ? <div className="p-8 text-center text-sm text-muted">No entries match the current filters.</div> : null}
           </div>
           <div className="mt-4 grid gap-4 md:grid-cols-[1fr_220px_auto] md:items-end">
             <Field label="Destination">

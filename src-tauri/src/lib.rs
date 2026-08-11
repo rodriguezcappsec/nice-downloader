@@ -82,6 +82,8 @@ pub fn run() {
             commands::delete_site_preset_rule,
             commands::match_site_preset_rule,
             commands::find_download_archive_match,
+            commands::find_download_archive_matches,
+            commands::prepare_collection_destination,
             commands::list_subscriptions,
             commands::save_subscription,
             commands::delete_subscription,
