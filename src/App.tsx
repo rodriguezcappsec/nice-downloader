@@ -1,6 +1,8 @@
 import { AlertTriangle, CheckCircle2, X } from "lucide-react";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { AppShell } from "./components/AppShell";
+import { OnboardingDialog } from "./components/OnboardingDialog";
 import { DownloadsPage } from "./features/downloads/DownloadsPage";
 import { HistoryPage } from "./features/history/HistoryPage";
 import { LibraryPage } from "./features/library/LibraryPage";
@@ -9,6 +11,8 @@ import { PresetsPage, SettingsPage } from "./features/settings/SettingsPage";
 import { SubscriptionsPage } from "./features/subscriptions/SubscriptionsPage";
 import { TransformationsPage } from "./features/transformations/TransformationsPage";
 import { useAppStore } from "./stores/app-store";
+import { api, normalizeError } from "./lib/tauri";
+import type { DesktopPreferences, OnboardingStatus } from "./types";
 
 export default function App() {
   const view = useAppStore((state) => state.view);
@@ -19,6 +23,10 @@ export default function App() {
   const setNotice = useAppStore((state) => state.setNotice);
   const setView = useAppStore((state) => state.setView);
   const errorAction = error ? getErrorAction(error.code, error.message) : null;
+  const jobs = useAppStore((state) => state.jobs);
+  const [desktopPreferences, setDesktopPreferences] = useState<DesktopPreferences | null>(null);
+  const [onboarding, setOnboarding] = useState<OnboardingStatus | null>(null);
+  const activeJobs = Object.values(jobs).filter((job) => ["Analyzing", "Preparing", "Downloading", "PostProcessing", "Merging", "Verifying"].includes(job.state));
 
   useEffect(() => {
     let cleanup: (() => void) | undefined;
@@ -32,6 +40,27 @@ export default function App() {
       cleanup?.();
     };
   }, [initialize]);
+
+  useEffect(() => {
+    void Promise.all([api.getDesktopPreferences(), api.getOnboardingStatus()])
+      .then(([preferences, status]) => { setDesktopPreferences(preferences); if (!status.completed) setOnboarding(status); })
+      .catch((error) => setError(normalizeError(error)));
+  }, [setError]);
+
+  useEffect(() => {
+    if (!desktopPreferences) return;
+    let unlisten = () => {};
+    void getCurrentWindow().onCloseRequested(async (event) => {
+      if (desktopPreferences.closeBehavior === "background") {
+        event.preventDefault(); await getCurrentWindow().hide(); return;
+      }
+      if (desktopPreferences.closeBehavior === "ask" && activeJobs.length > 0) {
+        const background = window.confirm(`${activeJobs.length} download${activeJobs.length === 1 ? " is" : "s are"} active. Choose OK to keep running in the background, or Cancel to quit.`);
+        if (background) { event.preventDefault(); await getCurrentWindow().hide(); }
+      }
+    }).then((cleanup) => { unlisten = cleanup; });
+    return () => unlisten();
+  }, [activeJobs.length, desktopPreferences]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -92,6 +121,7 @@ export default function App() {
           <button className="grid size-7 place-items-center rounded-[6px] text-muted transition hover:bg-elevated hover:text-ink" onClick={() => setNotice(null)} aria-label="Dismiss notification"><X size={14} /></button>
         </div>
       ) : null}
+      {onboarding ? <OnboardingDialog status={onboarding} onComplete={() => void api.completeOnboarding().then(() => setOnboarding(null)).catch((error) => setError(normalizeError(error)))} /> : null}
     </AppShell>
   );
 }

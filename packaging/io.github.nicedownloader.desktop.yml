@@ -1,0 +1,20 @@
+app-id: io.github.nicedownloader.desktop
+runtime: org.gnome.Platform
+runtime-version: "48"
+sdk: org.gnome.Sdk
+command: nice-downloader
+finish-args:
+  - --share=network
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  - --filesystem=xdg-download
+modules:
+  - name: nice-downloader
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 nice-downloader /app/bin/nice-downloader
+    sources:
+      - type: file
+        path: ../src-tauri/target/release/nice-downloader
+

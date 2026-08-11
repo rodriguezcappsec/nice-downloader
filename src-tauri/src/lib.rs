@@ -17,6 +17,34 @@ use crate::{
 use tauri::Manager;
 use tracing_subscriber::EnvFilter;
 
+fn install_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    use tauri::{
+        menu::{Menu, MenuItem},
+        tray::TrayIconBuilder,
+    };
+    let show = MenuItem::with_id(app, "show", "Show Nice Downloader", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&show, &quit])?;
+    let mut builder = TrayIconBuilder::new()
+        .menu(&menu)
+        .tooltip("Nice Downloader")
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "show" => {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
+            "quit" => app.exit(0),
+            _ => {}
+        });
+    if let Some(icon) = app.default_window_icon() {
+        builder = builder.icon(icon.clone());
+    }
+    builder.build(app)?;
+    Ok(())
+}
+
 pub fn run() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
@@ -28,6 +56,8 @@ pub fn run() {
     let result = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            install_tray(app)
+                .map_err(|error| format!("could not initialize the system tray: {error}"))?;
             let data_directory = app.path().app_data_dir().map_err(|error| {
                 format!("could not resolve the application data directory: {error}")
             })?;
@@ -36,6 +66,11 @@ pub fn run() {
             })?;
             managed::initialize(&data_directory)?;
             let database = Database::open(&data_directory.join("nice-downloader.sqlite3"))?;
+            if database.load_desktop_preferences()?.start_minimized {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.hide();
+                }
+            }
             let queue = QueueManager::new(database.clone())?;
             let transformations = TransformationManager::new(database.clone())?;
             let recovery_queue = queue.clone();
@@ -112,6 +147,10 @@ pub fn run() {
             commands::save_authentication_profile,
             commands::delete_authentication_profile,
             commands::discover_browser_profiles,
+            commands::get_desktop_preferences,
+            commands::update_desktop_preferences,
+            commands::get_onboarding_status,
+            commands::complete_onboarding,
         ])
         .run(tauri::generate_context!());
     if let Err(error) = result {

@@ -100,6 +100,18 @@ export interface BrowserProfileInfo {
   path: string;
 }
 
+export interface DesktopPreferences {
+  closeBehavior: "ask" | "background" | "quit";
+  startMinimized: boolean;
+  notifyWhenBackgrounded: boolean;
+}
+
+export interface OnboardingStatus {
+  completed: boolean;
+  defaultDestination: string;
+  engines: EngineInfo[];
+}
+
 export interface MediaFormat {
   id: string;
   extension?: string | null;

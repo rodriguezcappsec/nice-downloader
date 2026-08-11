@@ -1,11 +1,12 @@
 use crate::{
     errors::AppError,
     models::{
-        AuthenticationProfile, BrowserCookieSource, DownloadArchiveMatch, DownloadJob,
-        DownloadState, EnginePreferences, LibraryItem, Preset, PresetIntent, QueueSettings,
-        SaveAuthenticationProfileRequest, SavePresetRequest, SaveSitePresetRuleRequest,
-        SaveSubscriptionRequest, SitePresetRule, StartDownloadRequest, Subscription,
-        TransformationOperation, TransformationState, TransformationTask, UpdateLibraryItemRequest,
+        AuthenticationProfile, BrowserCookieSource, DesktopPreferences, DownloadArchiveMatch,
+        DownloadJob, DownloadState, EnginePreferences, LibraryItem, Preset, PresetIntent,
+        QueueSettings, SaveAuthenticationProfileRequest, SavePresetRequest,
+        SaveSitePresetRuleRequest, SaveSubscriptionRequest, SitePresetRule, StartDownloadRequest,
+        Subscription, TransformationOperation, TransformationState, TransformationTask,
+        UpdateLibraryItemRequest,
     },
     utils::validation::{
         normalize_engine_preferences, validate_destination, validate_engine_preferences,
@@ -29,6 +30,8 @@ const MIGRATION_0006: &str = include_str!("migrations/0006_media_library.sql");
 const MIGRATION_0007: &str = include_str!("migrations/0007_authentication_profiles.sql");
 const ENGINE_PREFERENCES_KEY: &str = "engine.preferences";
 const QUEUE_SETTINGS_KEY: &str = "queue.settings";
+const DESKTOP_PREFERENCES_KEY: &str = "desktop.preferences";
+const ONBOARDING_COMPLETED_KEY: &str = "onboarding.completed";
 
 #[derive(Clone)]
 pub struct Database {
@@ -232,6 +235,75 @@ impl Database {
              ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json,
                                                 updated_at = excluded.updated_at",
             params![ENGINE_PREFERENCES_KEY, value, Utc::now().timestamp_millis()],
+        )?;
+        Ok(())
+    }
+
+    pub fn load_desktop_preferences(&self) -> Result<DesktopPreferences, AppError> {
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "Desktop settings are unavailable.")
+        })?;
+        let value: Option<String> = connection
+            .query_row(
+                "SELECT value_json FROM settings WHERE key = ?1",
+                [DESKTOP_PREFERENCES_KEY],
+                |row| row.get(0),
+            )
+            .optional()?;
+        value
+            .map(|value| {
+                serde_json::from_str(&value)
+                    .map_err(|error| AppError::internal("could not read desktop settings", error))
+            })
+            .transpose()
+            .map(|value| value.unwrap_or_default())
+    }
+
+    pub fn save_desktop_preferences(
+        &self,
+        preferences: &DesktopPreferences,
+    ) -> Result<(), AppError> {
+        let value = serde_json::to_string(preferences)
+            .map_err(|error| AppError::internal("could not serialize desktop settings", error))?;
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "Desktop settings are unavailable.")
+        })?;
+        connection.execute(
+            "INSERT INTO settings (key, value_json, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at",
+            params![DESKTOP_PREFERENCES_KEY, value, Utc::now().timestamp_millis()],
+        )?;
+        Ok(())
+    }
+
+    pub fn onboarding_completed(&self) -> Result<bool, AppError> {
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "Onboarding settings are unavailable.",
+            )
+        })?;
+        let value: Option<String> = connection
+            .query_row(
+                "SELECT value_json FROM settings WHERE key = ?1",
+                [ONBOARDING_COMPLETED_KEY],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(value.as_deref() == Some("true"))
+    }
+
+    pub fn complete_onboarding(&self) -> Result<(), AppError> {
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "Onboarding settings are unavailable.",
+            )
+        })?;
+        connection.execute(
+            "INSERT INTO settings (key, value_json, updated_at) VALUES (?1, 'true', ?2)
+             ON CONFLICT(key) DO UPDATE SET value_json = 'true', updated_at = excluded.updated_at",
+            params![ONBOARDING_COMPLETED_KEY, Utc::now().timestamp_millis()],
         )?;
         Ok(())
     }
@@ -1556,6 +1628,30 @@ mod tests {
             database.load_engine_preferences().expect("saved settings"),
             preferences
         );
+    }
+
+    #[test]
+    fn persists_desktop_preferences_and_onboarding() {
+        use crate::models::{CloseBehavior, DesktopPreferences};
+        let directory = tempdir().expect("temporary directory");
+        let database = Database::open(&directory.path().join("desktop.sqlite3")).expect("database");
+        assert!(!database.onboarding_completed().expect("onboarding status"));
+        let preferences = DesktopPreferences {
+            close_behavior: CloseBehavior::Background,
+            start_minimized: true,
+            notify_when_backgrounded: false,
+        };
+        database
+            .save_desktop_preferences(&preferences)
+            .expect("save desktop preferences");
+        assert_eq!(
+            database
+                .load_desktop_preferences()
+                .expect("load desktop preferences"),
+            preferences
+        );
+        database.complete_onboarding().expect("complete onboarding");
+        assert!(database.onboarding_completed().expect("completed status"));
     }
 
     #[test]

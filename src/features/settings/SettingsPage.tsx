@@ -23,6 +23,7 @@ import type {
   BrowserCookieSource,
   AuthenticationProfile,
   BrowserProfileInfo,
+  DesktopPreferences,
   EngineId,
   EngineUpdateCandidate,
   ManagedEngineStatus,
@@ -70,7 +71,7 @@ export function SettingsPage() {
   const [managed, setManaged] = useState<ManagedEngineStatus[]>([]);
   const [candidate, setCandidate] = useState<EngineUpdateCandidate | null>(null);
   const [managing, setManaging] = useState<EngineId | null>(null);
-  const [settingsTab, setSettingsTab] = useState<"access" | "profiles" | "engines">("access");
+  const [settingsTab, setSettingsTab] = useState<"access" | "profiles" | "desktop" | "engines">("access");
 
   useEffect(() => {
     void api.listManagedEngines().then(setManaged).catch((error) => setError(normalizeError(error)));
@@ -151,7 +152,7 @@ export function SettingsPage() {
       }
     >
       <div className="mb-7 inline-flex gap-1 rounded-[10px] border border-line/60 bg-panel/55 p-1 shadow-control" role="tablist" aria-label="Settings sections">
-        {([ ["access", "Network & cookies"], ["profiles", "Site profiles"], ["engines", "Engines & diagnostics"] ] as const).map(([id, label]) => <button key={id} role="tab" aria-selected={settingsTab === id} onClick={() => setSettingsTab(id)} className={`rounded-[7px] px-4 py-2 text-[13px] font-semibold transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 ${settingsTab === id ? "bg-elevated text-ink shadow-control" : "text-muted hover:text-ink"}`}>{label}</button>)}
+        {([ ["access", "Network & cookies"], ["profiles", "Site profiles"], ["desktop", "Desktop"], ["engines", "Engines & diagnostics"] ] as const).map(([id, label]) => <button key={id} role="tab" aria-selected={settingsTab === id} onClick={() => setSettingsTab(id)} className={`rounded-[7px] px-4 py-2 text-[13px] font-semibold transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 ${settingsTab === id ? "bg-elevated text-ink shadow-control" : "text-muted hover:text-ink"}`}>{label}</button>)}
       </div>
       {settingsTab === "access" ? (
       <section className="mb-8">
@@ -287,6 +288,7 @@ export function SettingsPage() {
       ) : null}
 
       {settingsTab === "profiles" ? <AuthenticationProfiles /> : null}
+      {settingsTab === "desktop" ? <DesktopSettings /> : null}
 
       {settingsTab === "engines" ? <>
       <section className="mb-8">
@@ -389,6 +391,29 @@ export function SettingsPage() {
       </> : null}
     </Page>
   );
+}
+
+function DesktopSettings() {
+  const setError = useAppStore((state) => state.setError);
+  const setNotice = useAppStore((state) => state.setNotice);
+  const [preferences, setPreferences] = useState<DesktopPreferences | null>(null);
+  useEffect(() => { void api.getDesktopPreferences().then(setPreferences).catch((error) => setError(normalizeError(error))); }, [setError]);
+  async function saveDesktop() {
+    if (!preferences) return;
+    try { setPreferences(await api.updateDesktopPreferences(preferences)); setNotice({ message: "Desktop behavior saved.", view: "settings" }); }
+    catch (error) { setError(normalizeError(error)); }
+  }
+  if (!preferences) return <div className="p-8 text-sm text-muted">Loading desktop preferences…</div>;
+  return <section className="mb-8">
+    <div className="mb-3 flex items-center gap-2"><Settings2 size={17} className="text-muted" /><h2 className="text-sm font-semibold">Desktop lifecycle</h2></div>
+    <div className="panel-shadow border border-line/60 bg-panel/75 p-5">
+      <div className="grid gap-5 md:grid-cols-2">
+        <Field label="When closing the window" hint="Background mode keeps the Rust queue alive and leaves the app available from the tray."><Select value={preferences.closeBehavior} onChange={(event) => setPreferences({ ...preferences, closeBehavior: event.target.value as DesktopPreferences["closeBehavior"] })}><option value="ask">Ask while downloads are active</option><option value="background">Keep running in system tray</option><option value="quit">Quit the application</option></Select></Field>
+        <div className="space-y-4 pt-1"><label className="flex items-start gap-3 text-sm text-muted"><input className="mt-1" type="checkbox" checked={preferences.startMinimized} onChange={(event) => setPreferences({ ...preferences, startMinimized: event.target.checked })} /><span><strong className="block font-medium text-ink">Start in the background</strong>Open from the system tray when ready.</span></label><label className="flex items-start gap-3 text-sm text-muted"><input className="mt-1" type="checkbox" checked={preferences.notifyWhenBackgrounded} onChange={(event) => setPreferences({ ...preferences, notifyWhenBackgrounded: event.target.checked })} /><span><strong className="block font-medium text-ink">Background completion notices</strong>Use desktop notifications when supported.</span></label></div>
+      </div>
+      <div className="mt-5 flex items-center justify-between border-t border-line/60 pt-4"><p className="text-xs text-muted">Network interruptions retain partial files and use bounded retry; interrupted jobs recover on the next launch.</p><Button onClick={() => void saveDesktop()}><Save size={15} /> Save desktop behavior</Button></div>
+    </div>
+  </section>;
 }
 
 function AuthenticationProfiles() {

@@ -1,5 +1,17 @@
 # Nice Downloader Roadmap
 
+## Maturity roadmap delivered
+
+- First-run engine/privacy onboarding and Linux AppImage/DEB plus Windows NSIS release workflows.
+- Rust-owned scheduled subscriptions and searchable, archive-aware playlist selection.
+- Typed FFmpeg transformations with progress, cancellation, recovery, and persistence.
+- Local media library with tags, filters, missing-file reconciliation, sidecar imports, and backup/restore.
+- Per-site authentication profiles, browser discovery, and backend-only managed cookie files.
+- System-tray lifecycle, close/background behavior, startup reconciliation, and persisted desktop preferences.
+- CI, packaging foundations, strict CSP/capabilities, migration tests, and documented signing blockers.
+
+Remaining release gates are operational: signing credentials, clean-machine smoke tests, Flatpak dependency vendoring, SBOM publication, and broader real-site compatibility fixtures.
+
 ## Intelligent repeat workflows delivered
 
 - Opt-in clipboard URL detection that never analyzes or downloads automatically.

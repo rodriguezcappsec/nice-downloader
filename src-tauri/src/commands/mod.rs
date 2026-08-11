@@ -12,12 +12,12 @@ use crate::{
     library,
     models::{
         AuthenticationProfile, BatchAnalysisItem, BatchAnalysisResponse, BrowserProfileInfo,
-        DiskSpaceInfo, DownloadArchiveMatch, DownloadJob, EngineId, EngineInfo, EnginePreferences,
-        GalleryItemList, LibraryItem, LibraryScanResult, MediaAnalysis, Preset, QueueSettings,
-        QueueSnapshot, SaveAuthenticationProfileRequest, SavePresetRequest,
-        SaveSitePresetRuleRequest, SaveSubscriptionRequest, SitePresetRule, StartDownloadRequest,
-        StartTransformationRequest, Subscription, SubscriptionCheckResult, TransformationTask,
-        UpdateLibraryItemRequest,
+        DesktopPreferences, DiskSpaceInfo, DownloadArchiveMatch, DownloadJob, EngineId, EngineInfo,
+        EnginePreferences, GalleryItemList, LibraryItem, LibraryScanResult, MediaAnalysis,
+        OnboardingStatus, Preset, QueueSettings, QueueSnapshot, SaveAuthenticationProfileRequest,
+        SavePresetRequest, SaveSitePresetRuleRequest, SaveSubscriptionRequest, SitePresetRule,
+        StartDownloadRequest, StartTransformationRequest, Subscription, SubscriptionCheckResult,
+        TransformationTask, UpdateLibraryItemRequest,
     },
     queue::{disk_space, QueueManager},
     subscriptions,
@@ -133,6 +133,51 @@ pub fn delete_authentication_profile(
 #[tauri::command]
 pub fn discover_browser_profiles() -> Vec<BrowserProfileInfo> {
     authentication::discover_browser_profiles()
+}
+
+#[tauri::command]
+pub fn get_desktop_preferences(
+    database: State<'_, Database>,
+) -> Result<DesktopPreferences, AppError> {
+    database.load_desktop_preferences()
+}
+
+#[tauri::command]
+pub async fn update_desktop_preferences(
+    database: State<'_, Database>,
+    queue: State<'_, QueueManager>,
+    preferences: DesktopPreferences,
+) -> Result<DesktopPreferences, AppError> {
+    database.save_desktop_preferences(&preferences)?;
+    let mut queue_settings = queue.snapshot().await.settings;
+    queue_settings.notify_on_completion = preferences.notify_when_backgrounded;
+    queue.update_settings(queue_settings).await?;
+    Ok(preferences)
+}
+
+#[tauri::command]
+pub async fn get_onboarding_status(
+    app: AppHandle,
+    database: State<'_, Database>,
+) -> Result<OnboardingStatus, AppError> {
+    let default_destination = app
+        .path()
+        .download_dir()
+        .map_err(|error| {
+            AppError::internal("could not find the system Downloads directory", error)
+        })?
+        .to_string_lossy()
+        .into_owned();
+    Ok(OnboardingStatus {
+        completed: database.onboarding_completed()?,
+        default_destination,
+        engines: discovery::detect_all().await,
+    })
+}
+
+#[tauri::command]
+pub fn complete_onboarding(database: State<'_, Database>) -> Result<(), AppError> {
+    database.complete_onboarding()
 }
 
 #[tauri::command]
