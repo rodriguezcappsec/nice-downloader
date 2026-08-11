@@ -161,6 +161,33 @@ impl Database {
                         .timestamp_millis(),
                 ],
             )?;
+            if let Some(output_path) = job
+                .output_path
+                .as_deref()
+                .filter(|path| Path::new(path).is_file())
+            {
+                let metadata = serde_json::json!({
+                    "downloadJobId": job.id,
+                    "selectedQuality": job.selected_quality,
+                    "outputFormat": job.output_format,
+                });
+                connection.execute(
+                    "INSERT INTO media_library
+                        (id, path, title, source_url, thumbnail, duration_seconds, site,
+                         tags_json, metadata_json, missing, added_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '[]', ?8, 0, ?9, ?9)
+                     ON CONFLICT(path) DO UPDATE SET
+                        title = excluded.title, source_url = excluded.source_url,
+                        thumbnail = excluded.thumbnail, duration_seconds = excluded.duration_seconds,
+                        site = excluded.site, metadata_json = excluded.metadata_json,
+                        missing = 0, updated_at = excluded.updated_at",
+                    params![
+                        Uuid::new_v4().to_string(), output_path, job.title, job.url, job.thumbnail,
+                        request.analysis.duration_seconds, request.analysis.site_name,
+                        metadata.to_string(), job.completed_at.unwrap_or(job.updated_at).timestamp_millis(),
+                    ],
+                )?;
+            }
         }
         Ok(())
     }
@@ -1526,6 +1553,7 @@ mod tests {
             updated_at: now,
             completed_at: Some(now),
         };
+        std::fs::write(directory.path().join("video.mp4"), b"fixture").expect("media fixture");
         let options = DownloadOptions {
             quality: QualityOption {
                 id: "best".to_owned(),
@@ -1583,6 +1611,9 @@ mod tests {
         assert_eq!(history[0].title, "Example");
         assert_eq!(history[0].diagnostics, ["finished"]);
         assert_eq!(history[0].attempt_count, 2);
+        let library = database.list_library_items().expect("auto-indexed library");
+        assert_eq!(library.len(), 1);
+        assert_eq!(library[0].title, "Example");
         assert!(database
             .archive_match(&job.url, &job.destination)
             .expect("archive lookup")
