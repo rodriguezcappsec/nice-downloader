@@ -637,6 +637,41 @@ pub struct BrowserProfileInfo {
     pub path: String,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum CloseBehavior {
+    #[default]
+    Ask,
+    Background,
+    Quit,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopPreferences {
+    pub close_behavior: CloseBehavior,
+    pub start_minimized: bool,
+    pub notify_when_backgrounded: bool,
+}
+
+impl Default for DesktopPreferences {
+    fn default() -> Self {
+        Self {
+            close_behavior: CloseBehavior::Ask,
+            start_minimized: false,
+            notify_when_backgrounded: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OnboardingStatus {
+    pub completed: bool,
+    pub default_destination: String,
+    pub engines: Vec<EngineInfo>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueueSnapshot {

@@ -30,6 +30,8 @@ import type {
   AuthenticationProfile,
   SaveAuthenticationProfileRequest,
   BrowserProfileInfo,
+  DesktopPreferences,
+  OnboardingStatus,
   StartDownloadRequest,
 } from "../types";
 
@@ -109,6 +111,10 @@ export const api = {
   saveAuthenticationProfile: (request: SaveAuthenticationProfileRequest) => invoke<AuthenticationProfile>("save_authentication_profile", { request }),
   deleteAuthenticationProfile: (id: string) => invoke<void>("delete_authentication_profile", { id }),
   discoverBrowserProfiles: () => invoke<BrowserProfileInfo[]>("discover_browser_profiles"),
+  getDesktopPreferences: () => invoke<DesktopPreferences>("get_desktop_preferences"),
+  updateDesktopPreferences: (preferences: DesktopPreferences) => invoke<DesktopPreferences>("update_desktop_preferences", { preferences }),
+  getOnboardingStatus: () => invoke<OnboardingStatus>("get_onboarding_status"),
+  completeOnboarding: () => invoke<void>("complete_onboarding"),
   openDownloadOutput: (jobId: string, reveal: boolean) =>
     invoke<void>("open_download_output", { jobId, reveal }),
   exportDiagnostics: (path: string) => invoke<void>("export_diagnostics", { path }),

@@ -118,4 +118,15 @@ Presets store reusable intent fields, not engine flags. Queue concurrency, queue
 
 ## Near-term extension points
 
+## Mature workflow services
+
+- `subscriptions`: Rust-owned periodic playlist expansion, archive deduplication, and typed queue creation.
+- `transformations`: FFmpeg task ownership, structured `-progress` parsing, cancellation, crash reconciliation, and independent SQLite history.
+- `library`: non-destructive local-media catalog, safe `.info.json` normalization, tagging, missing-file reconciliation, and versioned metadata backup/restore.
+- `authentication`: longest-host-suffix matching, browser-profile discovery, and backend-only managed Netscape cookie files. Managed paths use owner-only permissions on Unix and are omitted from frontend DTOs.
+
+The tray and desktop settings form a small platform boundary. Window close policy is applied in the Tauri frontend while process survival, queue recovery, and persisted preferences remain backend-owned.
+
+## Remaining extension points
+
 The gallery-dl route can expand beyond Bunkr. FFmpeg remains system-managed until a portable, verifiable distribution policy is selected. Platform packaging, non-Linux pause/notification adapters, and custom arguments remain later work. Additional authenticated-site support should extend typed access preferences rather than exposing arbitrary engine flags.
