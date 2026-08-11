@@ -77,6 +77,8 @@ Exact `bunkr.cr/a/<album-id>` URLs route to gallery-dl. Initial analysis is boun
 
 Recognized direct HTTP file URLs route to the direct-transfer adapter. It prefers aria2c and falls back to curl, with resume, redirect following, bounded retry, optional typed proxy configuration, and filesystem-based normalized progress. These transfers bypass extraction and conversion.
 
+Transfer reliability is covered by a loopback-only integration harness. A controlled HTTP fixture produces 429 responses, valid byte ranges, and deliberately truncated bodies while the test runs the real curl executable. Retries happen as fresh Rust-owned process attempts: this is intentional because curl's same-process retry can request the correct range yet truncate the existing output on some versions. Run the harness with `npm run test:integration`.
+
 ## Persistence
 
 SQLite is stored in Tauri's application-data directory. Numbered embedded migrations create `downloads`, `presets`, and `settings`. Download rows store normalized display state, the serialized typed request, bounded sanitized diagnostics, retry lineage, and timestamps. Completed rows feed History; non-completed rows rebuild the runtime queue after restart.

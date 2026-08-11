@@ -166,6 +166,7 @@ impl QueueManager {
                     "The original download options are no longer available.",
                 )
             })?;
+        let request = resume_capable_request(request);
         self.enqueue_with_lineage(
             app,
             request,
@@ -894,6 +895,7 @@ impl QueueManager {
         let Some(request) = self.requests.read().await.get(&id).cloned() else {
             return;
         };
+        let request = resume_capable_request(request);
         let Ok(preferences) = self.database.load_engine_preferences() else {
             return;
         };
@@ -1365,6 +1367,13 @@ fn is_media_output(path: &std::path::Path) -> bool {
                     | "wav"
             )
         })
+}
+
+fn resume_capable_request(mut request: StartDownloadRequest) -> StartDownloadRequest {
+    if request.analysis.engine == crate::models::DownloadEngineKind::DirectHttp {
+        request.options.output_conflict_policy = crate::models::OutputConflictPolicy::Overwrite;
+    }
+    request
 }
 
 fn download_failure_message(

@@ -45,6 +45,7 @@ Additional reliability delivered:
 - Classified automatic recovery for rate limits, 5xx responses, timeouts, resets, and incomplete reads, capped at three total attempts.
 - ffprobe output verification with verified/warning status in History.
 - Global bandwidth limiting, safe duplicate prevention, and searchable History with record-only deletion.
+- Deterministic loopback integration coverage for 429 recovery, existing partial-file Range resume, and interrupted-body recovery using the real curl engine.
 
 ## Milestone 3: richer media intent
 
