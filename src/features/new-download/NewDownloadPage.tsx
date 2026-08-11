@@ -16,7 +16,7 @@ import { Button, Field, Input, Select, Textarea } from "../../components/ui";
 import { formatBytes, formatDuration } from "../../lib/format";
 import { api } from "../../lib/tauri";
 import { useAppStore } from "../../stores/app-store";
-import type { DiskSpaceInfo, DownloadOptions, GalleryItem, MediaAnalysis, StartDownloadRequest } from "../../types";
+import type { DiskSpaceInfo, DownloadOptions, GalleryItem, MediaAnalysis, Preset, StartDownloadRequest } from "../../types";
 
 export function NewDownloadPage() {
   const analysis = useAppStore((state) => state.analysis);
@@ -46,6 +46,14 @@ export function NewDownloadPage() {
   const [gallerySearch, setGallerySearch] = useState("");
   const [scheduledFor, setScheduledFor] = useState("");
   const [diskSpace, setDiskSpace] = useState<DiskSpaceInfo | null>(null);
+  const [presets, setPresets] = useState<Preset[]>([]);
+  const [presetId, setPresetId] = useState("");
+  const [videoCodecPreference, setVideoCodecPreference] = useState<DownloadOptions["videoCodecPreference"]>("any");
+  const [audioQuality, setAudioQuality] = useState<DownloadOptions["audioQuality"]>("best");
+
+  useEffect(() => {
+    void api.listPresets().then(setPresets).catch(() => setPresets([]));
+  }, []);
 
   useEffect(() => {
     if (!destination && defaultDestination) setDestination(defaultDestination);
@@ -120,6 +128,24 @@ export function NewDownloadPage() {
     if (!audioOnly && ["mp3", "m4a", "opus"].includes(container)) setContainer("mp4");
   }, [audioOnly, container]);
 
+  useEffect(() => {
+    const preset = presets.find((item) => item.id === presetId);
+    if (!preset || !analysis || isGallery || isDirect) return;
+    const requestedHeight = Number(preset.intent.quality);
+    const quality = preset.intent.quality === "audio"
+      ? analysis.qualityOptions.find((item) => item.kind === "audioOnly")
+      : preset.intent.quality === "best"
+        ? analysis.qualityOptions.find((item) => item.kind === "best")
+        : analysis.qualityOptions.find((item) => item.maxHeight === requestedHeight);
+    if (quality) setQualityId(quality.id);
+    setContainer(preset.intent.container);
+    setVideoCodecPreference(preset.intent.videoCodecPreference);
+    setAudioQuality(preset.intent.audioQuality);
+    setEmbedThumbnail(preset.intent.embedThumbnail);
+    setEmbedMetadata(preset.intent.embedMetadata);
+    setOutputConflictPolicy(preset.intent.outputConflictPolicy);
+  }, [analysis, isDirect, isGallery, presetId, presets]);
+
   async function pasteUrl() {
     try {
       const text = await navigator.clipboard.readText();
@@ -143,8 +169,8 @@ export function NewDownloadPage() {
     const options: DownloadOptions = {
       quality: selectedQuality,
       container,
-      videoCodecPreference: "any",
-      audioQuality: "best",
+      videoCodecPreference,
+      audioQuality,
       audioOnly,
       subtitles: false,
       subtitleLanguages: [],
@@ -345,6 +371,14 @@ export function NewDownloadPage() {
                 </div>
               ) : (
                 <>
+                  {presets.length > 0 ? (
+                    <Field label="Preset">
+                      <Select value={presetId} onChange={(event) => setPresetId(event.target.value)}>
+                        <option value="">Custom</option>
+                        {presets.map((preset) => <option key={preset.id} value={preset.id}>{preset.name}</option>)}
+                      </Select>
+                    </Field>
+                  ) : null}
                   <Field label="Quality">
                     <Select value={qualityId} onChange={(event) => setQualityId(event.target.value)}>
                       {analysis.qualityOptions.map((quality) => (
@@ -399,6 +433,16 @@ export function NewDownloadPage() {
                 </button>
                 {advancedOpen ? (
                   <div className="grid gap-3 pb-2 pt-2 text-sm text-muted">
+                    <Field label="Preferred video codec">
+                      <Select value={videoCodecPreference} onChange={(event) => setVideoCodecPreference(event.target.value as DownloadOptions["videoCodecPreference"])}>
+                        <option value="any">Automatic</option><option value="h264">H.264 compatibility</option><option value="av1">AV1</option><option value="vp9">VP9</option>
+                      </Select>
+                    </Field>
+                    {audioOnly ? <Field label="Audio quality">
+                      <Select value={audioQuality} onChange={(event) => setAudioQuality(event.target.value as DownloadOptions["audioQuality"])}>
+                        {(["best", "320k", "256k", "192k", "128k"] as const).map((value) => <option key={value} value={value}>{value === "best" ? "Best available" : value}</option>)}
+                      </Select>
+                    </Field> : null}
                     <label className="flex items-center gap-3">
                       <input type="checkbox" checked={embedMetadata} onChange={(event) => setEmbedMetadata(event.target.checked)} />
                       Embed media metadata

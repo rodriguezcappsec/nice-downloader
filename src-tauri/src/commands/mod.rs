@@ -10,8 +10,8 @@ use crate::{
     errors::AppError,
     models::{
         BatchAnalysisItem, BatchAnalysisResponse, DiskSpaceInfo, DownloadJob, EngineId, EngineInfo,
-        EnginePreferences, GalleryItemList, MediaAnalysis, QueueSettings, QueueSnapshot,
-        StartDownloadRequest,
+        EnginePreferences, GalleryItemList, MediaAnalysis, Preset, QueueSettings, QueueSnapshot,
+        SavePresetRequest, StartDownloadRequest,
     },
     queue::{disk_space, QueueManager},
     utils::validation::{
@@ -318,6 +318,155 @@ pub fn list_history(database: State<'_, Database>) -> Result<Vec<DownloadJob>, A
     database.list_history()
 }
 
+#[tauri::command]
+pub fn list_presets(database: State<'_, Database>) -> Result<Vec<Preset>, AppError> {
+    database.list_presets()
+}
+
+#[tauri::command]
+pub fn save_preset(
+    database: State<'_, Database>,
+    request: SavePresetRequest,
+) -> Result<Preset, AppError> {
+    database.save_preset(request)
+}
+
+#[tauri::command]
+pub fn delete_preset(database: State<'_, Database>, id: String) -> Result<(), AppError> {
+    database.delete_preset(&id)
+}
+
+#[tauri::command]
+pub fn open_download_output(
+    database: State<'_, Database>,
+    job_id: String,
+    reveal: bool,
+) -> Result<(), AppError> {
+    let path = database.download_output_path(&job_id)?;
+    if !path.is_absolute() {
+        return Err(AppError::new(
+            "invalid_output_path",
+            "The saved output path is invalid.",
+        ));
+    }
+    let target = if reveal && path.is_file() {
+        path.parent().unwrap_or(&path)
+    } else {
+        path.as_path()
+    };
+    if !target.exists() {
+        return Err(AppError::new(
+            "output_not_found",
+            "The downloaded file or folder no longer exists at its saved location.",
+        ));
+    }
+    #[cfg(target_os = "linux")]
+    let mut command = std::process::Command::new("xdg-open");
+    #[cfg(target_os = "macos")]
+    let mut command = std::process::Command::new("open");
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = std::process::Command::new("explorer.exe");
+        if reveal && path.is_file() {
+            command.arg("/select,");
+        }
+        command
+    };
+    let mut child = command
+        .arg(target)
+        .spawn()
+        .map_err(|error| AppError::internal("could not open the downloaded output", error))?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn export_diagnostics(
+    app: AppHandle,
+    database: State<'_, Database>,
+    path: String,
+) -> Result<(), AppError> {
+    let path = std::path::PathBuf::from(path);
+    if !path.is_absolute()
+        || path.extension().and_then(|value| value.to_str()) != Some("json")
+        || !path.parent().is_some_and(std::path::Path::is_dir)
+    {
+        return Err(AppError::new(
+            "invalid_diagnostic_path",
+            "Choose an existing folder and a filename ending in .json.",
+        ));
+    }
+    let preferences = database.load_engine_preferences()?;
+    let jobs = database.list_recent_jobs()?;
+    let engines = discovery::detect_all().await;
+    let managed = managed::list_statuses()?;
+    let jobs = jobs
+        .into_iter()
+        .map(|job| {
+            let site = url::Url::parse(&job.url)
+                .ok()
+                .and_then(|url| url.host_str().map(str::to_owned));
+            serde_json::json!({
+                "id": job.id,
+                "site": site,
+                "state": job.state,
+                "engineOutputFormat": job.output_format,
+                "operation": job.current_operation,
+                "error": job.error.map(|value| sanitize_export_text(&value)),
+                "diagnostics": job.diagnostics.into_iter().map(|value| sanitize_export_text(&value)).collect::<Vec<_>>(),
+                "attemptCount": job.attempt_count,
+                "updatedAt": job.updated_at,
+            })
+        })
+        .collect::<Vec<_>>();
+    let document = serde_json::json!({
+        "schemaVersion": 1,
+        "generatedAt": chrono::Utc::now(),
+        "application": { "name": app.package_info().name, "version": app.package_info().version.to_string() },
+        "platform": { "os": std::env::consts::OS, "arch": std::env::consts::ARCH },
+        "access": {
+            "browserCookieSource": preferences.browser_cookie_source,
+            "browserProfileConfigured": preferences.browser_profile.is_some(),
+            "proxyConfigured": preferences.proxy_url.is_some(),
+            "impersonationEnabled": preferences.enable_impersonation,
+        },
+        "engines": engines,
+        "managedEngines": managed,
+        "jobs": jobs,
+        "redactions": ["URL paths and queries", "proxy value", "browser profile", "cookies", "request headers"],
+    });
+    let bytes = serde_json::to_vec_pretty(&document)
+        .map_err(|error| AppError::internal("could not serialize diagnostics", error))?;
+    let parent = path.parent().ok_or_else(|| {
+        AppError::new(
+            "invalid_diagnostic_path",
+            "The diagnostic destination is invalid.",
+        )
+    })?;
+    let temporary = parent.join(format!(".nice-downloader-{}.tmp", uuid::Uuid::new_v4()));
+    std::fs::write(&temporary, bytes)
+        .map_err(|error| AppError::internal("could not write the diagnostic bundle", error))?;
+    std::fs::rename(&temporary, &path)
+        .map_err(|error| AppError::internal("could not finalize the diagnostic bundle", error))?;
+    Ok(())
+}
+
+fn sanitize_export_text(value: &str) -> String {
+    crate::engines::ytdlp::sanitize_diagnostic(value)
+        .split_whitespace()
+        .map(|token| {
+            if token.contains("http://") || token.contains("https://") {
+                "[url redacted]"
+            } else {
+                token
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -341,5 +490,15 @@ mod tests {
             .map(|index| format!("https://example.com/{index}"))
             .collect();
         assert!(normalize_batch_urls(urls).is_err());
+    }
+
+    #[test]
+    fn diagnostic_exports_remove_urls_and_sensitive_queries() {
+        let sanitized = sanitize_export_text(
+            "failed https://cdn.example/file.mp4?token=secret Authorization: bearer",
+        );
+        assert!(!sanitized.contains("cdn.example"));
+        assert!(!sanitized.contains("secret"));
+        assert!(sanitized.contains("[url redacted]"));
     }
 }

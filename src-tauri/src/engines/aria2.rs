@@ -96,6 +96,14 @@ pub fn prepare_direct(
             .and_then(Iterator::last)
             .unwrap_or("download"),
     );
+    let output_path = std::path::Path::new(&request.options.destination).join(&filename);
+    if output_path.exists() && request.options.output_conflict_policy == OutputConflictPolicy::Skip
+    {
+        return Err(AppError::new(
+            "output_exists",
+            "The direct-download output already exists. Choose overwrite or a different destination.",
+        ));
+    }
     if let Ok(executable) = which::which("aria2c") {
         let mut args = vec![
             "--continue=true".to_owned(),

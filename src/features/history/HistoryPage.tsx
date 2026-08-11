@@ -1,13 +1,15 @@
-import { CheckCircle2, History, RefreshCw } from "lucide-react";
+import { CheckCircle2, ExternalLink, FolderOpen, History, RefreshCw } from "lucide-react";
 import { Page } from "../../components/Page";
 import { Button, EmptyState } from "../../components/ui";
 import { formatBytes } from "../../lib/format";
+import { api, normalizeError } from "../../lib/tauri";
 import { useAppStore } from "../../stores/app-store";
 
 export function HistoryPage() {
   const history = useAppStore((state) => state.history);
   const loading = useAppStore((state) => state.historyLoading);
   const loadHistory = useAppStore((state) => state.loadHistory);
+  const setError = useAppStore((state) => state.setError);
   return (
     <Page
       title="History"
@@ -28,6 +30,10 @@ export function HistoryPage() {
               <div className="text-right text-xs text-muted">
                 <div>{entry.outputFormat.toUpperCase()} · {entry.selectedQuality}</div>
                 <div className="mt-1">{entry.totalBytes ? formatBytes(entry.totalBytes) : "Completed"} · {formatDate(entry.completedAt)}</div>
+                <div className="mt-2 flex justify-end gap-1">
+                  <Button variant="ghost" className="h-7 px-2 text-xs" onClick={() => void api.openDownloadOutput(entry.id, false).catch((error) => setError(normalizeError(error)))}><ExternalLink size={13} /> Open</Button>
+                  <Button variant="ghost" className="h-7 px-2 text-xs" onClick={() => void api.openDownloadOutput(entry.id, true).catch((error) => setError(normalizeError(error)))}><FolderOpen size={13} /> Reveal</Button>
+                </div>
               </div>
             </article>
           ))}

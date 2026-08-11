@@ -206,6 +206,7 @@ export interface StartDownloadRequest {
 export interface QueueSettings {
   concurrentDownloads: number;
   paused: boolean;
+  notifyOnCompletion: boolean;
 }
 
 export interface QueueSnapshot {
@@ -218,6 +219,30 @@ export interface DiskSpaceInfo {
   availableBytes: number;
   requiredBytes?: number | null;
   sufficient: boolean;
+}
+
+export interface PresetIntent {
+  quality: "best" | "2160" | "1440" | "1080" | "720" | "480" | "audio";
+  container: DownloadOptions["container"];
+  videoCodecPreference: DownloadOptions["videoCodecPreference"];
+  audioQuality: DownloadOptions["audioQuality"];
+  embedThumbnail: boolean;
+  embedMetadata: boolean;
+  outputConflictPolicy: DownloadOptions["outputConflictPolicy"];
+}
+
+export interface Preset {
+  id: string;
+  name: string;
+  intent: PresetIntent;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SavePresetRequest {
+  id?: string | null;
+  name: string;
+  intent: PresetIntent;
 }
 
 export type HistoryEntry = DownloadJob;

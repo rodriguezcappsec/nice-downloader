@@ -1,7 +1,8 @@
-import { ArrowDown, ArrowUp, Ban, Download, ListOrdered, Pause, Play, RotateCcw } from "lucide-react";
+import { ArrowDown, ArrowUp, Ban, Download, FolderOpen, ListOrdered, Pause, Play, RotateCcw } from "lucide-react";
 import { Page } from "../../components/Page";
 import { Button, EmptyState, Progress } from "../../components/ui";
 import { formatBytes, formatEta } from "../../lib/format";
+import { api, normalizeError } from "../../lib/tauri";
 import { useAppStore } from "../../stores/app-store";
 import type { DownloadJob } from "../../types";
 
@@ -18,6 +19,7 @@ export function DownloadsPage({ queueOnly = false }: { queueOnly?: boolean }) {
   const updateQueue = useAppStore((state) => state.updateQueueSettings);
   const moveQueued = useAppStore((state) => state.moveQueuedDownload);
   const setView = useAppStore((state) => state.setView);
+  const setError = useAppStore((state) => state.setError);
   const visible = jobs
     .filter((job) => (queueOnly ? ["Queued", "Paused"].includes(job.state) && queue.orderedJobIds.includes(job.id) : true))
     .sort((a, b) => queueOnly
@@ -52,6 +54,14 @@ export function DownloadsPage({ queueOnly = false }: { queueOnly?: boolean }) {
             {queue.settings.paused ? <Play size={15} /> : <Pause size={15} />}
             {queue.settings.paused ? "Start queue" : "Pause queue"}
           </Button>
+          <label className="flex items-center gap-2 text-xs text-muted">
+            <input
+              type="checkbox"
+              checked={queue.settings.notifyOnCompletion}
+              onChange={(event) => void updateQueue({ ...queue.settings, notifyOnCompletion: event.target.checked })}
+            />
+            Desktop notification on completion
+          </label>
           <span className="text-xs text-muted">{queue.activeJobIds.length} active · {queue.orderedJobIds.length} waiting</span>
         </div>
       ) : null}
@@ -70,6 +80,7 @@ export function DownloadsPage({ queueOnly = false }: { queueOnly?: boolean }) {
             onRetry={() => void retry(job.id)}
             onPause={() => void pause(job.id)}
             onResume={() => void resume(job.id)}
+            onReveal={() => void api.openDownloadOutput(job.id, true).catch((error) => setError(normalizeError(error)))}
             queueControls={queueOnly ? {
               canMoveUp: index > 0,
               canMoveDown: index < visible.length - 1,
@@ -83,12 +94,13 @@ export function DownloadsPage({ queueOnly = false }: { queueOnly?: boolean }) {
   );
 }
 
-function DownloadRow({ job, onCancel, onRetry, onPause, onResume, queueControls }: {
+function DownloadRow({ job, onCancel, onRetry, onPause, onResume, onReveal, queueControls }: {
   job: DownloadJob;
   onCancel: () => void;
   onRetry: () => void;
   onPause: () => void;
   onResume: () => void;
+  onReveal: () => void;
   queueControls?: { canMoveUp: boolean; canMoveDown: boolean; moveUp: () => void; moveDown: () => void };
 }) {
   const canCancel = !terminalStates.has(job.state);
@@ -120,6 +132,8 @@ function DownloadRow({ job, onCancel, onRetry, onPause, onResume, queueControls 
             </div>
           ) : job.state === "Failed" || job.state === "Cancelled" ? (
             <Button variant="ghost" className="h-8 px-2.5" onClick={onRetry}><RotateCcw size={14} /> Retry</Button>
+          ) : job.state === "Completed" ? (
+            <Button variant="ghost" className="h-8 px-2.5" onClick={onReveal}><FolderOpen size={14} /> Reveal</Button>
           ) : null}
         </div>
         <div className="mt-3"><Progress value={job.progressPercent} /></div>
