@@ -93,6 +93,8 @@ Transfer reliability is covered by a loopback-only integration harness. A contro
 
 ## Persistence
 
+Terminal downloads have persistent Downloads-view visibility. Dismissing a completed, failed, or cancelled job hides it from Downloads without deleting its completed History row, archive identity, library item, or media file.
+
 SQLite is stored in Tauri's application-data directory. Numbered embedded migrations create `downloads`, `presets`, and `settings`. Download rows store normalized display state, the serialized typed request, bounded sanitized diagnostics, retry lineage, and timestamps. Completed rows feed History; non-completed rows rebuild the runtime queue after restart.
 
 Presets store reusable intent fields, not engine flags. Queue concurrency, queue pause, and notification preference are stored as typed JSON settings.
