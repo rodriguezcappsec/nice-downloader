@@ -57,6 +57,7 @@ export const api = {
     invoke<DiskSpaceInfo>("check_disk_space", { destination, requiredBytes }),
   listJobs: () => invoke<DownloadJob[]>("list_jobs"),
   listHistory: () => invoke<HistoryEntry[]>("list_history"),
+  deleteHistoryEntry: (id: string) => invoke<void>("delete_history_entry", { id }),
   listPresets: () => invoke<Preset[]>("list_presets"),
   savePreset: (request: SavePresetRequest) => invoke<Preset>("save_preset", { request }),
   deletePreset: (id: string) => invoke<void>("delete_preset", { id }),

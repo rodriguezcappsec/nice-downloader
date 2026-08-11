@@ -27,7 +27,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   const jobMap = useAppStore((state) => state.jobs);
   const jobs = Object.values(jobMap);
   const activeCount = jobs.filter((job) =>
-    ["Analyzing", "Preparing", "Downloading", "PostProcessing", "Merging"].includes(job.state),
+    ["Analyzing", "Preparing", "Downloading", "PostProcessing", "Merging", "Verifying"].includes(job.state),
   ).length;
   const queuedCount = jobs.filter((job) => job.state === "Queued").length;
 

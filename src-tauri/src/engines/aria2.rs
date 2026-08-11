@@ -124,6 +124,9 @@ pub fn prepare_direct(
         if let Some(proxy) = &preferences.proxy_url {
             args.push(format!("--all-proxy={proxy}"));
         }
+        if let Some(limit) = preferences.bandwidth_limit_kib {
+            args.push(format!("--max-download-limit={limit}K"));
+        }
         args.push("--".to_owned());
         args.push(parsed.to_string());
         return Ok(DirectHttpDownload {
@@ -157,6 +160,9 @@ pub fn prepare_direct(
     ];
     if let Some(proxy) = &preferences.proxy_url {
         args.extend(["--proxy".to_owned(), proxy.clone()]);
+    }
+    if let Some(limit) = preferences.bandwidth_limit_kib {
+        args.extend(["--limit-rate".to_owned(), format!("{limit}K")]);
     }
     args.push("--".to_owned());
     args.push(parsed.to_string());

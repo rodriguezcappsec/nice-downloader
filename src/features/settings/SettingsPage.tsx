@@ -193,6 +193,22 @@ export function SettingsPage() {
               </div>
             </Field>
 
+            <Field
+              label="Bandwidth limit (KiB/s)"
+              hint="Optional global limit applied to yt-dlp, gallery-dl, aria2c, and curl. Minimum 64 KiB/s."
+            >
+              <Input
+                type="number"
+                min={64}
+                value={preferences.bandwidthLimitKib ?? ""}
+                placeholder="Unlimited"
+                onChange={(event) => {
+                  setSaved(false);
+                  setPreferences({ ...preferences, bandwidthLimitKib: event.target.value ? Number(event.target.value) : null });
+                }}
+              />
+            </Field>
+
             <div>
               <div className="text-sm font-medium text-ink">Request compatibility</div>
               <label className="mt-3 flex items-start gap-3 text-sm text-muted">

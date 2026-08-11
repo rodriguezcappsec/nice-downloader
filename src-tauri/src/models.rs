@@ -81,6 +81,8 @@ pub struct EnginePreferences {
     #[serde(default)]
     pub proxy_url: Option<String>,
     pub enable_impersonation: bool,
+    #[serde(default)]
+    pub bandwidth_limit_kib: Option<u64>,
 }
 
 impl Default for EnginePreferences {
@@ -90,6 +92,7 @@ impl Default for EnginePreferences {
             browser_profile: None,
             proxy_url: None,
             enable_impersonation: true,
+            bandwidth_limit_kib: None,
         }
     }
 }
@@ -201,6 +204,8 @@ pub struct DownloadOptions {
     pub quality: QualityOption,
     pub container: OutputContainer,
     pub video_codec_preference: VideoCodecPreference,
+    #[serde(default)]
+    pub format_strategy: FormatStrategy,
     pub audio_quality: AudioQuality,
     pub audio_only: bool,
     pub subtitles: bool,
@@ -215,6 +220,16 @@ pub struct DownloadOptions {
     pub output_conflict_policy: OutputConflictPolicy,
     #[serde(default)]
     pub gallery_selection: Option<Vec<GalleryItemSelection>>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum FormatStrategy {
+    #[default]
+    Recommended,
+    Compatibility,
+    Quality,
+    Smallest,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -305,6 +320,8 @@ pub struct QueueSettings {
     pub paused: bool,
     #[serde(default = "default_true")]
     pub notify_on_completion: bool,
+    #[serde(default)]
+    pub completion_action: CompletionAction,
 }
 
 impl Default for QueueSettings {
@@ -313,8 +330,17 @@ impl Default for QueueSettings {
             concurrent_downloads: 2,
             paused: false,
             notify_on_completion: true,
+            completion_action: CompletionAction::None,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum CompletionAction {
+    #[default]
+    None,
+    OpenFolder,
 }
 
 fn default_true() -> bool {
@@ -376,6 +402,7 @@ pub enum DownloadState {
     Downloading,
     PostProcessing,
     Merging,
+    Verifying,
     Completed,
     Failed,
     Cancelled,

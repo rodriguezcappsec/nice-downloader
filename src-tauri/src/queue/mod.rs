@@ -188,6 +188,16 @@ impl QueueManager {
         validate_engine_preferences(&preferences)?;
         let destination = validate_destination(&request.options.destination)?;
         validate_destination_writable(&destination)?;
+        if request.options.output_conflict_policy == crate::models::OutputConflictPolicy::Skip
+            && self
+                .database
+                .has_completed_duplicate(&request.url, &request.options.destination)?
+        {
+            return Err(AppError::new(
+                "duplicate_download",
+                "This URL was already downloaded to the selected destination. Choose overwrite to download it again.",
+            ));
+        }
         let prepared = router::prepare_download(&request, &preferences).await?;
 
         preflight_disk_space(&destination, request_estimated_bytes(&request))?;
@@ -668,27 +678,43 @@ impl QueueManager {
         }
 
         if exit_status.is_some_and(|status| status.success()) {
+            let verification = self.verify_output(&app, &id).await;
             let completed = self
                 .update_job(&app, &id, |job| {
                     job.state = DownloadState::Completed;
                     job.progress_percent = 100.0;
                     job.speed_bytes_per_second = None;
                     job.eta_seconds = Some(0);
-                    job.current_operation = "Download completed".to_owned();
+                    job.current_operation = verification.operation().to_owned();
+                    if let Some(warning) = verification.warning() {
+                        if job.diagnostics.len() >= MAX_JOB_DIAGNOSTIC_LINES {
+                            job.diagnostics.remove(0);
+                        }
+                        job.diagnostics.push(warning.to_owned());
+                    }
                     job.completed_at = Some(Utc::now());
                 })
                 .await;
             if let Some(job) = completed {
                 self.persist_job(&job).await;
-                if self.scheduler.lock().await.settings.notify_on_completion {
+                let settings = self.scheduler.lock().await.settings.clone();
+                if settings.notify_on_completion {
                     send_completion_notification(&job);
+                }
+                if settings.completion_action == crate::models::CompletionAction::OpenFolder {
+                    open_completed_folder(&job);
                 }
             }
             self.cancellations.lock().await.remove(&id);
             tracing::info!(job_id = %id, "download completed");
         } else {
             let error = download_failure_message(prepared.kind, prepared.engine_name, &diagnostics);
+            let retry = transient_retry(&diagnostics);
             self.transition_failed(&app, &id, error).await;
+            if let Some(delay) = retry {
+                self.schedule_automatic_retry(app.clone(), id.clone(), delay)
+                    .await;
+            }
         }
         self.process_ids.lock().await.remove(&id);
     }
@@ -792,6 +818,123 @@ impl QueueManager {
             })
             .await;
         }
+    }
+
+    async fn verify_output(&self, app: &AppHandle, id: &str) -> VerificationResult {
+        let Some(path) = self
+            .jobs
+            .read()
+            .await
+            .get(id)
+            .and_then(|job| job.output_path.as_ref())
+            .map(std::path::PathBuf::from)
+        else {
+            return VerificationResult::Unavailable;
+        };
+        if !path.is_file() || !is_media_output(&path) {
+            return VerificationResult::NotApplicable;
+        }
+        let Some(ffprobe) = crate::engines::managed::resolve("ffprobe") else {
+            return VerificationResult::Unavailable;
+        };
+        self.update_job(app, id, |job| {
+            job.state = DownloadState::Verifying;
+            job.current_operation = "Verifying completed media".to_owned();
+            job.speed_bytes_per_second = None;
+            job.eta_seconds = None;
+        })
+        .await;
+        let output = timeout(
+            Duration::from_secs(30),
+            Command::new(ffprobe)
+                .args([
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "format=duration:stream=codec_type",
+                    "-of",
+                    "json",
+                    "-i",
+                ])
+                .arg(&path)
+                .output(),
+        )
+        .await;
+        let Ok(Ok(output)) = output else {
+            return VerificationResult::Warning("ffprobe could not complete output verification.");
+        };
+        if !output.status.success() {
+            return VerificationResult::Warning(
+                "ffprobe reported that the completed media may be unreadable or truncated.",
+            );
+        }
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else {
+            return VerificationResult::Warning("ffprobe returned invalid verification data.");
+        };
+        let streams = value
+            .get("streams")
+            .and_then(serde_json::Value::as_array)
+            .map_or(0, Vec::len);
+        if streams == 0 {
+            VerificationResult::Warning(
+                "ffprobe found no playable audio or video streams in the output.",
+            )
+        } else {
+            VerificationResult::Verified
+        }
+    }
+
+    async fn schedule_automatic_retry(&self, app: AppHandle, id: String, delay: Duration) {
+        let Some(job) = self.jobs.read().await.get(&id).cloned() else {
+            return;
+        };
+        if job.attempt_count >= 3 {
+            return;
+        }
+        let Some(request) = self.requests.read().await.get(&id).cloned() else {
+            return;
+        };
+        let Ok(preferences) = self.database.load_engine_preferences() else {
+            return;
+        };
+        self.update_job(&app, &id, |job| {
+            job.current_operation = format!(
+                "Transient failure; automatic retry in {} seconds",
+                delay.as_secs()
+            );
+        })
+        .await;
+        let queue = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            let retry = queue
+                .enqueue_boxed(
+                    app,
+                    request,
+                    preferences,
+                    job.attempt_count.saturating_add(1),
+                    Some(id.clone()),
+                )
+                .await;
+            if let Err(error) = retry {
+                tracing::warn!(job_id = %id, %error, "automatic retry could not be queued");
+            }
+        });
+    }
+
+    fn enqueue_boxed(
+        self,
+        app: AppHandle,
+        request: StartDownloadRequest,
+        preferences: EnginePreferences,
+        attempt_count: u32,
+        retry_of_id: Option<String>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<DownloadJob, AppError>> + Send>>
+    {
+        Box::pin(async move {
+            self.enqueue_with_lineage(app, request, preferences, attempt_count, retry_of_id)
+                .await
+        })
     }
 
     async fn process_gallery_line(
@@ -1037,6 +1180,31 @@ struct DirectProgressTracker {
     last_sample: Instant,
 }
 
+enum VerificationResult {
+    Verified,
+    Warning(&'static str),
+    Unavailable,
+    NotApplicable,
+}
+
+impl VerificationResult {
+    fn operation(&self) -> &'static str {
+        match self {
+            Self::Verified => "Download completed and verified",
+            Self::Warning(_) => "Download completed with a verification warning",
+            Self::Unavailable => "Download completed; verification unavailable",
+            Self::NotApplicable => "Download completed",
+        }
+    }
+
+    fn warning(&self) -> Option<&'static str> {
+        match self {
+            Self::Warning(value) => Some(value),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, PartialEq)]
 struct ParsedGalleryProgress {
     item_percent: f64,
@@ -1143,6 +1311,60 @@ fn is_rate_limit_line(line: &str) -> bool {
 fn is_incomplete_read_line(line: &str) -> bool {
     let lowercase = line.to_ascii_lowercase();
     lowercase.contains("incompleteread") || lowercase.contains("connection broken")
+}
+
+fn transient_retry(diagnostics: &VecDeque<String>) -> Option<Duration> {
+    let text = diagnostics
+        .iter()
+        .rev()
+        .take(12)
+        .map(|line| line.to_ascii_lowercase())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if text.contains("429") || text.contains("too many requests") {
+        Some(Duration::from_secs(60))
+    } else if [
+        "incompleteread",
+        "connection broken",
+        "connection reset",
+        "timed out",
+        "timeout",
+        "http error 500",
+        "http error 502",
+        "http error 503",
+        "http error 504",
+        "temporary failure",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle))
+    {
+        Some(Duration::from_secs(10))
+    } else {
+        None
+    }
+}
+
+fn is_media_output(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "mp4"
+                    | "mkv"
+                    | "webm"
+                    | "mov"
+                    | "m4v"
+                    | "avi"
+                    | "mp3"
+                    | "m4a"
+                    | "aac"
+                    | "ogg"
+                    | "opus"
+                    | "flac"
+                    | "wav"
+            )
+        })
 }
 
 fn download_failure_message(
@@ -1303,6 +1525,31 @@ fn send_completion_notification(job: &DownloadJob) {
     }
 }
 
+fn open_completed_folder(job: &DownloadJob) {
+    #[cfg(target_os = "linux")]
+    {
+        let path = job
+            .output_path
+            .as_ref()
+            .map(std::path::PathBuf::from)
+            .filter(|path| path.exists())
+            .unwrap_or_else(|| std::path::PathBuf::from(&job.destination));
+        let folder = if path.is_file() {
+            path.parent()
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or(path)
+        } else {
+            path
+        };
+        let Ok(mut child) = std::process::Command::new("xdg-open").arg(folder).spawn() else {
+            return;
+        };
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1382,6 +1629,30 @@ mod tests {
         assert!(is_incomplete_read_line(&diagnostics[0]));
     }
 
+    #[test]
+    fn retries_only_transient_engine_failures() {
+        assert_eq!(
+            transient_retry(&VecDeque::from([
+                "HTTP Error 429: Too Many Requests".to_owned()
+            ])),
+            Some(Duration::from_secs(60))
+        );
+        assert_eq!(
+            transient_retry(&VecDeque::from(["Connection reset by peer".to_owned()])),
+            Some(Duration::from_secs(10))
+        );
+        assert_eq!(
+            transient_retry(&VecDeque::from(["Unsupported URL".to_owned()])),
+            None
+        );
+    }
+
+    #[test]
+    fn verifies_only_media_file_extensions() {
+        assert!(is_media_output(std::path::Path::new("video.MKV")));
+        assert!(!is_media_output(std::path::Path::new("gallery.zip")));
+    }
+
     #[tokio::test]
     async fn recovers_interrupted_jobs_as_queued() {
         let directory = tempdir().expect("temporary directory");
@@ -1416,6 +1687,7 @@ mod tests {
                 quality,
                 container: OutputContainer::Mp4,
                 video_codec_preference: VideoCodecPreference::Any,
+                format_strategy: crate::models::FormatStrategy::Recommended,
                 audio_quality: AudioQuality::Best,
                 audio_only: false,
                 subtitles: false,

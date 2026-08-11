@@ -261,6 +261,40 @@ impl Database {
         rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
     }
 
+    pub fn has_completed_duplicate(&self, url: &str, destination: &str) -> Result<bool, AppError> {
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "Download history is unavailable.")
+        })?;
+        connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM downloads
+                 WHERE state = 'Completed' AND url = ?1 AND destination = ?2)",
+                params![url, destination],
+                |row| row.get(0),
+            )
+            .map_err(AppError::from)
+    }
+
+    pub fn delete_history_entry(&self, id: &str) -> Result<(), AppError> {
+        let id = Uuid::parse_str(id)
+            .map_err(|_| AppError::new("invalid_job_id", "The history entry ID is invalid."))?
+            .to_string();
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "Download history is unavailable.")
+        })?;
+        if connection.execute(
+            "DELETE FROM downloads WHERE id = ?1 AND state = 'Completed'",
+            [&id],
+        )? == 0
+        {
+            return Err(AppError::new(
+                "history_not_found",
+                "The history entry was not found.",
+            ));
+        }
+        Ok(())
+    }
+
     pub fn list_recent_jobs(&self) -> Result<Vec<DownloadJob>, AppError> {
         let connection = self.connection.lock().map_err(|_| {
             AppError::new("database_unavailable", "Download records are unavailable.")
@@ -438,6 +472,7 @@ fn download_state_name(state: DownloadState) -> &'static str {
         DownloadState::Downloading => "Downloading",
         DownloadState::PostProcessing => "PostProcessing",
         DownloadState::Merging => "Merging",
+        DownloadState::Verifying => "Verifying",
         DownloadState::Completed => "Completed",
         DownloadState::Failed => "Failed",
         DownloadState::Cancelled => "Cancelled",
@@ -453,6 +488,7 @@ fn parse_download_state(value: &str) -> DownloadState {
         "Downloading" => DownloadState::Downloading,
         "PostProcessing" => DownloadState::PostProcessing,
         "Merging" => DownloadState::Merging,
+        "Verifying" => DownloadState::Verifying,
         "Completed" => DownloadState::Completed,
         "Cancelled" => DownloadState::Cancelled,
         _ => DownloadState::Failed,
@@ -521,6 +557,7 @@ mod tests {
             },
             container: OutputContainer::Mp4,
             video_codec_preference: VideoCodecPreference::Any,
+            format_strategy: crate::models::FormatStrategy::Recommended,
             audio_quality: AudioQuality::Best,
             audio_only: false,
             subtitles: false,
@@ -583,6 +620,7 @@ mod tests {
             browser_profile: Some("default-release".to_owned()),
             proxy_url: Some("http://127.0.0.1:8080".to_owned()),
             enable_impersonation: false,
+            bandwidth_limit_kib: Some(2048),
         };
         database
             .save_engine_preferences(&preferences)

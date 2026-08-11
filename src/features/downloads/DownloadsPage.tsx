@@ -62,6 +62,12 @@ export function DownloadsPage({ queueOnly = false }: { queueOnly?: boolean }) {
             />
             Desktop notification on completion
           </label>
+          <label className="flex items-center gap-2 text-xs text-muted">
+            After each download
+            <select className="h-8 border border-line bg-canvas px-2 text-ink" value={queue.settings.completionAction} onChange={(event) => void updateQueue({ ...queue.settings, completionAction: event.target.value as "none" | "openFolder" })}>
+              <option value="none">Do nothing</option><option value="openFolder">Open folder</option>
+            </select>
+          </label>
           <span className="text-xs text-muted">{queue.activeJobIds.length} active · {queue.orderedJobIds.length} waiting</span>
         </div>
       ) : null}
