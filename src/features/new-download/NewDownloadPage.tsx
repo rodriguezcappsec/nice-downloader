@@ -317,7 +317,7 @@ export function NewDownloadPage() {
 
   return (
     <div
-      className={`mx-auto w-full max-w-6xl px-8 py-7 ${dragActive ? "outline outline-2 outline-accent/60" : ""}`}
+      className={`mx-auto w-full max-w-[1400px] px-8 pb-12 pt-8 xl:px-10 ${dragActive ? "outline outline-2 outline-accent/60 outline-offset-[-8px]" : ""}`}
       onDragOver={(event) => { event.preventDefault(); setDragActive(true); }}
       onDragLeave={() => setDragActive(false)}
       onDrop={(event) => {
@@ -327,24 +327,26 @@ export function NewDownloadPage() {
         if (value.trim()) { setUrl(value.trim()); clearAnalysis(); }
       }}
     >
-      <header className="mb-7">
-        <h1 className="text-xl font-semibold tracking-tight">New Download</h1>
-        <p className="mt-1 text-sm text-muted">Paste a media or gallery URL to inspect it before downloading.</p>
+      <header className="mb-8">
+        <div className="mb-2 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-accent/90"><span className="h-px w-5 bg-accent/70" /> Start here</div>
+        <h1 className="text-[28px] font-semibold leading-[1.08] tracking-[-0.035em]">New download</h1>
+        <p className="mt-2 max-w-[65ch] text-[13px] leading-5 text-muted">Inspect the source, choose an output, and let the local queue handle the rest.</p>
       </header>
 
       {engines.some((engine) => engine.required && !engine.installed) ? (
-        <section className="mb-5 flex items-center justify-between border border-amber-500/30 bg-amber-500/5 p-4 text-sm">
+        <section className="mb-5 flex items-center justify-between rounded-[10px] border border-amber-500/25 bg-amber-500/[0.06] p-4 text-sm shadow-control">
           <div><h2 className="font-semibold text-amber-300">Required engines need attention</h2><p className="mt-1 text-xs text-muted">Install or activate yt-dlp and FFmpeg before starting media downloads.</p></div>
           <Button variant="secondary" onClick={() => setView("settings")}>Open engine settings</Button>
         </section>
       ) : null}
 
-      <section className="border border-line bg-panel p-5 shadow-panel">
-        <label className="mb-2 block text-sm font-medium" htmlFor="media-url">
-          Media URL
+      <section className="panel-shadow relative overflow-hidden rounded-[12px] border border-line/70 bg-panel/80 p-5">
+        <div className="pointer-events-none absolute right-0 top-0 h-32 w-56 bg-[radial-gradient(circle_at_top_right,rgb(var(--accent)/0.08),transparent_70%)]" />
+        <label className="relative mb-2 block text-[13px] font-semibold" htmlFor="media-url">
+          Paste a link
         </label>
         <div className="flex gap-2">
-          <div className="relative flex-1">
+          <div className="relative min-w-0 flex-1">
             <Link2 className="absolute left-3.5 top-3.5 text-muted" size={17} />
             <Textarea
               id="media-url"
@@ -375,7 +377,7 @@ export function NewDownloadPage() {
             {analyzing ? "Analyzing" : inputUrls.length > 1 ? `Analyze ${inputUrls.length}` : "Analyze"}
           </Button>
         </div>
-        <div className="mt-2 flex flex-wrap items-center justify-between gap-3 text-xs text-muted">
+        <div className="relative mt-3 flex flex-wrap items-center justify-between gap-3 text-[11px] text-muted">
           <p>Supports yt-dlp compatible sites and Bunkr albums through gallery-dl. Analysis runs locally.</p>
           <label className="flex items-center gap-2" title="Checks the clipboard only while New Download is open and never starts a download automatically.">
             <input type="checkbox" checked={clipboardWatch} onChange={(event) => setClipboardWatch(event.target.checked)} />
@@ -383,8 +385,8 @@ export function NewDownloadPage() {
           </label>
         </div>
         {clipboardCandidate ? (
-          <div className="mt-3 flex items-center gap-3 border border-blue-500/30 bg-blue-500/5 p-3 text-xs">
-            <ClipboardCheck size={17} className="shrink-0 text-blue-400" />
+          <div className="relative mt-3 flex items-center gap-3 rounded-[9px] border border-accent/25 bg-accent/[0.06] p-3 text-xs">
+            <ClipboardCheck size={17} className="shrink-0 text-accent" />
             <div className="min-w-0 flex-1"><div className="font-medium text-ink">Supported URL detected</div><div className="mt-0.5 truncate text-muted">{clipboardCandidate}</div></div>
             <Button variant="secondary" className="h-8 px-2.5" onClick={() => { setUrl(clipboardCandidate); setClipboardCandidate(""); clearAnalysis(); }}>Use URL</Button>
             <button className="text-muted hover:text-ink" onClick={() => setClipboardCandidate("")}>Ignore</button>
@@ -393,33 +395,33 @@ export function NewDownloadPage() {
       </section>
 
       {analyzing ? (
-        <section className="mt-5 flex items-center gap-4 border border-line bg-panel p-6">
-          <LoaderCircle className="animate-spin text-blue-400" size={24} />
+        <section className="panel-shadow mt-5 flex items-center gap-4 rounded-[11px] border border-line/60 bg-panel/70 p-6">
+          <div className="grid size-10 place-items-center rounded-[9px] bg-accent/10"><LoaderCircle className="animate-spin text-accent" size={21} /></div>
           <div>
             <h2 className="text-sm font-semibold">Inspecting media</h2>
-            <div className="mt-2 flex flex-wrap gap-3 text-xs text-muted"><span className="text-blue-400">Resolving URL</span><span>Reading metadata</span><span>Finding formats</span><span>Estimating sizes</span></div>
+            <div className="mt-2 flex flex-wrap gap-3 text-[11px] text-muted"><span className="font-medium text-accent">Resolving URL</span><span>Reading metadata</span><span>Finding formats</span><span>Estimating sizes</span></div>
           </div>
         </section>
       ) : null}
 
       {analysis && !analyzing ? (
-        <div className="mt-5 grid gap-5 xl:grid-cols-[minmax(0,1.1fr)_minmax(330px,.9fr)]">
-          <section className="min-w-0 border border-line bg-panel">
+        <div className="mt-5 grid gap-5 xl:grid-cols-[minmax(0,1.2fr)_minmax(360px,.8fr)]">
+          <section className="panel-shadow min-w-0 overflow-hidden rounded-[12px] border border-line/60 bg-panel/75">
             <div className="aspect-video overflow-hidden bg-black/25">
               {analysis.thumbnail ? (
-                <img className="h-full w-full object-cover" src={analysis.thumbnail} alt="" />
+                <img className="h-full w-full object-cover" src={analysis.thumbnail} alt={`${analysis.title} thumbnail`} />
               ) : (
                 <div className="grid h-full place-items-center text-muted"><Download size={38} /></div>
               )}
             </div>
             <div className="p-5">
-              <div className="mb-2 flex items-center gap-2 text-xs font-medium uppercase tracking-wide text-blue-400">
+              <div className="mb-2 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.15em] text-accent">
                 <span>{analysis.siteName}</span>
                 {analysis.durationSeconds != null ? (
                   <><span className="text-line">•</span><Clock3 size={13} /><span>{formatDuration(analysis.durationSeconds)}</span></>
                 ) : null}
               </div>
-              <h2 className="line-clamp-2 text-base font-semibold leading-6">{analysis.title}</h2>
+              <h2 className="line-clamp-2 text-[18px] font-semibold leading-6 tracking-[-0.025em]">{analysis.title}</h2>
               <p className="mt-2 text-sm text-muted">{analysis.uploader || analysis.extractor}</p>
               <div className="mt-4 flex flex-wrap gap-2 text-xs text-muted">
                 {isGallery ? (
@@ -436,8 +438,8 @@ export function NewDownloadPage() {
             </div>
           </section>
 
-          <section className="sticky top-5 self-start border border-line bg-panel p-5 shadow-panel">
-            <h2 className="mb-5 text-sm font-semibold">Download options</h2>
+          <section className="panel-shadow sticky top-5 self-start overflow-hidden rounded-[12px] border border-line/70 bg-panel/90 p-5 backdrop-blur-xl">
+            <div className="mb-5 flex items-center justify-between"><h2 className="text-[15px] font-semibold tracking-[-0.02em]">Download options</h2><span className="rounded-[5px] bg-accent/10 px-2 py-1 text-[9px] font-semibold uppercase tracking-[0.12em] text-accent">Local</span></div>
             <div className="grid gap-4">
               {isGallery ? (
                 <div className="border border-line bg-elevated p-3 text-sm text-muted">
@@ -484,7 +486,7 @@ export function NewDownloadPage() {
                           {galleryItemsLoading ? "Loading more files" : "Load 12 more files"}
                         </Button>
                       ) : null}
-                      <div className="mt-3 max-h-72 divide-y divide-line overflow-auto border border-line bg-panel">
+                        <div className="mt-3 max-h-72 divide-y divide-line/70 overflow-auto rounded-[8px] border border-line/70 bg-canvas/40">
                         {filteredGalleryItems.map((item) => (
                           <GalleryItemRow
                             key={item.index}
@@ -507,8 +509,8 @@ export function NewDownloadPage() {
               ) : (
                 <>
                   {matchedRule ? (
-                    <div className="flex items-start gap-2 border border-blue-500/30 bg-blue-500/5 p-3 text-xs">
-                      <span className="mt-1 size-1.5 shrink-0 rounded-full bg-blue-400" />
+                    <div className="flex items-start gap-2 rounded-[8px] border border-accent/25 bg-accent/[0.06] p-3 text-xs">
+                      <span className="mt-1 size-1.5 shrink-0 rounded-full bg-accent" />
                       <div><span className="font-medium text-ink">Applied {matchedRule.name}</span><p className="mt-0.5 text-muted">Matched {matchedRule.hostSuffix}{matchedRule.pathPrefix ?? ""}. You can override the preset below.</p></div>
                     </div>
                   ) : null}
@@ -521,15 +523,15 @@ export function NewDownloadPage() {
                     </Field>
                   ) : null}
                   <Field label="Quality">
-                    <div className="flex flex-wrap gap-1 rounded-md bg-canvas p-1">
+                    <div className="flex flex-wrap gap-1 rounded-[8px] border border-line/50 bg-canvas/70 p-1">
                       {analysis.qualityOptions.map((quality) => (
-                        <button key={quality.id} type="button" onClick={() => setQualityId(quality.id)} className={`h-9 rounded px-3 text-xs font-semibold transition ${quality.id === qualityId ? "bg-accent text-white" : "text-muted hover:bg-elevated hover:text-ink"}`}>{quality.label}</button>
+                        <button key={quality.id} type="button" onClick={() => setQualityId(quality.id)} className={`h-9 rounded-[6px] px-3 text-xs font-semibold transition ${quality.id === qualityId ? "bg-accent text-[#06251b] shadow-control" : "text-muted hover:bg-elevated hover:text-ink"}`}>{quality.label}</button>
                       ))}
                     </div>
                   </Field>
 
                   <Field label="Recommendation">
-                    <div className="grid grid-cols-2 gap-1 rounded-md bg-canvas p-1">
+                    <div className="grid grid-cols-2 gap-1 rounded-[8px] border border-line/50 bg-canvas/70 p-1">
                       {(["recommended", "compatibility", "quality", "smallest"] as const).map((strategy) => <button key={strategy} type="button" onClick={() => setFormatStrategy(strategy)} className={`h-9 rounded px-2 text-xs font-medium capitalize ${formatStrategy === strategy ? "bg-elevated text-ink shadow-sm" : "text-muted hover:text-ink"}`}>{strategy === "compatibility" ? "Best compatibility" : strategy === "quality" ? "Best quality" : strategy === "smallest" ? "Smallest file" : "Recommended"}</button>)}
                     </div>
                   </Field>
@@ -650,7 +652,7 @@ export function NewDownloadPage() {
               </div> : null}
 
               {!isGallery && !isDirect ? <div className="border border-line bg-canvas p-3 text-xs text-muted"><span className="font-semibold text-ink">{selectedQuality?.label}</span> · {container.toUpperCase()} · {videoCodecPreference === "any" ? "automatic codec" : videoCodecPreference.toUpperCase()} {estimatedBytes ? `· approximately ${formatBytes(estimatedBytes)}` : "· size estimated during download"}<p className="mt-1">{selectedQuality?.description}{formatStrategy === "compatibility" ? " with broadly compatible codecs" : formatStrategy === "smallest" ? " prioritizing smaller streams" : ""}.</p></div> : null}
-              <div className="sticky bottom-0 -mx-5 -mb-5 border-t border-line bg-panel p-5">
+              <div className="sticky bottom-0 -mx-5 -mb-5 border-t border-line/70 bg-panel/95 p-5 backdrop-blur-xl">
               <Button className="w-full" disabled={!destination || Boolean(!isGallery && !isDirect && filenameTemplateError) || starting || galleryItemsLoading || diskSpace?.sufficient === false || Boolean(isGallery && galleryItems && selectedGalleryItems.length === 0)} onClick={() => void submitDownload()}>
                 {starting ? <LoaderCircle className="animate-spin" size={17} /> : !isGallery && audioOnly ? <Music2 size={17} /> : <Download size={17} />}
                 {starting ? "Adding to queue" : isGallery && galleryItems && (galleryItems.truncated || selectedGalleryItems.length !== galleryItems.items.length) ? `Download ${selectedGalleryItems.length} selected` : isGallery ? "Download album" : "Download"}
@@ -663,7 +665,7 @@ export function NewDownloadPage() {
       ) : null}
 
       {batchAnalysis && !analyzing ? (
-        <section className="mt-5 border border-line bg-panel p-5">
+        <section className="panel-shadow mt-5 rounded-[12px] border border-line/60 bg-panel/75 p-5">
           <div className="flex items-start justify-between gap-4">
             <div>
               <h2 className="text-sm font-semibold">{batchAnalysis.collectionTitle || "Batch analysis"}</h2>
@@ -836,7 +838,7 @@ function GalleryItemRow({
     <label className="flex cursor-pointer items-center gap-3 p-2.5 hover:bg-elevated">
       <input type="checkbox" checked={selected} onChange={(event) => onChange(event.target.checked)} />
       <div className="h-11 w-16 shrink-0 overflow-hidden bg-black/25">
-        {item.thumbnail ? <img className="h-full w-full object-cover" src={item.thumbnail} alt="" loading="lazy" /> : <div className="grid h-full place-items-center"><Film size={16} /></div>}
+        {item.thumbnail ? <img className="h-full w-full object-cover" src={item.thumbnail} alt={`${item.filename} thumbnail`} loading="lazy" /> : <div className="grid h-full place-items-center"><Film size={16} /></div>}
       </div>
       <div className="min-w-0 flex-1">
         <div className="truncate text-xs font-medium text-ink">{item.filename}{item.extension ? `.${item.extension}` : ""}</div>

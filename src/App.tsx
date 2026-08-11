@@ -55,20 +55,20 @@ export default function App() {
   return (
     <AppShell>
       {error ? (
-        <div className="sticky top-0 z-20 border-b border-red-500/30 bg-red-950/95 px-8 py-3 text-sm text-red-100 backdrop-blur">
-          <div className="flex items-start gap-3">
-            <AlertTriangle size={17} className="mt-0.5 shrink-0 text-red-400" />
+        <div className="sticky top-0 z-20 border-b border-red-500/25 bg-[#36181c]/95 px-8 py-3.5 text-[13px] text-red-100 shadow-[0_12px_28px_rgb(0_0_0/0.16)] backdrop-blur-xl">
+          <div className="mx-auto flex max-w-[1340px] items-start gap-3">
+            <div className="grid size-8 shrink-0 place-items-center rounded-[7px] bg-red-400/10 text-red-300"><AlertTriangle size={16} /></div>
             <div className="min-w-0 flex-1">
-              <p>{error.message}</p>
-              {errorAction ? <button className="mt-2 text-xs font-semibold text-red-200 underline underline-offset-2" onClick={() => { setView(errorAction.view); setError(null); }}>{errorAction.label}</button> : null}
+              <p className="font-medium leading-5">{error.message}</p>
+              {errorAction ? <button className="mt-1.5 text-[11px] font-semibold text-red-200 underline decoration-red-300/50 underline-offset-4 transition hover:text-white" onClick={() => { setView(errorAction.view); setError(null); }}>{errorAction.label}</button> : null}
               {error.details ? (
-                <details className="mt-2 text-xs text-red-200/80">
+                <details className="mt-2 text-[11px] text-red-200/80">
                   <summary className="cursor-pointer select-none font-medium text-red-200">Technical details</summary>
-                  <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap border border-red-500/20 bg-black/20 p-3 font-mono leading-5">{error.details}</pre>
+                  <pre className="number-font mt-2 max-h-40 overflow-auto whitespace-pre-wrap rounded-[7px] border border-red-500/20 bg-black/20 p-3 leading-5">{error.details}</pre>
                 </details>
               ) : null}
             </div>
-            <button className="text-red-300 hover:text-white" onClick={() => setError(null)} aria-label="Dismiss error"><X size={17} /></button>
+            <button className="grid size-8 place-items-center rounded-[7px] text-red-300 transition hover:bg-white/5 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-300/70" onClick={() => setError(null)} aria-label="Dismiss error"><X size={16} /></button>
           </div>
         </div>
       ) : null}
@@ -79,11 +79,11 @@ export default function App() {
       <div className={view === "presets" ? "" : "hidden"}><PresetsPage /></div>
       <div className={view === "settings" ? "" : "hidden"}><SettingsPage /></div>
       {notice ? (
-        <div className="fixed bottom-5 right-5 z-40 flex min-w-80 items-center gap-3 border border-line bg-panel p-3 shadow-xl">
-          <CheckCircle2 size={18} className="text-emerald-400" />
-          <span className="flex-1 text-sm">{notice.message}</span>
-          {notice.view ? <button className="text-xs font-semibold text-blue-400 hover:text-blue-300" onClick={() => { setView(notice.view!); setNotice(null); }}>View</button> : null}
-          <button className="text-muted hover:text-ink" onClick={() => setNotice(null)} aria-label="Dismiss notification"><X size={15} /></button>
+        <div className="panel-shadow fixed bottom-6 right-6 z-40 flex min-w-80 items-center gap-3 rounded-[10px] border border-line/70 bg-panel/95 p-3.5 backdrop-blur-xl">
+          <div className="grid size-8 place-items-center rounded-[7px] bg-accent/10 text-accent"><CheckCircle2 size={17} /></div>
+          <span className="flex-1 text-[13px] font-medium">{notice.message}</span>
+          {notice.view ? <button className="text-[11px] font-semibold text-accent transition hover:brightness-125" onClick={() => { setView(notice.view!); setNotice(null); }}>View</button> : null}
+          <button className="grid size-7 place-items-center rounded-[6px] text-muted transition hover:bg-elevated hover:text-ink" onClick={() => setNotice(null)} aria-label="Dismiss notification"><X size={14} /></button>
         </div>
       ) : null}
     </AppShell>
