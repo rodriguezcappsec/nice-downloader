@@ -1569,7 +1569,7 @@ async fn terminate_child(child: &mut Child) {
     let _ = child.wait().await;
 }
 
-fn send_completion_notification(job: &DownloadJob) {
+fn send_completion_notification(_job: &DownloadJob) {
     #[cfg(target_os = "linux")]
     {
         let Ok(mut command) = std::process::Command::new("notify-send")
@@ -1578,7 +1578,7 @@ fn send_completion_notification(job: &DownloadJob) {
                 "Nice Downloader",
                 "--",
                 "Download completed",
-                &job.title.chars().take(120).collect::<String>(),
+                &_job.title.chars().take(120).collect::<String>(),
             ])
             .spawn()
         else {
@@ -1590,15 +1590,15 @@ fn send_completion_notification(job: &DownloadJob) {
     }
 }
 
-fn open_completed_folder(job: &DownloadJob) {
+fn open_completed_folder(_job: &DownloadJob) {
     #[cfg(target_os = "linux")]
     {
-        let path = job
+        let path = _job
             .output_path
             .as_ref()
             .map(std::path::PathBuf::from)
             .filter(|path| path.exists())
-            .unwrap_or_else(|| std::path::PathBuf::from(&job.destination));
+            .unwrap_or_else(|| std::path::PathBuf::from(&_job.destination));
         let folder = if path.is_file() {
             path.parent()
                 .map(std::path::Path::to_path_buf)
