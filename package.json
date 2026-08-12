@@ -10,7 +10,8 @@
     "test:integration": "cd src-tauri && cargo test engines::aria2::tests::integration_ -- --nocapture",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "tauri:build": "tauri build",
+    "tauri:build:appimage:arch": "bash scripts/build-appimage-arch.sh"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.8.0",
