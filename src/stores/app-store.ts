@@ -48,6 +48,7 @@ interface AppStore {
   startDownload: (request: StartDownloadRequest) => Promise<DownloadJob | null>;
   startDownloads: (requests: StartDownloadRequest[]) => Promise<DownloadJob[]>;
   cancelDownload: (jobId: string) => Promise<void>;
+  dismissDownloads: (jobIds: string[]) => Promise<string[]>;
   retryDownload: (jobId: string) => Promise<void>;
   repeatDownload: (jobId: string) => Promise<void>;
   pauseDownload: (jobId: string) => Promise<void>;
@@ -59,7 +60,7 @@ interface AppStore {
 const savedView = typeof window !== "undefined" ? window.localStorage.getItem("nice-downloader.view") as ViewId | null : null;
 
 export const useAppStore = create<AppStore>((set, get) => ({
-  view: savedView && ["new", "downloads", "queue", "history", "presets", "settings"].includes(savedView) ? savedView : "new",
+  view: savedView && ["new", "downloads", "queue", "history", "subscriptions", "transformations", "library", "presets", "settings"].includes(savedView) ? savedView : "new",
   engines: [],
   enginePreferences: {
     browserCookieSource: "none",
@@ -273,6 +274,21 @@ export const useAppStore = create<AppStore>((set, get) => ({
       await api.cancelDownload(jobId);
     } catch (error) {
       set({ error: normalizeError(error) });
+    }
+  },
+
+  dismissDownloads: async (jobIds) => {
+    try {
+      const dismissed = await api.dismissDownloads(jobIds);
+      set((state) => {
+        const jobs = { ...state.jobs };
+        for (const id of dismissed) delete jobs[id];
+        return { jobs, error: null };
+      });
+      return dismissed;
+    } catch (error) {
+      set({ error: normalizeError(error) });
+      return [];
     }
   },
 

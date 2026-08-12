@@ -6,6 +6,10 @@ Migration 0003 adds `site_preset_rules` and `download_archive`. Site rules assoc
 
 Filename templates remain typed intent. Rust rejects empty templates, path separators, control characters, and values longer than 240 characters before spawning an engine. SponsorBlock categories are represented by a Rust enum and mapped to a fixed yt-dlp category allowlist.
 
+## Subscription scheduler
+
+Subscriptions persist a channel or playlist URL, preset, destination, bounded recent-entry limit, and check interval. A Rust-owned scheduler loads due records once per minute, expands at most 20 recent entries through structured yt-dlp output, analyzes each entry, consults the durable download archive, and enqueues typed requests. The frontend can request an immediate check but never owns timers or deduplication state.
+
 Nice Downloader is a Linux-first Tauri desktop application that presents a stable, task-oriented interface over mature media tools. React renders the desktop experience; Rust owns every privileged or authoritative operation.
 
 ## Design principles
@@ -89,6 +93,8 @@ Transfer reliability is covered by a loopback-only integration harness. A contro
 
 ## Persistence
 
+Terminal downloads have persistent Downloads-view visibility. Dismissing a completed, failed, or cancelled job hides it from Downloads without deleting its completed History row, archive identity, library item, or media file.
+
 SQLite is stored in Tauri's application-data directory. Numbered embedded migrations create `downloads`, `presets`, and `settings`. Download rows store normalized display state, the serialized typed request, bounded sanitized diagnostics, retry lineage, and timestamps. Completed rows feed History; non-completed rows rebuild the runtime queue after restart.
 
 Presets store reusable intent fields, not engine flags. Queue concurrency, queue pause, and notification preference are stored as typed JSON settings.
@@ -113,5 +119,16 @@ Presets store reusable intent fields, not engine flags. Queue concurrency, queue
 - Managed yt-dlp/gallery-dl installs require HTTPS vendor releases, a published SHA-256 match, and a successful version probe. The previous version remains available for rollback; pinning blocks updates.
 
 ## Near-term extension points
+
+## Mature workflow services
+
+- `subscriptions`: Rust-owned periodic playlist expansion, archive deduplication, and typed queue creation.
+- `transformations`: FFmpeg task ownership, structured `-progress` parsing, cancellation, crash reconciliation, and independent SQLite history.
+- `library`: non-destructive local-media catalog, safe `.info.json` normalization, tagging, missing-file reconciliation, and versioned metadata backup/restore.
+- `authentication`: longest-host-suffix matching, browser-profile discovery, and backend-only managed Netscape cookie files. Managed paths use owner-only permissions on Unix and are omitted from frontend DTOs.
+
+The tray and desktop settings form a small platform boundary. Window close policy is applied in the Tauri frontend while process survival, queue recovery, and persisted preferences remain backend-owned.
+
+## Remaining extension points
 
 The gallery-dl route can expand beyond Bunkr. FFmpeg remains system-managed until a portable, verifiable distribution policy is selected. Platform packaging, non-Linux pause/notification adapters, and custom arguments remain later work. Additional authenticated-site support should extend typed access preferences rather than exposing arbitrary engine flags.

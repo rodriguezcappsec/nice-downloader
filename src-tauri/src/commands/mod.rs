@@ -1,4 +1,5 @@
 use crate::{
+    authentication,
     database::Database,
     engines::{
         discovery,
@@ -8,16 +9,22 @@ use crate::{
         ytdlp::YtDlpEngine,
     },
     errors::AppError,
+    library,
     models::{
-        BatchAnalysisItem, BatchAnalysisResponse, DiskSpaceInfo, DownloadArchiveMatch, DownloadJob,
-        EngineId, EngineInfo, EnginePreferences, GalleryItemList, MediaAnalysis, Preset,
-        QueueSettings, QueueSnapshot, SavePresetRequest, SaveSitePresetRuleRequest, SitePresetRule,
-        StartDownloadRequest,
+        AuthenticationProfile, BatchAnalysisItem, BatchAnalysisResponse, BrowserProfileInfo,
+        DesktopPreferences, DiskSpaceInfo, DownloadArchiveMatch, DownloadJob, EngineId, EngineInfo,
+        EnginePreferences, GalleryItemList, LibraryItem, LibraryScanResult, MediaAnalysis,
+        OnboardingStatus, Preset, QueueSettings, QueueSnapshot, SaveAuthenticationProfileRequest,
+        SavePresetRequest, SaveSitePresetRuleRequest, SaveSubscriptionRequest, SitePresetRule,
+        StartDownloadRequest, StartTransformationRequest, Subscription, SubscriptionCheckResult,
+        TransformationTask, UpdateLibraryItemRequest,
     },
     queue::{disk_space, QueueManager},
+    subscriptions,
+    transformations::TransformationManager,
     utils::validation::{
-        normalize_engine_preferences, validate_destination, validate_engine_preferences,
-        validate_media_url,
+        normalize_engine_preferences, validate_destination, validate_destination_writable,
+        validate_engine_preferences, validate_media_url,
     },
 };
 use std::{collections::HashSet, sync::Arc};
@@ -26,6 +33,152 @@ use tokio::{sync::Semaphore, task::JoinSet};
 
 const MAX_BATCH_URLS: usize = 20;
 const BATCH_ANALYSIS_CONCURRENCY: usize = 3;
+
+#[tauri::command]
+pub fn list_transformation_tasks(
+    transformations: State<'_, TransformationManager>,
+) -> Result<Vec<TransformationTask>, AppError> {
+    transformations.list()
+}
+
+#[tauri::command]
+pub fn start_transformation(
+    app: AppHandle,
+    transformations: State<'_, TransformationManager>,
+    request: StartTransformationRequest,
+) -> Result<TransformationTask, AppError> {
+    transformations.start(app, request)
+}
+
+#[tauri::command]
+pub fn cancel_transformation(
+    transformations: State<'_, TransformationManager>,
+    id: String,
+) -> Result<(), AppError> {
+    transformations.cancel(&id)
+}
+
+#[tauri::command]
+pub fn list_library_items(database: State<'_, Database>) -> Result<Vec<LibraryItem>, AppError> {
+    database.list_library_items()
+}
+
+#[tauri::command]
+pub fn import_library_files(
+    database: State<'_, Database>,
+    paths: Vec<String>,
+    tags: Vec<String>,
+) -> Result<Vec<LibraryItem>, AppError> {
+    library::import_paths(&database, paths, tags)
+}
+
+#[tauri::command]
+pub fn update_library_item(
+    database: State<'_, Database>,
+    request: UpdateLibraryItemRequest,
+) -> Result<LibraryItem, AppError> {
+    database.update_library_item(request)
+}
+
+#[tauri::command]
+pub fn remove_library_item(database: State<'_, Database>, id: String) -> Result<(), AppError> {
+    database.remove_library_item(&id)
+}
+
+#[tauri::command]
+pub fn reconcile_library(database: State<'_, Database>) -> Result<LibraryScanResult, AppError> {
+    library::reconcile(&database)
+}
+
+#[tauri::command]
+pub fn export_library(database: State<'_, Database>, path: String) -> Result<(), AppError> {
+    library::export_backup(&database, &path)
+}
+
+#[tauri::command]
+pub fn restore_library(
+    database: State<'_, Database>,
+    path: String,
+) -> Result<Vec<LibraryItem>, AppError> {
+    library::restore_backup(&database, &path)
+}
+
+#[tauri::command]
+pub fn list_authentication_profiles(
+    database: State<'_, Database>,
+) -> Result<Vec<AuthenticationProfile>, AppError> {
+    database.list_authentication_profiles()
+}
+
+#[tauri::command]
+pub fn save_authentication_profile(
+    app: AppHandle,
+    database: State<'_, Database>,
+    request: SaveAuthenticationProfileRequest,
+) -> Result<AuthenticationProfile, AppError> {
+    let data_directory = app.path().app_data_dir().map_err(|error| {
+        AppError::internal("could not resolve secure application storage", error)
+    })?;
+    authentication::save_profile(&database, &data_directory, request)
+}
+
+#[tauri::command]
+pub fn delete_authentication_profile(
+    database: State<'_, Database>,
+    id: String,
+) -> Result<(), AppError> {
+    authentication::delete_profile(&database, &id)
+}
+
+#[tauri::command]
+pub fn discover_browser_profiles() -> Vec<BrowserProfileInfo> {
+    authentication::discover_browser_profiles()
+}
+
+#[tauri::command]
+pub fn get_desktop_preferences(
+    database: State<'_, Database>,
+) -> Result<DesktopPreferences, AppError> {
+    database.load_desktop_preferences()
+}
+
+#[tauri::command]
+pub async fn update_desktop_preferences(
+    database: State<'_, Database>,
+    queue: State<'_, QueueManager>,
+    preferences: DesktopPreferences,
+) -> Result<DesktopPreferences, AppError> {
+    database.save_desktop_preferences(&preferences)?;
+    let mut queue_settings = queue.snapshot().await.settings;
+    queue_settings.notify_on_completion = preferences.notify_when_backgrounded;
+    queue.update_settings(queue_settings).await?;
+    Ok(preferences)
+}
+
+#[tauri::command]
+pub async fn get_onboarding_status(
+    app: AppHandle,
+    database: State<'_, Database>,
+) -> Result<OnboardingStatus, AppError> {
+    let default_destination = app
+        .path()
+        .download_dir()
+        .map_err(|error| {
+            AppError::internal("could not find the system Downloads directory", error)
+        })?
+        .to_string_lossy()
+        .into_owned();
+    Ok(OnboardingStatus {
+        completed: database.onboarding_completed()?,
+        default_destination,
+        engines: discovery::detect_all().await,
+    })
+}
+
+#[tauri::command]
+pub fn complete_onboarding(database: State<'_, Database>) -> Result<(), AppError> {
+    database.complete_onboarding()
+}
 
 #[tauri::command]
 pub async fn detect_engines() -> Result<Vec<EngineInfo>, AppError> {
@@ -64,7 +217,8 @@ pub async fn test_site_access(
     database: State<'_, Database>,
     url: String,
 ) -> Result<MediaAnalysis, AppError> {
-    let preferences = database.load_engine_preferences()?;
+    let mut preferences = database.load_engine_preferences()?;
+    authentication::apply_profile(&database, &url, &mut preferences)?;
     router::analyze(&url, &preferences).await
 }
 
@@ -73,7 +227,8 @@ pub async fn analyze_url(
     database: State<'_, Database>,
     url: String,
 ) -> Result<MediaAnalysis, AppError> {
-    let preferences = database.load_engine_preferences()?;
+    let mut preferences = database.load_engine_preferences()?;
+    authentication::apply_profile(&database, &url, &mut preferences)?;
     router::analyze(&url, &preferences).await
 }
 
@@ -84,7 +239,8 @@ pub async fn list_gallery_items(
     offset: u32,
     limit: u32,
 ) -> Result<GalleryItemList, AppError> {
-    let preferences = database.load_engine_preferences()?;
+    let mut preferences = database.load_engine_preferences()?;
+    authentication::apply_profile(&database, &url, &mut preferences)?;
     GalleryDlEngine::discover()?
         .list_items(&url, &preferences, offset, limit)
         .await
@@ -105,7 +261,8 @@ pub async fn analyze_playlist(
     database: State<'_, Database>,
     url: String,
 ) -> Result<BatchAnalysisResponse, AppError> {
-    let preferences = database.load_engine_preferences()?;
+    let mut preferences = database.load_engine_preferences()?;
+    authentication::apply_profile(&database, &url, &mut preferences)?;
     let engine = YtDlpEngine::discover()?;
     let (title, urls) = engine.expand_playlist(&url, &preferences).await?;
     Ok(analyze_many(preferences, urls, title).await)
@@ -235,7 +392,8 @@ pub async fn start_download(
     database: State<'_, Database>,
     request: StartDownloadRequest,
 ) -> Result<DownloadJob, AppError> {
-    let preferences = database.load_engine_preferences()?;
+    let mut preferences = database.load_engine_preferences()?;
+    authentication::apply_profile(&database, &request.url, &mut preferences)?;
     queue.enqueue(app, request, preferences).await
 }
 
@@ -252,14 +410,11 @@ pub async fn start_downloads(
             format!("Queue between 1 and {MAX_BATCH_URLS} downloads at a time."),
         ));
     }
-    let preferences = database.load_engine_preferences()?;
     let mut jobs = Vec::with_capacity(requests.len());
     for request in requests {
-        jobs.push(
-            queue
-                .enqueue(app.clone(), request, preferences.clone())
-                .await?,
-        );
+        let mut preferences = database.load_engine_preferences()?;
+        authentication::apply_profile(&database, &request.url, &mut preferences)?;
+        jobs.push(queue.enqueue(app.clone(), request, preferences).await?);
     }
     Ok(jobs)
 }
@@ -270,6 +425,14 @@ pub async fn cancel_download(
     job_id: String,
 ) -> Result<(), AppError> {
     queue.cancel(&job_id).await
+}
+
+#[tauri::command]
+pub async fn dismiss_downloads(
+    queue: State<'_, QueueManager>,
+    job_ids: Vec<String>,
+) -> Result<Vec<String>, AppError> {
+    queue.dismiss(job_ids).await
 }
 
 #[tauri::command]
@@ -392,6 +555,92 @@ pub fn find_download_archive_match(
     validate_media_url(&url)?;
     let destination = validate_destination(&destination)?;
     database.archive_match(&url, &destination.to_string_lossy())
+}
+
+#[tauri::command]
+pub fn find_download_archive_matches(
+    database: State<'_, Database>,
+    urls: Vec<String>,
+    destination: String,
+) -> Result<Vec<String>, AppError> {
+    if urls.len() > MAX_BATCH_URLS {
+        return Err(AppError::new(
+            "archive_batch_too_large",
+            format!("Check at most {MAX_BATCH_URLS} URLs at a time."),
+        ));
+    }
+    let destination = validate_destination(&destination)?;
+    let destination = destination.to_string_lossy();
+    let mut matches = Vec::new();
+    for url in urls {
+        let url = validate_media_url(&url)?.to_string();
+        if database.archive_match(&url, &destination)?.is_some() {
+            matches.push(url);
+        }
+    }
+    Ok(matches)
+}
+
+#[tauri::command]
+pub fn prepare_collection_destination(
+    destination: String,
+    collection_title: String,
+) -> Result<String, AppError> {
+    let destination = validate_destination(&destination)?;
+    let directory_name = safe_collection_directory(&collection_title);
+    let collection = destination.join(directory_name);
+    std::fs::create_dir_all(&collection)
+        .map_err(|error| AppError::internal("could not create collection folder", error))?;
+    validate_destination_writable(&collection)?;
+    Ok(collection.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+pub fn list_subscriptions(database: State<'_, Database>) -> Result<Vec<Subscription>, AppError> {
+    database.list_subscriptions()
+}
+
+#[tauri::command]
+pub fn save_subscription(
+    database: State<'_, Database>,
+    request: SaveSubscriptionRequest,
+) -> Result<Subscription, AppError> {
+    database.save_subscription(request)
+}
+
+#[tauri::command]
+pub fn delete_subscription(database: State<'_, Database>, id: String) -> Result<(), AppError> {
+    database.delete_subscription(&id)
+}
+
+#[tauri::command]
+pub async fn check_subscription_now(
+    app: AppHandle,
+    database: State<'_, Database>,
+    queue: State<'_, QueueManager>,
+    id: String,
+) -> Result<SubscriptionCheckResult, AppError> {
+    subscriptions::check_subscription(app, &database, &queue, &id).await
+}
+
+fn safe_collection_directory(value: &str) -> String {
+    let clean = value
+        .chars()
+        .map(|character| {
+            if character.is_alphanumeric() || matches!(character, ' ' | '-' | '_' | '.') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .take(100)
+        .collect::<String>();
+    let clean = clean.trim().trim_matches('.');
+    if clean.is_empty() || !clean.chars().any(char::is_alphanumeric) {
+        "Collection".to_owned()
+    } else {
+        clean.to_owned()
+    }
 }
 
 #[tauri::command]
@@ -548,6 +797,21 @@ mod tests {
             .map(|index| format!("https://example.com/{index}"))
             .collect();
         assert!(normalize_batch_urls(urls).is_err());
+    }
+
+    #[test]
+    fn collection_directories_remove_path_syntax() {
+        assert_eq!(
+            safe_collection_directory(" My/Collection: 2026? "),
+            "My_Collection_ 2026_"
+        );
+        assert_eq!(safe_collection_directory("../../"), "Collection");
+    }
+
+    #[test]
+    fn collection_directories_are_bounded() {
+        let directory = safe_collection_directory(&"a".repeat(160));
+        assert_eq!(directory.chars().count(), 100);
     }
 
     #[test]

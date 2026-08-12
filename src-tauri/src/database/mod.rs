@@ -1,15 +1,19 @@
 use crate::{
     errors::AppError,
     models::{
-        DownloadArchiveMatch, DownloadJob, DownloadState, EnginePreferences, Preset, PresetIntent,
-        QueueSettings, SavePresetRequest, SaveSitePresetRuleRequest, SitePresetRule,
-        StartDownloadRequest,
+        AuthenticationProfile, BrowserCookieSource, DesktopPreferences, DownloadArchiveMatch,
+        DownloadJob, DownloadState, EnginePreferences, LibraryItem, Preset, PresetIntent,
+        QueueSettings, SaveAuthenticationProfileRequest, SavePresetRequest,
+        SaveSitePresetRuleRequest, SaveSubscriptionRequest, SitePresetRule, StartDownloadRequest,
+        Subscription, TransformationOperation, TransformationState, TransformationTask,
+        UpdateLibraryItemRequest,
     },
     utils::validation::{
-        normalize_engine_preferences, validate_engine_preferences, validate_filename_template,
+        normalize_engine_preferences, validate_destination, validate_engine_preferences,
+        validate_filename_template, validate_media_url,
     },
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::{
     path::Path,
@@ -20,8 +24,15 @@ use uuid::Uuid;
 const MIGRATION_0001: &str = include_str!("migrations/0001_initial.sql");
 const MIGRATION_0002: &str = include_str!("migrations/0002_durable_queue.sql");
 const MIGRATION_0003: &str = include_str!("migrations/0003_workflow_intelligence.sql");
+const MIGRATION_0004: &str = include_str!("migrations/0004_subscriptions.sql");
+const MIGRATION_0005: &str = include_str!("migrations/0005_transformations.sql");
+const MIGRATION_0006: &str = include_str!("migrations/0006_media_library.sql");
+const MIGRATION_0007: &str = include_str!("migrations/0007_authentication_profiles.sql");
+const MIGRATION_0008: &str = include_str!("migrations/0008_download_visibility.sql");
 const ENGINE_PREFERENCES_KEY: &str = "engine.preferences";
 const QUEUE_SETTINGS_KEY: &str = "queue.settings";
+const DESKTOP_PREFERENCES_KEY: &str = "desktop.preferences";
+const ONBOARDING_COMPLETED_KEY: &str = "onboarding.completed";
 
 #[derive(Clone)]
 pub struct Database {
@@ -54,6 +65,11 @@ impl Database {
             (1, MIGRATION_0001),
             (2, MIGRATION_0002),
             (3, MIGRATION_0003),
+            (4, MIGRATION_0004),
+            (5, MIGRATION_0005),
+            (6, MIGRATION_0006),
+            (7, MIGRATION_0007),
+            (8, MIGRATION_0008),
         ] {
             let migrated: bool = transaction.query_row(
                 "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = ?1)",
@@ -100,9 +116,10 @@ impl Database {
                 total_bytes, speed_bytes_per_second, eta_seconds, selected_quality,
                 output_format, destination, output_path, current_operation, error,
                 created_at, updated_at, completed_at, options_json, request_json,
-                diagnostics_json, attempt_count, retry_of_id
+                diagnostics_json, attempt_count, retry_of_id, visible_in_downloads
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
-                       ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
+                       ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24,
+                       COALESCE((SELECT visible_in_downloads FROM downloads WHERE id = ?1), 1))",
             params![
                 job.id,
                 job.url,
@@ -147,6 +164,33 @@ impl Database {
                         .timestamp_millis(),
                 ],
             )?;
+            if let Some(output_path) = job
+                .output_path
+                .as_deref()
+                .filter(|path| Path::new(path).is_file())
+            {
+                let metadata = serde_json::json!({
+                    "downloadJobId": job.id,
+                    "selectedQuality": job.selected_quality,
+                    "outputFormat": job.output_format,
+                });
+                connection.execute(
+                    "INSERT INTO media_library
+                        (id, path, title, source_url, thumbnail, duration_seconds, site,
+                         tags_json, metadata_json, missing, added_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '[]', ?8, 0, ?9, ?9)
+                     ON CONFLICT(path) DO UPDATE SET
+                        title = excluded.title, source_url = excluded.source_url,
+                        thumbnail = excluded.thumbnail, duration_seconds = excluded.duration_seconds,
+                        site = excluded.site, metadata_json = excluded.metadata_json,
+                        missing = 0, updated_at = excluded.updated_at",
+                    params![
+                        Uuid::new_v4().to_string(), output_path, job.title, job.url, job.thumbnail,
+                        request.analysis.duration_seconds, request.analysis.site_name,
+                        metadata.to_string(), job.completed_at.unwrap_or(job.updated_at).timestamp_millis(),
+                    ],
+                )?;
+            }
         }
         Ok(())
     }
@@ -165,7 +209,7 @@ impl Database {
                     created_at, updated_at, completed_at, diagnostics_json, attempt_count,
                     retry_of_id, request_json
              FROM downloads
-             WHERE state != 'Completed' AND request_json IS NOT NULL
+             WHERE state != 'Completed' AND request_json IS NOT NULL AND visible_in_downloads = 1
              ORDER BY created_at ASC LIMIT 500",
         )?;
         let rows = statement.query_map([], |row| {
@@ -221,6 +265,75 @@ impl Database {
              ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json,
                                                 updated_at = excluded.updated_at",
             params![ENGINE_PREFERENCES_KEY, value, Utc::now().timestamp_millis()],
+        )?;
+        Ok(())
+    }
+
+    pub fn load_desktop_preferences(&self) -> Result<DesktopPreferences, AppError> {
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "Desktop settings are unavailable.")
+        })?;
+        let value: Option<String> = connection
+            .query_row(
+                "SELECT value_json FROM settings WHERE key = ?1",
+                [DESKTOP_PREFERENCES_KEY],
+                |row| row.get(0),
+            )
+            .optional()?;
+        value
+            .map(|value| {
+                serde_json::from_str(&value)
+                    .map_err(|error| AppError::internal("could not read desktop settings", error))
+            })
+            .transpose()
+            .map(|value| value.unwrap_or_default())
+    }
+
+    pub fn save_desktop_preferences(
+        &self,
+        preferences: &DesktopPreferences,
+    ) -> Result<(), AppError> {
+        let value = serde_json::to_string(preferences)
+            .map_err(|error| AppError::internal("could not serialize desktop settings", error))?;
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "Desktop settings are unavailable.")
+        })?;
+        connection.execute(
+            "INSERT INTO settings (key, value_json, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at",
+            params![DESKTOP_PREFERENCES_KEY, value, Utc::now().timestamp_millis()],
+        )?;
+        Ok(())
+    }
+
+    pub fn onboarding_completed(&self) -> Result<bool, AppError> {
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "Onboarding settings are unavailable.",
+            )
+        })?;
+        let value: Option<String> = connection
+            .query_row(
+                "SELECT value_json FROM settings WHERE key = ?1",
+                [ONBOARDING_COMPLETED_KEY],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(value.as_deref() == Some("true"))
+    }
+
+    pub fn complete_onboarding(&self) -> Result<(), AppError> {
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "Onboarding settings are unavailable.",
+            )
+        })?;
+        connection.execute(
+            "INSERT INTO settings (key, value_json, updated_at) VALUES (?1, 'true', ?2)
+             ON CONFLICT(key) DO UPDATE SET value_json = 'true', updated_at = excluded.updated_at",
+            params![ONBOARDING_COMPLETED_KEY, Utc::now().timestamp_millis()],
         )?;
         Ok(())
     }
@@ -324,6 +437,24 @@ impl Database {
             )
             .optional()
             .map_err(AppError::from)
+    }
+
+    pub fn dismiss_download_record(&self, id: &str) -> Result<(), AppError> {
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "Download records are unavailable.")
+        })?;
+        let changed = connection.execute(
+            "UPDATE downloads SET visible_in_downloads = 0, updated_at = ?2
+             WHERE id = ?1 AND state IN ('Completed', 'Failed', 'Cancelled')",
+            params![id, Utc::now().timestamp_millis()],
+        )?;
+        if changed == 0 {
+            return Err(AppError::new(
+                "download_not_removable",
+                "Only completed, failed, or cancelled downloads can be removed.",
+            ));
+        }
+        Ok(())
     }
 
     pub fn delete_history_entry(&self, id: &str) -> Result<(), AppError> {
@@ -639,6 +770,636 @@ impl Database {
         });
         Ok(rules.into_iter().next())
     }
+
+    pub fn list_subscriptions(&self) -> Result<Vec<Subscription>, AppError> {
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "Subscription storage is unavailable.",
+            )
+        })?;
+        let mut statement = connection.prepare(
+            "SELECT id, name, url, preset_id, destination, check_interval_minutes,
+                    max_entries, enabled, last_checked_at, next_check_at, last_error,
+                    created_at, updated_at
+             FROM subscriptions ORDER BY name COLLATE NOCASE, created_at",
+        )?;
+        let rows = statement.query_map([], subscription_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+    }
+
+    pub fn load_subscription(&self, id: &str) -> Result<Subscription, AppError> {
+        let id = parse_uuid(
+            id,
+            "invalid_subscription_id",
+            "The subscription ID is invalid.",
+        )?;
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "Subscription storage is unavailable.",
+            )
+        })?;
+        connection
+            .query_row(
+                "SELECT id, name, url, preset_id, destination, check_interval_minutes,
+                        max_entries, enabled, last_checked_at, next_check_at, last_error,
+                        created_at, updated_at
+                 FROM subscriptions WHERE id = ?1",
+                [&id],
+                subscription_from_row,
+            )
+            .optional()?
+            .ok_or_else(|| {
+                AppError::new("subscription_not_found", "The subscription was not found.")
+            })
+    }
+
+    pub fn save_subscription(
+        &self,
+        request: SaveSubscriptionRequest,
+    ) -> Result<Subscription, AppError> {
+        let name = request.name.trim();
+        if name.is_empty() || name.chars().count() > 100 {
+            return Err(AppError::new(
+                "invalid_subscription_name",
+                "Subscription names must contain between 1 and 100 characters.",
+            ));
+        }
+        let url = validate_media_url(&request.url)?.to_string();
+        let destination = validate_destination(&request.destination)?
+            .to_string_lossy()
+            .into_owned();
+        if !(15..=10_080).contains(&request.check_interval_minutes) {
+            return Err(AppError::new(
+                "invalid_subscription_interval",
+                "Check intervals must be between 15 minutes and 7 days.",
+            ));
+        }
+        if !(1..=20).contains(&request.max_entries) {
+            return Err(AppError::new(
+                "invalid_subscription_limit",
+                "Subscriptions can inspect between 1 and 20 recent entries per check.",
+            ));
+        }
+        let preset_id = parse_uuid(
+            &request.preset_id,
+            "invalid_preset_id",
+            "The selected preset is invalid.",
+        )?;
+        let id = match request.id {
+            Some(id) => parse_uuid(
+                &id,
+                "invalid_subscription_id",
+                "The subscription ID is invalid.",
+            )?,
+            None => Uuid::new_v4().to_string(),
+        };
+        let now = Utc::now();
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "Subscription storage is unavailable.",
+            )
+        })?;
+        let preset_exists: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM presets WHERE id = ?1)",
+            [&preset_id],
+            |row| row.get(0),
+        )?;
+        if !preset_exists {
+            return Err(AppError::new(
+                "preset_not_found",
+                "Save the selected preset before creating a subscription.",
+            ));
+        }
+        connection.execute(
+            "INSERT INTO subscriptions
+                (id, name, url, preset_id, destination, check_interval_minutes, max_entries,
+                 enabled, last_checked_at, next_check_at, last_error, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, ?9, NULL, ?9, ?9)
+             ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                url = excluded.url,
+                preset_id = excluded.preset_id,
+                destination = excluded.destination,
+                check_interval_minutes = excluded.check_interval_minutes,
+                max_entries = excluded.max_entries,
+                enabled = excluded.enabled,
+                next_check_at = CASE
+                    WHEN excluded.enabled = 1 AND subscriptions.enabled = 0 THEN excluded.updated_at
+                    ELSE subscriptions.next_check_at
+                END,
+                updated_at = excluded.updated_at",
+            params![
+                id,
+                name,
+                url,
+                preset_id,
+                destination,
+                request.check_interval_minutes,
+                request.max_entries,
+                request.enabled,
+                now.timestamp_millis(),
+            ],
+        )?;
+        drop(connection);
+        self.load_subscription(&id)
+    }
+
+    pub fn delete_subscription(&self, id: &str) -> Result<(), AppError> {
+        let id = parse_uuid(
+            id,
+            "invalid_subscription_id",
+            "The subscription ID is invalid.",
+        )?;
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "Subscription storage is unavailable.",
+            )
+        })?;
+        if connection.execute("DELETE FROM subscriptions WHERE id = ?1", [&id])? == 0 {
+            return Err(AppError::new(
+                "subscription_not_found",
+                "The subscription was not found.",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn due_subscriptions(&self, limit: usize) -> Result<Vec<Subscription>, AppError> {
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "Subscription storage is unavailable.",
+            )
+        })?;
+        let mut statement = connection.prepare(
+            "SELECT id, name, url, preset_id, destination, check_interval_minutes,
+                    max_entries, enabled, last_checked_at, next_check_at, last_error,
+                    created_at, updated_at
+             FROM subscriptions
+             WHERE enabled = 1 AND next_check_at <= ?1
+             ORDER BY next_check_at LIMIT ?2",
+        )?;
+        let rows = statement.query_map(
+            params![
+                Utc::now().timestamp_millis(),
+                i64::try_from(limit).unwrap_or(20)
+            ],
+            subscription_from_row,
+        )?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+    }
+
+    pub fn record_subscription_check(
+        &self,
+        id: &str,
+        error: Option<&str>,
+    ) -> Result<Subscription, AppError> {
+        let subscription = self.load_subscription(id)?;
+        let now = Utc::now();
+        let next = now + Duration::minutes(i64::from(subscription.check_interval_minutes));
+        let error = error.map(|value| value.chars().take(500).collect::<String>());
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "Subscription storage is unavailable.",
+            )
+        })?;
+        connection.execute(
+            "UPDATE subscriptions
+             SET last_checked_at = ?2, next_check_at = ?3, last_error = ?4, updated_at = ?2
+             WHERE id = ?1",
+            params![id, now.timestamp_millis(), next.timestamp_millis(), error],
+        )?;
+        drop(connection);
+        self.load_subscription(id)
+    }
+
+    pub fn save_transformation_task(&self, task: &TransformationTask) -> Result<(), AppError> {
+        let operation = serde_json::to_string(&task.operation)
+            .map_err(|error| AppError::internal("could not serialize transformation", error))?;
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "Transformation history is unavailable.",
+            )
+        })?;
+        connection.execute(
+            "INSERT INTO transformation_tasks
+                (id, input_path, output_path, operation_json, state, progress_percent,
+                 current_operation, error, created_at, updated_at, completed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             ON CONFLICT(id) DO UPDATE SET
+                state = excluded.state,
+                progress_percent = excluded.progress_percent,
+                current_operation = excluded.current_operation,
+                error = excluded.error,
+                updated_at = excluded.updated_at,
+                completed_at = excluded.completed_at",
+            params![
+                task.id,
+                task.input_path,
+                task.output_path,
+                operation,
+                transformation_state_name(task.state),
+                task.progress_percent,
+                task.current_operation,
+                task.error,
+                task.created_at.timestamp_millis(),
+                task.updated_at.timestamp_millis(),
+                task.completed_at.map(|value| value.timestamp_millis()),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_transformation_tasks(&self) -> Result<Vec<TransformationTask>, AppError> {
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "Transformation history is unavailable.",
+            )
+        })?;
+        let mut statement = connection.prepare(
+            "SELECT id, input_path, output_path, operation_json, state, progress_percent,
+                    current_operation, error, created_at, updated_at, completed_at
+             FROM transformation_tasks ORDER BY created_at DESC LIMIT 500",
+        )?;
+        let rows = statement.query_map([], transformation_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+    }
+
+    pub fn upsert_library_item(&self, item: &LibraryItem) -> Result<(), AppError> {
+        let tags = serde_json::to_string(&item.tags)
+            .map_err(|error| AppError::internal("could not serialize media tags", error))?;
+        let metadata = serde_json::to_string(&item.metadata)
+            .map_err(|error| AppError::internal("could not serialize media metadata", error))?;
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "The media library is unavailable.")
+        })?;
+        connection.execute(
+            "INSERT INTO media_library
+                (id, path, title, source_url, thumbnail, duration_seconds, site, tags_json,
+                 metadata_json, missing, added_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+             ON CONFLICT(path) DO UPDATE SET
+                title = excluded.title,
+                source_url = COALESCE(excluded.source_url, media_library.source_url),
+                thumbnail = COALESCE(excluded.thumbnail, media_library.thumbnail),
+                duration_seconds = COALESCE(excluded.duration_seconds, media_library.duration_seconds),
+                site = COALESCE(excluded.site, media_library.site),
+                tags_json = excluded.tags_json,
+                metadata_json = excluded.metadata_json,
+                missing = excluded.missing,
+                updated_at = excluded.updated_at",
+            params![
+                item.id, item.path, item.title, item.source_url, item.thumbnail,
+                item.duration_seconds, item.site, tags, metadata, item.missing,
+                item.added_at.timestamp_millis(), item.updated_at.timestamp_millis(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_library_items(&self) -> Result<Vec<LibraryItem>, AppError> {
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "The media library is unavailable.")
+        })?;
+        let mut statement = connection.prepare(
+            "SELECT id, path, title, source_url, thumbnail, duration_seconds, site, tags_json,
+                    metadata_json, missing, added_at, updated_at
+             FROM media_library ORDER BY added_at DESC LIMIT 5000",
+        )?;
+        let rows = statement.query_map([], library_item_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+    }
+
+    pub fn update_library_item(
+        &self,
+        request: UpdateLibraryItemRequest,
+    ) -> Result<LibraryItem, AppError> {
+        let tags = serde_json::to_string(&request.tags)
+            .map_err(|error| AppError::internal("could not serialize media tags", error))?;
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "The media library is unavailable.")
+        })?;
+        if connection.execute(
+            "UPDATE media_library SET title = ?2, tags_json = ?3, updated_at = ?4 WHERE id = ?1",
+            params![
+                request.id,
+                request.title,
+                tags,
+                Utc::now().timestamp_millis()
+            ],
+        )? == 0
+        {
+            return Err(AppError::new(
+                "library_item_not_found",
+                "The library item was not found.",
+            ));
+        }
+        connection
+            .query_row(
+                "SELECT id, path, title, source_url, thumbnail, duration_seconds, site, tags_json,
+                    metadata_json, missing, added_at, updated_at FROM media_library WHERE id = ?1",
+                [&request.id],
+                library_item_from_row,
+            )
+            .map_err(AppError::from)
+    }
+
+    pub fn remove_library_item(&self, id: &str) -> Result<(), AppError> {
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "The media library is unavailable.")
+        })?;
+        if connection.execute("DELETE FROM media_library WHERE id = ?1", [id])? == 0 {
+            return Err(AppError::new(
+                "library_item_not_found",
+                "The library item was not found.",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn set_library_missing(&self, id: &str, missing: bool) -> Result<(), AppError> {
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "The media library is unavailable.")
+        })?;
+        connection.execute(
+            "UPDATE media_library SET missing = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, missing, Utc::now().timestamp_millis()],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_authentication_profiles(&self) -> Result<Vec<AuthenticationProfile>, AppError> {
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "Authentication profiles are unavailable.",
+            )
+        })?;
+        let mut statement = connection.prepare(
+            "SELECT id, name, host_suffix, browser_cookie_source, browser_profile, proxy_url,
+                    managed_cookie_path, enabled, created_at, updated_at
+             FROM authentication_profiles ORDER BY name COLLATE NOCASE",
+        )?;
+        let rows = statement.query_map([], authentication_profile_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+    }
+
+    pub fn save_authentication_profile(
+        &self,
+        request: SaveAuthenticationProfileRequest,
+        managed_cookie_path: Option<String>,
+    ) -> Result<AuthenticationProfile, AppError> {
+        let id = match request.id {
+            Some(id) => Uuid::parse_str(&id)
+                .map_err(|_| {
+                    AppError::new(
+                        "invalid_auth_profile_id",
+                        "The authentication profile ID is invalid.",
+                    )
+                })?
+                .to_string(),
+            None => Uuid::new_v4().to_string(),
+        };
+        let now = Utc::now();
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "Authentication profiles are unavailable.",
+            )
+        })?;
+        connection.execute(
+            "INSERT INTO authentication_profiles
+                (id, name, host_suffix, browser_cookie_source, browser_profile, proxy_url,
+                 managed_cookie_path, enabled, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)
+             ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name, host_suffix = excluded.host_suffix,
+                browser_cookie_source = excluded.browser_cookie_source,
+                browser_profile = excluded.browser_profile, proxy_url = excluded.proxy_url,
+                managed_cookie_path = excluded.managed_cookie_path, enabled = excluded.enabled,
+                updated_at = excluded.updated_at",
+            params![
+                id,
+                request.name,
+                request.host_suffix,
+                browser_source_name(request.browser_cookie_source),
+                request.browser_profile,
+                request.proxy_url,
+                managed_cookie_path,
+                request.enabled,
+                now.timestamp_millis()
+            ],
+        )?;
+        connection
+            .query_row(
+                "SELECT id, name, host_suffix, browser_cookie_source, browser_profile, proxy_url,
+                    managed_cookie_path, enabled, created_at, updated_at
+             FROM authentication_profiles WHERE id = ?1",
+                [&id],
+                authentication_profile_from_row,
+            )
+            .map_err(AppError::from)
+    }
+
+    pub fn authentication_profile(
+        &self,
+        id: &str,
+    ) -> Result<Option<AuthenticationProfile>, AppError> {
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "Authentication profiles are unavailable.",
+            )
+        })?;
+        connection
+            .query_row(
+                "SELECT id, name, host_suffix, browser_cookie_source, browser_profile, proxy_url,
+                    managed_cookie_path, enabled, created_at, updated_at
+             FROM authentication_profiles WHERE id = ?1",
+                [id],
+                authentication_profile_from_row,
+            )
+            .optional()
+            .map_err(AppError::from)
+    }
+
+    pub fn match_authentication_profile(
+        &self,
+        url: &str,
+    ) -> Result<Option<AuthenticationProfile>, AppError> {
+        let host = url::Url::parse(url)
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_owned));
+        let Some(host) = host else {
+            return Ok(None);
+        };
+        Ok(self
+            .list_authentication_profiles()?
+            .into_iter()
+            .filter(|profile| {
+                profile.enabled
+                    && (host == profile.host_suffix
+                        || host.ends_with(&format!(".{}", profile.host_suffix)))
+            })
+            .max_by_key(|profile| profile.host_suffix.len()))
+    }
+
+    pub fn delete_authentication_profile(&self, id: &str) -> Result<Option<String>, AppError> {
+        let profile = self.authentication_profile(id)?.ok_or_else(|| {
+            AppError::new(
+                "auth_profile_not_found",
+                "The authentication profile was not found.",
+            )
+        })?;
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "Authentication profiles are unavailable.",
+            )
+        })?;
+        connection.execute("DELETE FROM authentication_profiles WHERE id = ?1", [id])?;
+        Ok(profile.managed_cookie_path)
+    }
+}
+
+fn authentication_profile_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<AuthenticationProfile> {
+    let source: String = row.get(3)?;
+    let managed_cookie_path: Option<String> = row.get(6)?;
+    Ok(AuthenticationProfile {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        host_suffix: row.get(2)?,
+        browser_cookie_source: browser_source_from_name(&source),
+        browser_profile: row.get(4)?,
+        proxy_url: row.get(5)?,
+        cookie_file_configured: managed_cookie_path.is_some(),
+        managed_cookie_path,
+        enabled: row.get(7)?,
+        created_at: timestamp_or_epoch(row.get(8)?),
+        updated_at: timestamp_or_epoch(row.get(9)?),
+    })
+}
+
+fn browser_source_name(source: BrowserCookieSource) -> &'static str {
+    match source {
+        BrowserCookieSource::None => "none",
+        BrowserCookieSource::Firefox => "firefox",
+        BrowserCookieSource::Chromium => "chromium",
+        BrowserCookieSource::Chrome => "chrome",
+        BrowserCookieSource::Brave => "brave",
+        BrowserCookieSource::Vivaldi => "vivaldi",
+        BrowserCookieSource::Edge => "edge",
+        BrowserCookieSource::Opera => "opera",
+    }
+}
+
+fn browser_source_from_name(source: &str) -> BrowserCookieSource {
+    match source {
+        "firefox" => BrowserCookieSource::Firefox,
+        "chromium" => BrowserCookieSource::Chromium,
+        "chrome" => BrowserCookieSource::Chrome,
+        "brave" => BrowserCookieSource::Brave,
+        "vivaldi" => BrowserCookieSource::Vivaldi,
+        "edge" => BrowserCookieSource::Edge,
+        "opera" => BrowserCookieSource::Opera,
+        _ => BrowserCookieSource::None,
+    }
+}
+
+fn library_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LibraryItem> {
+    let tags_json: String = row.get(7)?;
+    let metadata_json: String = row.get(8)?;
+    let tags = serde_json::from_str(&tags_json).unwrap_or_default();
+    let metadata = serde_json::from_str(&metadata_json).unwrap_or(serde_json::Value::Null);
+    Ok(LibraryItem {
+        id: row.get(0)?,
+        path: row.get(1)?,
+        title: row.get(2)?,
+        source_url: row.get(3)?,
+        thumbnail: row.get(4)?,
+        duration_seconds: row.get(5)?,
+        site: row.get(6)?,
+        tags,
+        metadata,
+        missing: row.get(9)?,
+        added_at: timestamp_or_epoch(row.get(10)?),
+        updated_at: timestamp_or_epoch(row.get(11)?),
+    })
+}
+
+fn transformation_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TransformationTask> {
+    let operation_json: String = row.get(3)?;
+    let operation: TransformationOperation =
+        serde_json::from_str(&operation_json).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                operation_json.len(),
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?;
+    let state: String = row.get(4)?;
+    Ok(TransformationTask {
+        id: row.get(0)?,
+        input_path: row.get(1)?,
+        output_path: row.get(2)?,
+        operation,
+        state: match state.as_str() {
+            "Queued" => TransformationState::Queued,
+            "Running" => TransformationState::Running,
+            "Completed" => TransformationState::Completed,
+            "Cancelled" => TransformationState::Cancelled,
+            _ => TransformationState::Failed,
+        },
+        progress_percent: row.get(5)?,
+        current_operation: row.get(6)?,
+        error: row.get(7)?,
+        created_at: timestamp_or_epoch(row.get(8)?),
+        updated_at: timestamp_or_epoch(row.get(9)?),
+        completed_at: row.get::<_, Option<i64>>(10)?.map(timestamp_or_epoch),
+    })
+}
+
+fn transformation_state_name(state: TransformationState) -> &'static str {
+    match state {
+        TransformationState::Queued => "Queued",
+        TransformationState::Running => "Running",
+        TransformationState::Completed => "Completed",
+        TransformationState::Failed => "Failed",
+        TransformationState::Cancelled => "Cancelled",
+    }
+}
+
+fn subscription_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Subscription> {
+    Ok(Subscription {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        url: row.get(2)?,
+        preset_id: row.get(3)?,
+        destination: row.get(4)?,
+        check_interval_minutes: u32::try_from(row.get::<_, i64>(5)?).unwrap_or(360),
+        max_entries: u32::try_from(row.get::<_, i64>(6)?).unwrap_or(10),
+        enabled: row.get(7)?,
+        last_checked_at: row.get::<_, Option<i64>>(8)?.map(timestamp_or_epoch),
+        next_check_at: timestamp_or_epoch(row.get(9)?),
+        last_error: row.get(10)?,
+        created_at: timestamp_or_epoch(row.get(11)?),
+        updated_at: timestamp_or_epoch(row.get(12)?),
+    })
+}
+
+fn parse_uuid(value: &str, code: &'static str, message: &'static str) -> Result<String, AppError> {
+    Uuid::parse_str(value)
+        .map(|value| value.to_string())
+        .map_err(|_| AppError::new(code, message))
 }
 
 fn site_preset_rule_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SitePresetRule> {
@@ -813,6 +1574,7 @@ mod tests {
             updated_at: now,
             completed_at: Some(now),
         };
+        std::fs::write(directory.path().join("video.mp4"), b"fixture").expect("media fixture");
         let options = DownloadOptions {
             quality: QualityOption {
                 id: "best".to_owned(),
@@ -870,6 +1632,13 @@ mod tests {
         assert_eq!(history[0].title, "Example");
         assert_eq!(history[0].diagnostics, ["finished"]);
         assert_eq!(history[0].attempt_count, 2);
+        let library = database.list_library_items().expect("auto-indexed library");
+        assert_eq!(library.len(), 1);
+        assert_eq!(library[0].title, "Example");
+        database
+            .dismiss_download_record(&job.id)
+            .expect("dismiss completed download");
+        assert_eq!(database.list_history().expect("history remains").len(), 1);
         assert!(database
             .archive_match(&job.url, &job.destination)
             .expect("archive lookup")
@@ -906,6 +1675,7 @@ mod tests {
             proxy_url: Some("http://127.0.0.1:8080".to_owned()),
             enable_impersonation: false,
             bandwidth_limit_kib: Some(2048),
+            managed_cookie_file: None,
         };
         database
             .save_engine_preferences(&preferences)
@@ -914,6 +1684,30 @@ mod tests {
             database.load_engine_preferences().expect("saved settings"),
             preferences
         );
+    }
+
+    #[test]
+    fn persists_desktop_preferences_and_onboarding() {
+        use crate::models::{CloseBehavior, DesktopPreferences};
+        let directory = tempdir().expect("temporary directory");
+        let database = Database::open(&directory.path().join("desktop.sqlite3")).expect("database");
+        assert!(!database.onboarding_completed().expect("onboarding status"));
+        let preferences = DesktopPreferences {
+            close_behavior: CloseBehavior::Background,
+            start_minimized: true,
+            notify_when_backgrounded: false,
+        };
+        database
+            .save_desktop_preferences(&preferences)
+            .expect("save desktop preferences");
+        assert_eq!(
+            database
+                .load_desktop_preferences()
+                .expect("load desktop preferences"),
+            preferences
+        );
+        database.complete_onboarding().expect("complete onboarding");
+        assert!(database.onboarding_completed().expect("completed status"));
     }
 
     #[test]
@@ -971,6 +1765,57 @@ mod tests {
             .list_site_preset_rules()
             .expect("cascade site rules")
             .is_empty());
+    }
+
+    #[test]
+    fn schedules_and_records_subscriptions() {
+        use crate::models::{
+            AudioQuality, OutputConflictPolicy, OutputContainer, PresetIntent, SavePresetRequest,
+            SaveSubscriptionRequest, VideoCodecPreference,
+        };
+        let directory = tempdir().expect("temporary directory");
+        let database =
+            Database::open(&directory.path().join("subscriptions.sqlite3")).expect("database");
+        let preset = database
+            .save_preset(SavePresetRequest {
+                id: None,
+                name: "Subscription default".to_owned(),
+                intent: PresetIntent {
+                    quality: "best".to_owned(),
+                    container: OutputContainer::Mkv,
+                    video_codec_preference: VideoCodecPreference::Any,
+                    audio_quality: AudioQuality::Best,
+                    embed_thumbnail: false,
+                    embed_metadata: true,
+                    output_conflict_policy: OutputConflictPolicy::Skip,
+                    sponsorblock_categories: vec![],
+                    filename_template: None,
+                },
+            })
+            .expect("preset");
+        let subscription = database
+            .save_subscription(SaveSubscriptionRequest {
+                id: None,
+                name: "Example channel".to_owned(),
+                url: "https://example.com/channel".to_owned(),
+                preset_id: preset.id,
+                destination: directory.path().to_string_lossy().into_owned(),
+                check_interval_minutes: 60,
+                max_entries: 5,
+                enabled: true,
+            })
+            .expect("subscription");
+        assert_eq!(database.due_subscriptions(10).expect("due").len(), 1);
+        let checked = database
+            .record_subscription_check(&subscription.id, Some("temporary failure"))
+            .expect("record check");
+        assert!(checked.last_checked_at.is_some());
+        assert_eq!(checked.last_error.as_deref(), Some("temporary failure"));
+        assert!(database.due_subscriptions(10).expect("not due").is_empty());
+        database
+            .delete_subscription(&subscription.id)
+            .expect("delete subscription");
+        assert!(database.list_subscriptions().expect("list").is_empty());
     }
 
     #[test]

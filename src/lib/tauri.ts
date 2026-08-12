@@ -19,6 +19,19 @@ import type {
   SaveSitePresetRuleRequest,
   SitePresetRule,
   DownloadArchiveMatch,
+  SaveSubscriptionRequest,
+  Subscription,
+  SubscriptionCheckResult,
+  StartTransformationRequest,
+  TransformationTask,
+  LibraryItem,
+  LibraryScanResult,
+  UpdateLibraryItemRequest,
+  AuthenticationProfile,
+  SaveAuthenticationProfileRequest,
+  BrowserProfileInfo,
+  DesktopPreferences,
+  OnboardingStatus,
   StartDownloadRequest,
 } from "../types";
 
@@ -48,6 +61,7 @@ export const api = {
   startDownloads: (requests: StartDownloadRequest[]) =>
     invoke<DownloadJob[]>("start_downloads", { requests }),
   cancelDownload: (jobId: string) => invoke<void>("cancel_download", { jobId }),
+  dismissDownloads: (jobIds: string[]) => invoke<string[]>("dismiss_downloads", { jobIds }),
   retryDownload: (jobId: string) => invoke<DownloadJob>("retry_download", { jobId }),
   repeatDownload: (jobId: string) => invoke<DownloadJob>("repeat_download", { jobId }),
   pauseDownload: (jobId: string) => invoke<void>("pause_download", { jobId }),
@@ -73,11 +87,42 @@ export const api = {
     invoke<SitePresetRule | null>("match_site_preset_rule", { url }),
   findDownloadArchiveMatch: (url: string, destination: string) =>
     invoke<DownloadArchiveMatch | null>("find_download_archive_match", { url, destination }),
+  findDownloadArchiveMatches: (urls: string[], destination: string) =>
+    invoke<string[]>("find_download_archive_matches", { urls, destination }),
+  prepareCollectionDestination: (destination: string, collectionTitle: string) =>
+    invoke<string>("prepare_collection_destination", { destination, collectionTitle }),
+  listSubscriptions: () => invoke<Subscription[]>("list_subscriptions"),
+  saveSubscription: (request: SaveSubscriptionRequest) =>
+    invoke<Subscription>("save_subscription", { request }),
+  deleteSubscription: (id: string) => invoke<void>("delete_subscription", { id }),
+  checkSubscriptionNow: (id: string) =>
+    invoke<SubscriptionCheckResult>("check_subscription_now", { id }),
+  listTransformationTasks: () => invoke<TransformationTask[]>("list_transformation_tasks"),
+  startTransformation: (request: StartTransformationRequest) =>
+    invoke<TransformationTask>("start_transformation", { request }),
+  cancelTransformation: (id: string) => invoke<void>("cancel_transformation", { id }),
+  listLibraryItems: () => invoke<LibraryItem[]>("list_library_items"),
+  importLibraryFiles: (paths: string[], tags: string[]) => invoke<LibraryItem[]>("import_library_files", { paths, tags }),
+  updateLibraryItem: (request: UpdateLibraryItemRequest) => invoke<LibraryItem>("update_library_item", { request }),
+  removeLibraryItem: (id: string) => invoke<void>("remove_library_item", { id }),
+  reconcileLibrary: () => invoke<LibraryScanResult>("reconcile_library"),
+  exportLibrary: (path: string) => invoke<void>("export_library", { path }),
+  restoreLibrary: (path: string) => invoke<LibraryItem[]>("restore_library", { path }),
+  listAuthenticationProfiles: () => invoke<AuthenticationProfile[]>("list_authentication_profiles"),
+  saveAuthenticationProfile: (request: SaveAuthenticationProfileRequest) => invoke<AuthenticationProfile>("save_authentication_profile", { request }),
+  deleteAuthenticationProfile: (id: string) => invoke<void>("delete_authentication_profile", { id }),
+  discoverBrowserProfiles: () => invoke<BrowserProfileInfo[]>("discover_browser_profiles"),
+  getDesktopPreferences: () => invoke<DesktopPreferences>("get_desktop_preferences"),
+  updateDesktopPreferences: (preferences: DesktopPreferences) => invoke<DesktopPreferences>("update_desktop_preferences", { preferences }),
+  getOnboardingStatus: () => invoke<OnboardingStatus>("get_onboarding_status"),
+  completeOnboarding: () => invoke<void>("complete_onboarding"),
   openDownloadOutput: (jobId: string, reveal: boolean) =>
     invoke<void>("open_download_output", { jobId, reveal }),
   exportDiagnostics: (path: string) => invoke<void>("export_diagnostics", { path }),
   onJobUpdated: (handler: (job: DownloadJob) => void): Promise<UnlistenFn> =>
     listen<DownloadJob>("download-job-updated", (event) => handler(event.payload)),
+  onTransformationUpdated: (handler: (task: TransformationTask) => void): Promise<UnlistenFn> =>
+    listen<TransformationTask>("transformation-task-updated", (event) => handler(event.payload)),
 };
 
 export function normalizeError(error: unknown): import("../types").AppError {

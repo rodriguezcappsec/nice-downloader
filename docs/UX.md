@@ -1,5 +1,11 @@
 # Desktop UX Principles
 
+## Visual system
+
+The desktop shell uses a graphite and verdigris palette, Cantarell-first Linux typography, compact squared controls, and restrained tinted depth. Accent color identifies the current route, primary action, live progress, and focus state; it is not decorative. Panels use hierarchy and spacing before borders, while tabular transfer data uses a monospace stack. Motion is limited to short hover, press, progress, and disclosure transitions.
+
+The sidebar separates the primary New download action from workspace navigation and system status. Page headers use a consistent eyebrow, title, description, and action rhythm. Empty and no-results states explain what the application is waiting for rather than presenting a blank table.
+
 Optional clipboard detection only runs while New Download is visible and offers a copied URL for confirmation. It never starts analysis or a download. A matched site rule is announced before applying its preset, and selecting another preset clears the automatic match. Filename previews are advisory; Rust performs authoritative validation.
 
 Duplicate protection uses a durable archive separate from History. When the current URL and destination match an archived completion, the options panel explains the match and offers an explicit Download again action.

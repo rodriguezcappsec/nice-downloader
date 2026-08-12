@@ -83,6 +83,8 @@ pub struct EnginePreferences {
     pub enable_impersonation: bool,
     #[serde(default)]
     pub bandwidth_limit_kib: Option<u64>,
+    #[serde(default, skip_serializing)]
+    pub managed_cookie_file: Option<String>,
 }
 
 impl Default for EnginePreferences {
@@ -93,6 +95,7 @@ impl Default for EnginePreferences {
             proxy_url: None,
             enable_impersonation: true,
             bandwidth_limit_kib: None,
+            managed_cookie_file: None,
         }
     }
 }
@@ -442,6 +445,231 @@ pub struct DownloadArchiveMatch {
     pub destination: String,
     pub output_path: Option<String>,
     pub completed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Subscription {
+    pub id: String,
+    pub name: String,
+    pub url: String,
+    pub preset_id: String,
+    pub destination: String,
+    pub check_interval_minutes: u32,
+    pub max_entries: u32,
+    pub enabled: bool,
+    pub last_checked_at: Option<DateTime<Utc>>,
+    pub next_check_at: DateTime<Utc>,
+    pub last_error: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveSubscriptionRequest {
+    pub id: Option<String>,
+    pub name: String,
+    pub url: String,
+    pub preset_id: String,
+    pub destination: String,
+    pub check_interval_minutes: u32,
+    pub max_entries: u32,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubscriptionCheckResult {
+    pub subscription: Subscription,
+    pub discovered_count: usize,
+    pub queued_count: usize,
+    pub skipped_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum TransformationOperation {
+    Trim {
+        start_seconds: f64,
+        end_seconds: f64,
+    },
+    ExtractAudio {
+        codec: AudioTransformCodec,
+    },
+    Transcode {
+        container: String,
+        video_codec: TransformVideoCodec,
+        audio_codec: TransformAudioCodec,
+    },
+    SplitChapters,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum AudioTransformCodec {
+    Mp3,
+    Aac,
+    Opus,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum TransformVideoCodec {
+    Copy,
+    H264,
+    Hevc,
+    Vp9,
+    Av1,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum TransformAudioCodec {
+    Copy,
+    Aac,
+    Opus,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TransformationState {
+    Queued,
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartTransformationRequest {
+    pub input_path: String,
+    pub output_path: String,
+    pub operation: TransformationOperation,
+    #[serde(default)]
+    pub overwrite: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransformationTask {
+    pub id: String,
+    pub input_path: String,
+    pub output_path: String,
+    pub operation: TransformationOperation,
+    pub state: TransformationState,
+    pub progress_percent: f64,
+    pub current_operation: String,
+    pub error: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryItem {
+    pub id: String,
+    pub path: String,
+    pub title: String,
+    pub source_url: Option<String>,
+    pub thumbnail: Option<String>,
+    pub duration_seconds: Option<f64>,
+    pub site: Option<String>,
+    pub tags: Vec<String>,
+    pub metadata: serde_json::Value,
+    pub missing: bool,
+    pub added_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateLibraryItemRequest {
+    pub id: String,
+    pub title: String,
+    pub tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryScanResult {
+    pub checked_count: usize,
+    pub missing_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthenticationProfile {
+    pub id: String,
+    pub name: String,
+    pub host_suffix: String,
+    pub browser_cookie_source: BrowserCookieSource,
+    pub browser_profile: Option<String>,
+    pub proxy_url: Option<String>,
+    pub cookie_file_configured: bool,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    #[serde(skip_serializing)]
+    pub managed_cookie_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveAuthenticationProfileRequest {
+    pub id: Option<String>,
+    pub name: String,
+    pub host_suffix: String,
+    pub browser_cookie_source: BrowserCookieSource,
+    pub browser_profile: Option<String>,
+    pub proxy_url: Option<String>,
+    pub cookie_file_path: Option<String>,
+    pub clear_cookie_file: bool,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserProfileInfo {
+    pub browser: BrowserCookieSource,
+    pub name: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum CloseBehavior {
+    #[default]
+    Ask,
+    Background,
+    Quit,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopPreferences {
+    pub close_behavior: CloseBehavior,
+    pub start_minimized: bool,
+    pub notify_when_backgrounded: bool,
+}
+
+impl Default for DesktopPreferences {
+    fn default() -> Self {
+        Self {
+            close_behavior: CloseBehavior::Ask,
+            start_minimized: false,
+            notify_when_backgrounded: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OnboardingStatus {
+    pub completed: bool,
+    pub default_destination: String,
+    pub engines: Vec<EngineInfo>,
 }
 
 #[derive(Debug, Clone, Serialize)]

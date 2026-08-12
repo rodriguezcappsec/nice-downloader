@@ -444,7 +444,9 @@ fn access_args(
     capabilities: &YtDlpRuntimeCapabilities,
 ) -> Vec<String> {
     let mut args = Vec::new();
-    if let Some(browser) = preferences.browser_cookie_source.yt_dlp_name() {
+    if let Some(cookie_file) = &preferences.managed_cookie_file {
+        args.extend(["--cookies".to_owned(), cookie_file.clone()]);
+    } else if let Some(browser) = preferences.browser_cookie_source.yt_dlp_name() {
         let browser = preferences
             .browser_profile
             .as_deref()
@@ -687,6 +689,7 @@ mod tests {
             proxy_url: Some("socks5://127.0.0.1:1080".to_owned()),
             enable_impersonation: true,
             bandwidth_limit_kib: None,
+            managed_cookie_file: None,
         };
         let capabilities = YtDlpRuntimeCapabilities {
             preferred_impersonation_target: Some("chrome-136:windows-10".to_owned()),
@@ -790,6 +793,7 @@ mod tests {
                     proxy_url: None,
                     enable_impersonation: true,
                     bandwidth_limit_kib: None,
+                    managed_cookie_file: None,
                 },
             )
             .await
