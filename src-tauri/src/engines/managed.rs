@@ -236,9 +236,11 @@ pub async fn install(candidate: EngineUpdateCandidate) -> Result<ManagedEngineSt
     fs::write(&temporary, &bytes)
         .map_err(|error| AppError::internal("could not store the managed engine", error))?;
     set_executable(&temporary)?;
+    let mut version_command = Command::new(&temporary);
+    crate::utils::process::sanitize_tokio_command(&mut version_command);
     let version_output = timeout(
         std::time::Duration::from_secs(10),
-        Command::new(&temporary).arg("--version").output(),
+        version_command.arg("--version").output(),
     )
     .await
     .map_err(|_| {

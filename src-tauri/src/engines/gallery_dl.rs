@@ -51,6 +51,7 @@ impl GalleryDlEngine {
     ) -> Result<MediaAnalysis, AppError> {
         let validated = validate_bunkr_album_url(url)?;
         let mut command = Command::new(&self.executable);
+        crate::utils::process::sanitize_tokio_command(&mut command);
         command.kill_on_drop(true).args([
             "--config-ignore",
             "--no-colors",
@@ -114,6 +115,7 @@ impl GalleryDlEngine {
         let end = offset.saturating_add(limit).min(MAX_SELECTABLE_ITEMS);
         let range = format!("{}-{end}", offset + 1);
         let mut command = Command::new(&self.executable);
+        crate::utils::process::sanitize_tokio_command(&mut command);
         command.kill_on_drop(true).args([
             "--config-ignore",
             "--no-colors",

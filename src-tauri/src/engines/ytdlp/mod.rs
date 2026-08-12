@@ -85,6 +85,7 @@ impl YtDlpEngine {
         let validated = validate_media_url(url)?;
         let capabilities = self.runtime_capabilities().await;
         let mut command = Command::new(&self.executable);
+        crate::utils::process::sanitize_tokio_command(&mut command);
         command.kill_on_drop(true).args([
             "--ignore-config",
             "--yes-playlist",
@@ -124,6 +125,7 @@ impl YtDlpEngine {
         capabilities: &YtDlpRuntimeCapabilities,
     ) -> Result<serde_json::Value, AppError> {
         let mut command = Command::new(&self.executable);
+        crate::utils::process::sanitize_tokio_command(&mut command);
         command.kill_on_drop(true).args([
             "--ignore-config",
             "--no-playlist",
@@ -398,7 +400,9 @@ fn with_fallback_details(mut initial_error: AppError, fallback_error: &str) -> A
 }
 
 pub async fn detect_runtime_capabilities(path: &std::path::Path) -> YtDlpRuntimeCapabilities {
-    let output = Command::new(path)
+    let mut command = Command::new(path);
+    crate::utils::process::sanitize_tokio_command(&mut command);
+    let output = command
         .args(["--ignore-config", "--list-impersonate-targets"])
         .output()
         .await;

@@ -161,7 +161,9 @@ async fn detect(definition: EngineDefinition) -> EngineInfo {
 }
 
 async fn read_version(path: &Path, version_arg: &str) -> Option<String> {
-    let output = Command::new(path).arg(version_arg).output().await.ok()?;
+    let mut command = Command::new(path);
+    crate::utils::process::sanitize_tokio_command(&mut command);
+    let output = command.arg(version_arg).output().await.ok()?;
     let text = if output.stdout.is_empty() {
         String::from_utf8_lossy(&output.stderr)
     } else {

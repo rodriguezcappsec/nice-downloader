@@ -600,6 +600,7 @@ impl QueueManager {
         .await;
 
         let mut command = Command::new(&prepared.executable);
+        crate::utils::process::sanitize_tokio_command(&mut command);
         command
             .args(&prepared.args)
             .current_dir(&destination)
@@ -898,9 +899,11 @@ impl QueueManager {
             job.eta_seconds = None;
         })
         .await;
+        let mut command = Command::new(ffprobe);
+        crate::utils::process::sanitize_tokio_command(&mut command);
         let output = timeout(
             Duration::from_secs(30),
-            Command::new(ffprobe)
+            command
                 .args([
                     "-v",
                     "error",

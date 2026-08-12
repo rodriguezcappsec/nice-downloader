@@ -154,6 +154,7 @@ impl TransformationManager {
         })?;
 
         let mut command = Command::new(ffmpeg);
+        crate::utils::process::sanitize_tokio_command(&mut command);
         command.arg("-hide_banner").arg("-loglevel").arg("error");
         if request.overwrite {
             command.arg("-y");
@@ -443,7 +444,9 @@ async fn probe_duration(input: &str) -> Result<Option<f64>, AppError> {
             "Install ffprobe to calculate transformation progress.",
         )
     })?;
-    let output = Command::new(ffprobe)
+    let mut command = Command::new(ffprobe);
+    crate::utils::process::sanitize_tokio_command(&mut command);
+    let output = command
         .args([
             "-v",
             "error",
@@ -475,7 +478,9 @@ async fn probe_duration(input: &str) -> Result<Option<f64>, AppError> {
 async fn chapter_split_times(input: &str) -> Result<Vec<String>, AppError> {
     let ffprobe = managed::resolve("ffprobe")
         .ok_or_else(|| AppError::new("ffprobe_missing", "Install ffprobe to read chapters."))?;
-    let output = Command::new(ffprobe)
+    let mut command = Command::new(ffprobe);
+    crate::utils::process::sanitize_tokio_command(&mut command);
+    let output = command
         .args(["-v", "error", "-show_chapters", "-of", "json", input])
         .output()
         .await
