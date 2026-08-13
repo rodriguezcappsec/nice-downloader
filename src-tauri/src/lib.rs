@@ -17,6 +17,11 @@ use crate::{
 use tauri::Manager;
 use tracing_subscriber::EnvFilter;
 
+#[derive(Clone, Copy)]
+pub(crate) struct DesktopRuntimeState {
+    pub tray_available: bool,
+}
+
 fn install_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     use tauri::{
         menu::{Menu, MenuItem},
@@ -66,10 +71,14 @@ pub fn run() {
             let data_directory = app.path().app_data_dir().map_err(|error| {
                 format!("could not resolve the application data directory: {error}")
             })?;
+            app.manage(DesktopRuntimeState { tray_available });
             std::fs::create_dir_all(&data_directory).map_err(|error| {
                 format!("could not create the application data directory: {error}")
             })?;
-            managed::initialize(&data_directory)?;
+            let resource_directory = app.path().resource_dir().map_err(|error| {
+                format!("could not resolve application resource directory: {error}")
+            })?;
+            managed::initialize(&data_directory, &resource_directory)?;
             let database = Database::open(&data_directory.join("nice-downloader.sqlite3"))?;
             if tray_available && database.load_desktop_preferences()?.start_minimized {
                 if let Some(window) = app.get_webview_window("main") {
@@ -154,7 +163,10 @@ pub fn run() {
             commands::delete_authentication_profile,
             commands::discover_browser_profiles,
             commands::get_desktop_preferences,
+            commands::get_desktop_runtime_status,
             commands::update_desktop_preferences,
+            commands::hide_to_tray,
+            commands::quit_app,
             commands::get_onboarding_status,
             commands::complete_onboarding,
         ])

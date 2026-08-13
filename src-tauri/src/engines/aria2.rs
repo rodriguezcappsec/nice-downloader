@@ -104,7 +104,7 @@ pub fn prepare_direct(
             "The direct-download output already exists. Choose overwrite or a different destination.",
         ));
     }
-    if let Ok(executable) = which::which("aria2c") {
+    if let Some(executable) = crate::engines::managed::resolve("aria2c") {
         let mut args = vec![
             "--continue=true".to_owned(),
             "--max-tries=12".to_owned(),
@@ -137,7 +137,7 @@ pub fn prepare_direct(
         });
     }
 
-    let executable = which::which("curl").map_err(|_| {
+    let executable = crate::engines::managed::resolve("curl").ok_or_else(|| {
         AppError::new(
             "transfer_engine_not_found",
             "A direct download requires aria2c or curl, but neither executable was found in PATH.",

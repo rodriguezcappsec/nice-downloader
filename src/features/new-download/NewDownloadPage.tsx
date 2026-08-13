@@ -292,7 +292,7 @@ export function NewDownloadPage() {
       const text = await navigator.clipboard.readText();
       if (text.trim()) {
         setUrl(text.trim());
-        if (analysis || batchAnalysis) clearAnalysis();
+        if (analysis || batchAnalysis || analyzing) clearAnalysis();
       }
     } catch {
       // Clipboard permission is controlled by the desktop environment.
@@ -400,7 +400,7 @@ export function NewDownloadPage() {
               value={url}
               onChange={(event) => {
                 setUrl(event.target.value);
-                if (analysis || batchAnalysis) clearAnalysis();
+                if (analysis || batchAnalysis || analyzing) clearAnalysis();
               }}
               onKeyDown={(event) => {
                 if (event.key === "Enter" && !event.shiftKey && inputUrls.length === 1 && !analyzing) {

@@ -37,6 +37,8 @@ use uuid::Uuid;
 use std::os::unix::process::CommandExt;
 
 const JOB_EVENT: &str = "download-job-updated";
+const JOB_REMOVED_EVENT: &str = "download-job-removed";
+const QUEUE_EVENT: &str = "download-queue-updated";
 const MAX_JOB_DIAGNOSTIC_LINES: usize = 80;
 
 #[derive(Clone)]
@@ -44,6 +46,9 @@ pub struct QueueManager {
     jobs: Arc<RwLock<HashMap<String, DownloadJob>>>,
     requests: Arc<RwLock<HashMap<String, StartDownloadRequest>>>,
     cancellations: Arc<Mutex<HashMap<String, CancellationToken>>>,
+    retry_cancellations: Arc<Mutex<HashMap<String, CancellationToken>>>,
+    retry_claims: Arc<Mutex<HashSet<String>>>,
+    enqueue_lock: Arc<Mutex<()>>,
     pending_recovery: Arc<Mutex<Vec<String>>>,
     scheduler: Arc<Mutex<SchedulerState>>,
     scheduler_notify: Arc<Notify>,
@@ -84,6 +89,9 @@ impl QueueManager {
             jobs: Arc::new(RwLock::new(jobs)),
             requests: Arc::new(RwLock::new(requests)),
             cancellations: Arc::new(Mutex::new(HashMap::new())),
+            retry_cancellations: Arc::new(Mutex::new(HashMap::new())),
+            retry_claims: Arc::new(Mutex::new(HashSet::new())),
+            enqueue_lock: Arc::new(Mutex::new(())),
             pending_recovery: Arc::new(Mutex::new(pending_recovery)),
             scheduler: Arc::new(Mutex::new(SchedulerState {
                 pending: VecDeque::new(),
@@ -138,43 +146,51 @@ impl QueueManager {
         job_id: &str,
         preferences: EnginePreferences,
     ) -> Result<DownloadJob, AppError> {
-        let previous = self
-            .jobs
-            .read()
-            .await
-            .get(job_id)
-            .cloned()
-            .ok_or_else(|| AppError::new("job_not_found", "The download job was not found."))?;
-        if !matches!(
-            previous.state,
-            DownloadState::Failed | DownloadState::Cancelled
-        ) {
+        self.cancel_scheduled_retry(job_id).await;
+        if !self.retry_claims.lock().await.insert(job_id.to_owned()) {
             return Err(AppError::new(
-                "job_not_retryable",
-                "Only failed or cancelled downloads can be retried.",
+                "retry_in_progress",
+                "A retry is already being prepared for this download.",
             ));
         }
-        let request = self
-            .requests
-            .read()
+        let result = async {
+            let previous =
+                self.jobs.read().await.get(job_id).cloned().ok_or_else(|| {
+                    AppError::new("job_not_found", "The download job was not found.")
+                })?;
+            if !matches!(
+                previous.state,
+                DownloadState::Failed | DownloadState::Cancelled
+            ) {
+                return Err(AppError::new(
+                    "job_not_retryable",
+                    "Only failed or cancelled downloads can be retried.",
+                ));
+            }
+            let request = self
+                .requests
+                .read()
+                .await
+                .get(job_id)
+                .cloned()
+                .ok_or_else(|| {
+                    AppError::new(
+                        "retry_unavailable",
+                        "The original download options are no longer available.",
+                    )
+                })?;
+            self.enqueue_with_lineage(
+                app,
+                resume_capable_request(request),
+                preferences,
+                previous.attempt_count.saturating_add(1),
+                Some(previous.id),
+            )
             .await
-            .get(job_id)
-            .cloned()
-            .ok_or_else(|| {
-                AppError::new(
-                    "retry_unavailable",
-                    "The original download options are no longer available.",
-                )
-            })?;
-        let request = resume_capable_request(request);
-        self.enqueue_with_lineage(
-            app,
-            request,
-            preferences,
-            previous.attempt_count.saturating_add(1),
-            Some(previous.id),
-        )
-        .await
+        }
+        .await;
+        self.retry_claims.lock().await.remove(job_id);
+        result
     }
 
     pub async fn repeat(
@@ -201,19 +217,37 @@ impl QueueManager {
         validate_engine_preferences(&preferences)?;
         let destination = validate_destination(&request.options.destination)?;
         validate_destination_writable(&destination)?;
-        if request.options.output_conflict_policy == crate::models::OutputConflictPolicy::Skip
-            && self
-                .database
-                .has_completed_duplicate(&request.url, &request.options.destination)?
-        {
-            return Err(AppError::new(
-                "duplicate_download",
-                "This URL was already downloaded to the selected destination. Choose overwrite to download it again.",
-            ));
-        }
         let prepared = router::prepare_download(&request, &preferences).await?;
 
         preflight_disk_space(&destination, request_estimated_bytes(&request))?;
+
+        let _enqueue_guard = self.enqueue_lock.lock().await;
+        if let Some(parent_id) = retry_of_id.as_deref() {
+            let is_retry = self.retry_claims.lock().await.contains(parent_id);
+            if is_retry && !self.jobs.read().await.contains_key(parent_id) {
+                return Err(AppError::new(
+                    "retry_source_removed",
+                    "The original download record was removed before the retry could start.",
+                ));
+            }
+        }
+        if request.options.output_conflict_policy == crate::models::OutputConflictPolicy::Skip {
+            let already_queued = self.jobs.read().await.values().any(|job| {
+                !is_terminal_state(job.state)
+                    && job.url == request.url
+                    && job.destination == request.options.destination
+            });
+            if already_queued
+                || self
+                    .database
+                    .has_completed_duplicate(&request.url, &request.options.destination)?
+            {
+                return Err(AppError::new(
+                    "duplicate_download",
+                    "This URL is already queued or was downloaded to the selected destination. Choose overwrite to download it again.",
+                ));
+            }
+        }
 
         let id = Uuid::new_v4().to_string();
         let mut job = DownloadJob::from_request(id.clone(), &request);
@@ -234,10 +268,11 @@ impl QueueManager {
 
         self.scheduler.lock().await.pending.push_back(id.clone());
         self.scheduler_notify.notify_waiters();
+        emit_queue(&app, &self.snapshot().await);
 
         let queue = self.clone();
         let context = JobRunContext {
-            app,
+            app: app.clone(),
             id,
             destination,
             prepared,
@@ -247,7 +282,7 @@ impl QueueManager {
         tokio::spawn(async move {
             let id = context.id.clone();
             queue.run_job(context).await;
-            queue.release_slot(&id).await;
+            queue.release_slot(&app, &id).await;
         });
         Ok(job)
     }
@@ -275,12 +310,13 @@ impl QueueManager {
         }
         self.scheduler.lock().await.pending.push_back(id.clone());
         self.scheduler_notify.notify_waiters();
+        emit_queue(&app, &self.snapshot().await);
         let queue = self.clone();
         tokio::spawn(async move {
             let run_id = id.clone();
             queue
                 .run_job(JobRunContext {
-                    app,
+                    app: app.clone(),
                     id,
                     destination,
                     prepared,
@@ -288,12 +324,20 @@ impl QueueManager {
                     scheduled_for: request.scheduled_for,
                 })
                 .await;
-            queue.release_slot(&run_id).await;
+            queue.release_slot(&app, &run_id).await;
         });
         Ok(())
     }
 
-    pub async fn cancel(&self, job_id: &str) -> Result<(), AppError> {
+    pub async fn cancel(&self, app: &AppHandle, job_id: &str) -> Result<(), AppError> {
+        if let Some(token) = self.retry_cancellations.lock().await.remove(job_id) {
+            token.cancel();
+            self.update_job(app, job_id, |job| {
+                job.current_operation = "Automatic retry cancelled".to_owned();
+            })
+            .await;
+            return Ok(());
+        }
         let token = self.cancellations.lock().await.get(job_id).cloned();
         if let Some(token) = token {
             token.cancel();
@@ -342,6 +386,7 @@ impl QueueManager {
             }
         }
         for id in &unique {
+            self.cancel_scheduled_retry(id).await;
             self.database.dismiss_download_record(id)?;
         }
         {
@@ -355,21 +400,46 @@ impl QueueManager {
         Ok(unique)
     }
 
+    pub async fn delete_history_entry(
+        &self,
+        app: &AppHandle,
+        job_id: &str,
+    ) -> Result<(), AppError> {
+        self.cancel_scheduled_retry(job_id).await;
+        self.database.delete_history_entry(job_id)?;
+        self.jobs.write().await.remove(job_id);
+        self.requests.write().await.remove(job_id);
+        if let Err(error) = app.emit(JOB_REMOVED_EVENT, job_id) {
+            tracing::warn!(job_id, %error, "could not emit removed job update");
+        }
+        Ok(())
+    }
+
     pub async fn list(&self) -> Vec<DownloadJob> {
         let mut jobs: Vec<_> = self.jobs.read().await.values().cloned().collect();
         jobs.sort_by_key(|job| Reverse(job.created_at));
         jobs
     }
 
+    pub async fn non_terminal_urls(&self) -> HashSet<String> {
+        self.jobs
+            .read()
+            .await
+            .values()
+            .filter(|job| !is_terminal_state(job.state))
+            .map(|job| job.url.clone())
+            .collect()
+    }
+
     pub async fn snapshot(&self) -> QueueSnapshot {
         let scheduler = self.scheduler.lock().await;
         let mut active_job_ids = scheduler.active.iter().cloned().collect::<Vec<_>>();
         active_job_ids.sort();
-        QueueSnapshot {
-            settings: scheduler.settings.clone(),
-            ordered_job_ids: scheduler.pending.iter().cloned().collect(),
+        QueueSnapshot::new(
+            scheduler.settings.clone(),
+            scheduler.pending.iter().cloned().collect(),
             active_job_ids,
-        }
+        )
     }
 
     pub async fn update_settings(
@@ -386,11 +456,11 @@ impl QueueManager {
             let mut scheduler = self.scheduler.lock().await;
             settings.concurrent_downloads = settings.concurrent_downloads.clamp(1, 8);
             scheduler.settings = settings.clone();
-            QueueSnapshot {
-                settings: settings.clone(),
-                ordered_job_ids: scheduler.pending.iter().cloned().collect(),
-                active_job_ids: scheduler.active.iter().cloned().collect(),
-            }
+            QueueSnapshot::new(
+                settings.clone(),
+                scheduler.pending.iter().cloned().collect(),
+                scheduler.active.iter().cloned().collect(),
+            )
         };
         self.database.save_queue_settings(&settings)?;
         self.scheduler_notify.notify_waiters();
@@ -417,11 +487,11 @@ impl QueueManager {
         };
         let index = new_index.min(scheduler.pending.len());
         scheduler.pending.insert(index, id);
-        let snapshot = QueueSnapshot {
-            settings: scheduler.settings.clone(),
-            ordered_job_ids: scheduler.pending.iter().cloned().collect(),
-            active_job_ids: scheduler.active.iter().cloned().collect(),
-        };
+        let snapshot = QueueSnapshot::new(
+            scheduler.settings.clone(),
+            scheduler.pending.iter().cloned().collect(),
+            scheduler.active.iter().cloned().collect(),
+        );
         drop(scheduler);
         self.scheduler_notify.notify_waiters();
         Ok(snapshot)
@@ -507,6 +577,7 @@ impl QueueManager {
 
     async fn wait_for_turn(
         &self,
+        app: &AppHandle,
         id: &str,
         cancellation: &CancellationToken,
         scheduled_for: Option<chrono::DateTime<Utc>>,
@@ -539,6 +610,13 @@ impl QueueManager {
                         scheduler.pending.remove(index);
                     }
                     scheduler.active.insert(id.to_owned());
+                    let snapshot = QueueSnapshot::new(
+                        scheduler.settings.clone(),
+                        scheduler.pending.iter().cloned().collect(),
+                        scheduler.active.iter().cloned().collect(),
+                    );
+                    drop(scheduler);
+                    emit_queue(app, &snapshot);
                     return true;
                 }
             }
@@ -555,7 +633,7 @@ impl QueueManager {
         }
     }
 
-    async fn release_slot(&self, id: &str) {
+    async fn release_slot(&self, app: &AppHandle, id: &str) {
         let mut scheduler = self.scheduler.lock().await;
         scheduler.active.remove(id);
         if let Some(index) = scheduler.pending.iter().position(|item| item == id) {
@@ -565,6 +643,7 @@ impl QueueManager {
         self.process_ids.lock().await.remove(id);
         self.paused_from.lock().await.remove(id);
         self.scheduler_notify.notify_waiters();
+        emit_queue(app, &self.snapshot().await);
     }
 
     async fn run_job(&self, context: JobRunContext) {
@@ -576,7 +655,10 @@ impl QueueManager {
             cancellation,
             scheduled_for,
         } = context;
-        if !self.wait_for_turn(&id, &cancellation, scheduled_for).await {
+        if !self
+            .wait_for_turn(&app, &id, &cancellation, scheduled_for)
+            .await
+        {
             self.transition_cancelled(&app, &id).await;
             return;
         }
@@ -962,10 +1044,23 @@ impl QueueManager {
             );
         })
         .await;
+        let retry_cancellation = CancellationToken::new();
+        self.retry_cancellations
+            .lock()
+            .await
+            .insert(id.clone(), retry_cancellation.clone());
         let queue = self.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(delay).await;
+            tokio::select! {
+                _ = tokio::time::sleep(delay) => {}
+                _ = retry_cancellation.cancelled() => return,
+            }
+            queue.retry_cancellations.lock().await.remove(&id);
+            if !queue.retry_claims.lock().await.insert(id.clone()) {
+                return;
+            }
             let retry = queue
+                .clone()
                 .enqueue_boxed(
                     app,
                     request,
@@ -974,10 +1069,17 @@ impl QueueManager {
                     Some(id.clone()),
                 )
                 .await;
+            queue.retry_claims.lock().await.remove(&id);
             if let Err(error) = retry {
                 tracing::warn!(job_id = %id, %error, "automatic retry could not be queued");
             }
         });
+    }
+
+    async fn cancel_scheduled_retry(&self, job_id: &str) {
+        if let Some(token) = self.retry_cancellations.lock().await.remove(job_id) {
+            token.cancel();
+        }
     }
 
     fn enqueue_boxed(
@@ -1463,6 +1565,12 @@ fn emit_job(app: &AppHandle, job: &DownloadJob) {
     }
 }
 
+fn emit_queue(app: &AppHandle, snapshot: &QueueSnapshot) {
+    if let Err(error) = app.emit(QUEUE_EVENT, snapshot) {
+        tracing::warn!(%error, "could not emit queue update");
+    }
+}
+
 fn is_terminal_state(state: DownloadState) -> bool {
     matches!(
         state,
@@ -1565,6 +1673,15 @@ async fn terminate_child(child: &mut Child) {
             let _ = nix::sys::signal::killpg(group, nix::sys::signal::Signal::SIGKILL);
         }
     }
+    #[cfg(windows)]
+    if let Some(pid) = child.id() {
+        let mut taskkill = Command::new("taskkill.exe");
+        crate::utils::process::sanitize_tokio_command(&mut taskkill);
+        let _ = taskkill
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .status()
+            .await;
+    }
     let _ = child.start_kill();
     let _ = child.wait().await;
 }
@@ -1591,28 +1708,31 @@ fn send_completion_notification(_job: &DownloadJob) {
 }
 
 fn open_completed_folder(_job: &DownloadJob) {
+    let path = _job
+        .output_path
+        .as_ref()
+        .map(std::path::PathBuf::from)
+        .filter(|path| path.exists())
+        .unwrap_or_else(|| std::path::PathBuf::from(&_job.destination));
+    let folder = if path.is_file() {
+        path.parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or(path)
+    } else {
+        path
+    };
     #[cfg(target_os = "linux")]
-    {
-        let path = _job
-            .output_path
-            .as_ref()
-            .map(std::path::PathBuf::from)
-            .filter(|path| path.exists())
-            .unwrap_or_else(|| std::path::PathBuf::from(&_job.destination));
-        let folder = if path.is_file() {
-            path.parent()
-                .map(std::path::Path::to_path_buf)
-                .unwrap_or(path)
-        } else {
-            path
-        };
-        let Ok(mut child) = std::process::Command::new("xdg-open").arg(folder).spawn() else {
-            return;
-        };
-        std::thread::spawn(move || {
-            let _ = child.wait();
-        });
-    }
+    let command = "xdg-open";
+    #[cfg(target_os = "macos")]
+    let command = "open";
+    #[cfg(target_os = "windows")]
+    let command = "explorer.exe";
+    let Ok(mut child) = std::process::Command::new(command).arg(folder).spawn() else {
+        return;
+    };
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
 }
 
 #[cfg(test)]

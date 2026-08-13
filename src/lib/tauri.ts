@@ -31,6 +31,8 @@ import type {
   SaveAuthenticationProfileRequest,
   BrowserProfileInfo,
   DesktopPreferences,
+  DesktopRuntimeStatus,
+  BatchDownloadResult,
   OnboardingStatus,
   StartDownloadRequest,
 } from "../types";
@@ -59,7 +61,7 @@ export const api = {
   startDownload: (request: StartDownloadRequest) =>
     invoke<DownloadJob>("start_download", { request }),
   startDownloads: (requests: StartDownloadRequest[]) =>
-    invoke<DownloadJob[]>("start_downloads", { requests }),
+    invoke<BatchDownloadResult>("start_downloads", { requests }),
   cancelDownload: (jobId: string) => invoke<void>("cancel_download", { jobId }),
   dismissDownloads: (jobIds: string[]) => invoke<string[]>("dismiss_downloads", { jobIds }),
   retryDownload: (jobId: string) => invoke<DownloadJob>("retry_download", { jobId }),
@@ -113,7 +115,10 @@ export const api = {
   deleteAuthenticationProfile: (id: string) => invoke<void>("delete_authentication_profile", { id }),
   discoverBrowserProfiles: () => invoke<BrowserProfileInfo[]>("discover_browser_profiles"),
   getDesktopPreferences: () => invoke<DesktopPreferences>("get_desktop_preferences"),
+  getDesktopRuntimeStatus: () => invoke<DesktopRuntimeStatus>("get_desktop_runtime_status"),
   updateDesktopPreferences: (preferences: DesktopPreferences) => invoke<DesktopPreferences>("update_desktop_preferences", { preferences }),
+  hideToTray: () => invoke<void>("hide_to_tray"),
+  quitApp: () => invoke<void>("quit_app"),
   getOnboardingStatus: () => invoke<OnboardingStatus>("get_onboarding_status"),
   completeOnboarding: () => invoke<void>("complete_onboarding"),
   openDownloadOutput: (jobId: string, reveal: boolean) =>
@@ -121,6 +126,10 @@ export const api = {
   exportDiagnostics: (path: string) => invoke<void>("export_diagnostics", { path }),
   onJobUpdated: (handler: (job: DownloadJob) => void): Promise<UnlistenFn> =>
     listen<DownloadJob>("download-job-updated", (event) => handler(event.payload)),
+  onJobRemoved: (handler: (jobId: string) => void): Promise<UnlistenFn> =>
+    listen<string>("download-job-removed", (event) => handler(event.payload)),
+  onQueueUpdated: (handler: (queue: QueueSnapshot) => void): Promise<UnlistenFn> =>
+    listen<QueueSnapshot>("download-queue-updated", (event) => handler(event.payload)),
   onTransformationUpdated: (handler: (task: TransformationTask) => void): Promise<UnlistenFn> =>
     listen<TransformationTask>("transformation-task-updated", (event) => handler(event.payload)),
 };

@@ -37,7 +37,7 @@ impl YtDlpEngine {
         let executable = crate::engines::managed::resolve("yt-dlp").ok_or_else(|| {
             AppError::new(
                 "engine_not_found",
-                "yt-dlp is not installed or could not be found in PATH.",
+                "No bundled or managed yt-dlp was available, and it could not be found on this system. Reinstall Nice Downloader or install yt-dlp.",
             )
         })?;
         Ok(Self { executable })

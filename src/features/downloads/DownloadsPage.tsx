@@ -71,9 +71,10 @@ export function DownloadsPage({ queueOnly = false }: { queueOnly?: boolean }) {
             <input
               type="checkbox"
               checked={queue.settings.notifyOnCompletion}
+              disabled={!queue.completionNotificationsSupported}
               onChange={(event) => void updateQueue({ ...queue.settings, notifyOnCompletion: event.target.checked })}
             />
-            Desktop notification on completion
+            {queue.completionNotificationsSupported ? "Desktop notification on completion" : "Desktop notifications unavailable on this platform"}
           </label>
           <label className="flex items-center gap-2 text-xs text-muted">
             After each download
@@ -115,6 +116,7 @@ export function DownloadsPage({ queueOnly = false }: { queueOnly?: boolean }) {
             onRetry={() => void retry(job.id)}
             onPause={() => void pause(job.id)}
             onResume={() => void resume(job.id)}
+            pauseSupported={queue.pauseSupported || !queue.activeJobIds.includes(job.id)}
             onReveal={() => void api.openDownloadOutput(job.id, true).catch((error) => setError(normalizeError(error)))}
             selected={selectedJobIds.includes(job.id)}
             onSelect={(selected) => setSelectedJobIds((current) => selected ? [...new Set([...current, job.id])] : current.filter((id) => id !== job.id))}
@@ -135,19 +137,21 @@ export function DownloadsPage({ queueOnly = false }: { queueOnly?: boolean }) {
   );
 }
 
-function DownloadRow({ job, onCancel, onRetry, onPause, onResume, onReveal, onDismiss, selected, onSelect, queueControls }: {
+function DownloadRow({ job, onCancel, onRetry, onPause, onResume, onReveal, onDismiss, selected, onSelect, pauseSupported, queueControls }: {
   job: DownloadJob;
   onCancel: () => void;
   onRetry: () => void;
   onPause: () => void;
   onResume: () => void;
+  pauseSupported: boolean;
   onReveal: () => void;
   onDismiss: () => void;
   selected: boolean;
   onSelect: (selected: boolean) => void;
   queueControls?: { canMoveUp: boolean; canMoveDown: boolean; moveUp: () => void; moveDown: () => void; moveTo: (jobId: string, targetIndex: number) => void; targetIndex: number };
 }) {
-  const canCancel = !terminalStates.has(job.state);
+  const retryScheduled = job.currentOperation.toLocaleLowerCase().includes("automatic retry");
+  const canCancel = !terminalStates.has(job.state) || retryScheduled;
   const progressTone = job.state === "Failed" ? "red" : job.state === "Completed" ? "green" : job.currentOperation.toLocaleLowerCase().includes("retry") ? "amber" : "blue";
   return (
     <article
@@ -180,13 +184,15 @@ function DownloadRow({ job, onCancel, onRetry, onPause, onResume, onReveal, onDi
         <div className="mt-1">{job.speedBytesPerSecond != null ? `ETA ${formatEta(job.etaSeconds)}` : job.downloadedBytes != null ? formatBytes(job.downloadedBytes) : "—"}</div>
       </div>
       <div className="flex justify-end gap-1">
-          {canCancel ? (
+          {retryScheduled ? (
+            <Button variant="danger" className="h-8 px-2.5" onClick={onCancel}><Ban size={14} /> Cancel retry</Button>
+          ) : canCancel ? (
             <>
               {queueControls ? <>
                 <Button variant="ghost" className="h-8 px-2" disabled={!queueControls.canMoveUp} onClick={queueControls.moveUp} aria-label="Move up"><ArrowUp size={14} /></Button>
                 <Button variant="ghost" className="h-8 px-2" disabled={!queueControls.canMoveDown} onClick={queueControls.moveDown} aria-label="Move down"><ArrowDown size={14} /></Button>
               </> : null}
-              <Button variant="ghost" className="h-8 px-2" onClick={job.state === "Paused" ? onResume : onPause} aria-label={job.state === "Paused" ? "Resume" : "Pause"}>
+              <Button variant="ghost" className="h-8 px-2" disabled={!pauseSupported} onClick={job.state === "Paused" ? onResume : onPause} aria-label={pauseSupported ? (job.state === "Paused" ? "Resume" : "Pause") : "Pausing active downloads is unavailable on this platform"}>
                 {job.state === "Paused" ? <Play size={14} /> : <Pause size={14} />}
               </Button>
               <Button variant="danger" className="h-8 px-2" onClick={onCancel} aria-label="Stop and keep partial file"><Ban size={14} /></Button>

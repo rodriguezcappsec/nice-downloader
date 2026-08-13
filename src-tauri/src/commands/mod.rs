@@ -1,3 +1,4 @@
+use crate::DesktopRuntimeState;
 use crate::{
     authentication,
     database::Database,
@@ -11,13 +12,14 @@ use crate::{
     errors::AppError,
     library,
     models::{
-        AuthenticationProfile, BatchAnalysisItem, BatchAnalysisResponse, BrowserProfileInfo,
-        DesktopPreferences, DiskSpaceInfo, DownloadArchiveMatch, DownloadJob, EngineId, EngineInfo,
-        EnginePreferences, GalleryItemList, LibraryItem, LibraryScanResult, MediaAnalysis,
-        OnboardingStatus, Preset, QueueSettings, QueueSnapshot, SaveAuthenticationProfileRequest,
-        SavePresetRequest, SaveSitePresetRuleRequest, SaveSubscriptionRequest, SitePresetRule,
-        StartDownloadRequest, StartTransformationRequest, Subscription, SubscriptionCheckResult,
-        TransformationTask, UpdateLibraryItemRequest,
+        AuthenticationProfile, BatchAnalysisItem, BatchAnalysisResponse, BatchDownloadFailure,
+        BatchDownloadResult, BrowserProfileInfo, DesktopPreferences, DesktopRuntimeStatus,
+        DiskSpaceInfo, DownloadArchiveMatch, DownloadJob, EngineId, EngineInfo, EnginePreferences,
+        GalleryItemList, LibraryItem, LibraryScanResult, MediaAnalysis, OnboardingStatus, Preset,
+        QueueSettings, QueueSnapshot, SaveAuthenticationProfileRequest, SavePresetRequest,
+        SaveSitePresetRuleRequest, SaveSubscriptionRequest, SitePresetRule, StartDownloadRequest,
+        StartTransformationRequest, Subscription, SubscriptionCheckResult, TransformationTask,
+        UpdateLibraryItemRequest,
     },
     queue::{disk_space, QueueManager},
     subscriptions,
@@ -143,11 +145,49 @@ pub fn get_desktop_preferences(
 }
 
 #[tauri::command]
+pub fn get_desktop_runtime_status(runtime: State<'_, DesktopRuntimeState>) -> DesktopRuntimeStatus {
+    DesktopRuntimeStatus {
+        tray_available: runtime.tray_available,
+    }
+}
+
+#[tauri::command]
+pub fn hide_to_tray(
+    app: AppHandle,
+    runtime: State<'_, DesktopRuntimeState>,
+) -> Result<(), AppError> {
+    if !runtime.tray_available {
+        return Err(AppError::new(
+            "tray_unavailable",
+            "The system tray is unavailable. Choose Quit application in Desktop settings.",
+        ));
+    }
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| AppError::new("window_unavailable", "The main window is unavailable."))?;
+    window
+        .hide()
+        .map_err(|error| AppError::internal("could not hide the main window", error))
+}
+
+#[tauri::command]
+pub fn quit_app(app: AppHandle) {
+    app.exit(0);
+}
+
+#[tauri::command]
 pub async fn update_desktop_preferences(
     database: State<'_, Database>,
     queue: State<'_, QueueManager>,
-    preferences: DesktopPreferences,
+    runtime: State<'_, DesktopRuntimeState>,
+    mut preferences: DesktopPreferences,
 ) -> Result<DesktopPreferences, AppError> {
+    if !runtime.tray_available {
+        preferences.start_minimized = false;
+        if preferences.close_behavior == crate::models::CloseBehavior::Background {
+            preferences.close_behavior = crate::models::CloseBehavior::Quit;
+        }
+    }
     database.save_desktop_preferences(&preferences)?;
     let mut queue_settings = queue.snapshot().await.settings;
     queue_settings.notify_on_completion = preferences.notify_when_backgrounded;
@@ -403,28 +443,39 @@ pub async fn start_downloads(
     queue: State<'_, QueueManager>,
     database: State<'_, Database>,
     requests: Vec<StartDownloadRequest>,
-) -> Result<Vec<DownloadJob>, AppError> {
+) -> Result<BatchDownloadResult, AppError> {
     if requests.is_empty() || requests.len() > MAX_BATCH_URLS {
         return Err(AppError::new(
             "invalid_batch_download",
             format!("Queue between 1 and {MAX_BATCH_URLS} downloads at a time."),
         ));
     }
+    let base_preferences = database.load_engine_preferences()?;
     let mut jobs = Vec::with_capacity(requests.len());
+    let mut failures = Vec::new();
     for request in requests {
-        let mut preferences = database.load_engine_preferences()?;
-        authentication::apply_profile(&database, &request.url, &mut preferences)?;
-        jobs.push(queue.enqueue(app.clone(), request, preferences).await?);
+        let url = request.url.clone();
+        let mut preferences = base_preferences.clone();
+        if let Err(error) = authentication::apply_profile(&database, &request.url, &mut preferences)
+        {
+            failures.push(BatchDownloadFailure { url, error });
+            continue;
+        }
+        match queue.enqueue(app.clone(), request, preferences).await {
+            Ok(job) => jobs.push(job),
+            Err(error) => failures.push(BatchDownloadFailure { url, error }),
+        }
     }
-    Ok(jobs)
+    Ok(BatchDownloadResult { jobs, failures })
 }
 
 #[tauri::command]
 pub async fn cancel_download(
+    app: AppHandle,
     queue: State<'_, QueueManager>,
     job_id: String,
 ) -> Result<(), AppError> {
-    queue.cancel(&job_id).await
+    queue.cancel(&app, &job_id).await
 }
 
 #[tauri::command]
@@ -495,8 +546,12 @@ pub fn list_history(database: State<'_, Database>) -> Result<Vec<DownloadJob>, A
 }
 
 #[tauri::command]
-pub fn delete_history_entry(database: State<'_, Database>, id: String) -> Result<(), AppError> {
-    database.delete_history_entry(&id)
+pub async fn delete_history_entry(
+    app: AppHandle,
+    queue: State<'_, QueueManager>,
+    id: String,
+) -> Result<(), AppError> {
+    queue.delete_history_entry(&app, &id).await
 }
 
 #[tauri::command]
@@ -657,7 +712,14 @@ pub fn open_download_output(
         ));
     }
     let target = if reveal && path.is_file() {
-        path.parent().unwrap_or(&path)
+        #[cfg(target_os = "windows")]
+        {
+            path.as_path()
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            path.parent().unwrap_or(&path)
+        }
     } else {
         path.as_path()
     };

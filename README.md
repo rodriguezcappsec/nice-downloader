@@ -94,21 +94,23 @@ Nice Downloader also provides:
 
 ## Media engines
 
-Nice Downloader detects executables from `PATH` and shows their versions under
-**Settings → Engines & diagnostics**.
+Release builds ship verified, pinned copies of the core engines and show their versions under
+**Settings → Engines & diagnostics**. Development builds also detect managed
+engines, `PATH`, and standard user bin folders.
 
 | Engine | Requirement | Purpose |
 | --- | --- | --- |
-| `yt-dlp` | Required for media sites | Analysis and media extraction |
-| `ffmpeg` | Strongly recommended | Audio/video merging and post-processing |
-| `ffprobe` | Strongly recommended | Output verification and media inspection |
-| `gallery-dl` | Optional | Bunkr and future gallery integrations |
+| `yt-dlp` | Bundled | Analysis and media extraction |
+| `ffmpeg` | Bundled | Audio/video merging and post-processing |
+| `ffprobe` | Bundled | Output verification and media inspection |
+| `gallery-dl` | Bundled | Bunkr and future gallery integrations |
 | `aria2c` | Optional | Preferred direct HTTP transfer engine |
 | `curl` | Optional fallback | Direct HTTP transfers when aria2c is unavailable |
 
-The application does not bundle every engine into each package. Install the
-required tools through your operating system, or use the managed-engine controls
-available for yt-dlp and gallery-dl.
+`aria2c` remains an optional system accelerator; curl is used when available.
+Developers can stage the pinned sidecars with `npm run engines:prepare`. The
+generated binaries are ignored by Git and assembled by release CI from the
+checksummed sources in `engines.lock.json`.
 
 ## Quick start
 

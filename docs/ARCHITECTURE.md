@@ -131,4 +131,9 @@ The tray and desktop settings form a small platform boundary. Window close polic
 
 ## Remaining extension points
 
-The gallery-dl route can expand beyond Bunkr. FFmpeg remains system-managed until a portable, verifiable distribution policy is selected. Platform packaging, non-Linux pause/notification adapters, and custom arguments remain later work. Additional authenticated-site support should extend typed access preferences rather than exposing arbitrary engine flags.
+The gallery-dl route can expand beyond Bunkr. Release builds stage pinned,
+SHA-256-verified yt-dlp, gallery-dl, FFmpeg, and ffprobe resources. Runtime
+resolution prefers app-managed updates, then the bundled baseline, then host
+installations. Platform packaging, non-Linux pause/notification adapters, and
+custom arguments remain later work. Additional authenticated-site support should
+extend typed access preferences rather than exposing arbitrary engine flags.

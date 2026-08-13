@@ -1,0 +1,45 @@
+{
+  "$schema": "./docs/engine-lock.schema.json",
+  "ytDlp": {
+    "version": "2026.07.04",
+    "linuxX64": {
+      "url": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.07.04/yt-dlp_linux",
+      "sha256": "6bbb3d314cde4febe36e5fa1d55462e29c974f63444e707871834f6d8cc210ae"
+    },
+    "windowsX64": {
+      "url": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.07.04/yt-dlp.exe",
+      "sha256": "52fe3c26dcf71fbdc85b528589020bb0b8e383155cfa81b64dd447bbe35e24b8"
+    }
+  },
+  "galleryDl": {
+    "version": "1.32.9",
+    "wheel": {
+      "url": "https://files.pythonhosted.org/packages/4e/0b/766ddfd2035b6fb354b57fe4cdf620cd84f9eba3efe5701049a93602a7e4/gallery_dl-1.32.9-py3-none-any.whl",
+      "sha256": "271d18fed61e0b9f006d4944be59341b9af136576382e237aa08ba6d060a0e9a"
+    },
+    "pyinstallerVersion": "6.22.0"
+  },
+  "ffmpeg": {
+    "version": "6.1",
+    "linuxX64": {
+      "ffmpeg": {
+        "url": "https://github.com/vot/ffbinaries-prebuilt/releases/download/v6.1/ffmpeg-6.1-linux-64.zip",
+        "sha256": "8bb4a27f5fd02f3dd9a5e75c9eddf6ace1d50a08929ee0d20bbf17eb467fb711"
+      },
+      "ffprobe": {
+        "url": "https://github.com/vot/ffbinaries-prebuilt/releases/download/v6.1/ffprobe-6.1-linux-64.zip",
+        "sha256": "cb690c360042b51d9e901db2b0185c585330c1067b5c5edf0b6a5e26e0375e2a"
+      }
+    },
+    "windowsX64": {
+      "ffmpeg": {
+        "url": "https://github.com/vot/ffbinaries-prebuilt/releases/download/v6.1/ffmpeg-6.1-win-64.zip",
+        "sha256": "b0fb4bcef9d4b5f7a77d2e4854f80d4ce3e43809bc29fd1f97caa1b467f96993"
+      },
+      "ffprobe": {
+        "url": "https://github.com/vot/ffbinaries-prebuilt/releases/download/v6.1/ffprobe-6.1-win-64.zip",
+        "sha256": "3c0ea2856cf65edff23a2d4e76b1ceabba65fe8b1bed684ee2eeba24aa9427c3"
+      }
+    }
+  }
+}

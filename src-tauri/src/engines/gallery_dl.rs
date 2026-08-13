@@ -34,7 +34,7 @@ impl GalleryDlEngine {
         let executable = crate::engines::managed::resolve("gallery-dl").ok_or_else(|| {
             AppError::new(
                 "engine_not_found",
-                "gallery-dl is required for Bunkr albums but was not found in PATH. Install gallery-dl, then use Settings > Engines to detect it.",
+                "No bundled or managed gallery-dl was available, and it was not found on this system. Reinstall Nice Downloader or install gallery-dl, then refresh Settings > Engines.",
             )
         })?;
         Ok(Self { executable })
