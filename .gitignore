@@ -7,3 +7,12 @@ src-tauri/gen/
 .vscode/
 .DS_Store
 .serena/
+.cache/bundled-engines/
+src-tauri/resources/engines/yt-dlp
+src-tauri/resources/engines/yt-dlp.exe
+src-tauri/resources/engines/gallery-dl
+src-tauri/resources/engines/gallery-dl.exe
+src-tauri/resources/engines/ffmpeg
+src-tauri/resources/engines/ffmpeg.exe
+src-tauri/resources/engines/ffprobe
+src-tauri/resources/engines/ffprobe.exe

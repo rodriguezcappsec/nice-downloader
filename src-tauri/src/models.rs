@@ -654,6 +654,12 @@ pub struct DesktopPreferences {
     pub notify_when_backgrounded: bool,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopRuntimeStatus {
+    pub tray_available: bool,
+}
+
 impl Default for DesktopPreferences {
     fn default() -> Self {
         Self {
@@ -678,6 +684,38 @@ pub struct QueueSnapshot {
     pub settings: QueueSettings,
     pub ordered_job_ids: Vec<String>,
     pub active_job_ids: Vec<String>,
+    pub pause_supported: bool,
+    pub completion_notifications_supported: bool,
+}
+
+impl QueueSnapshot {
+    pub fn new(
+        settings: QueueSettings,
+        ordered_job_ids: Vec<String>,
+        active_job_ids: Vec<String>,
+    ) -> Self {
+        Self {
+            settings,
+            ordered_job_ids,
+            active_job_ids,
+            pause_supported: cfg!(unix),
+            completion_notifications_supported: cfg!(target_os = "linux"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchDownloadFailure {
+    pub url: String,
+    pub error: crate::errors::AppError,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchDownloadResult {
+    pub jobs: Vec<DownloadJob>,
+    pub failures: Vec<BatchDownloadFailure>,
 }
 
 #[derive(Debug, Clone, Serialize)]

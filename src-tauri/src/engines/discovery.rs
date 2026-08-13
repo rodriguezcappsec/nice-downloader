@@ -78,10 +78,10 @@ async fn detect(definition: EngineDefinition) -> EngineInfo {
                 version: None,
                 required: definition.required,
                 status_message: match definition.id {
-                    EngineId::GalleryDl => "gallery-dl was not found in PATH. Install it to enable Bunkr album downloads.".to_owned(),
+                    EngineId::GalleryDl => "No bundled or managed gallery-dl was available, and it was not found in PATH or a standard user bin directory.".to_owned(),
                     EngineId::Aria2 => "aria2c was not found; direct downloads will use curl when available.".to_owned(),
                     EngineId::Curl => "curl was not found; install aria2c or curl for direct downloads.".to_owned(),
-                    _ => format!("{} was not found in PATH", definition.executable),
+                    _ => format!("No bundled {} was available, and it was not found in PATH or a standard user bin directory", definition.executable),
                 },
                 capabilities: match definition.id {
                     EngineId::GalleryDl => vec![EngineCapability {

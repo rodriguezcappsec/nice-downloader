@@ -302,16 +302,17 @@ export function SettingsPage() {
               <div className="min-w-48 flex-1">
                 <h3 className="text-sm font-semibold">{item.engine === "ytDlp" ? "yt-dlp" : "gallery-dl"}</h3>
                 <p className="mt-1 text-xs text-muted">
-                  {item.activeVersion ? `Managed ${item.activeVersion} active` : "Using the executable from PATH"}
+                  {item.activeVersion ? `Managed ${item.activeVersion} active` : "Using the bundled baseline or a system executable"}
                   {item.pinned ? " · pinned" : ""}
                 </p>
               </div>
-              <Button variant="secondary" className="h-8 px-2.5" disabled={managing === item.engine} onClick={() => void checkUpdate(item.engine)}>
+              <Button variant="secondary" className="h-8 px-2.5" disabled={!item.supported || managing === item.engine} onClick={() => void checkUpdate(item.engine)}>
                 <RefreshCw className={managing === item.engine ? "animate-spin" : ""} size={14} /> Check
               </Button>
               <Button
                 variant="ghost"
                 className="h-8 px-2.5"
+                disabled={!item.supported}
                 onClick={() => void api.pinManagedEngine(item.engine, !item.pinned).then(replaceManaged).catch((error) => setError(normalizeError(error)))}
               >
                 {item.pinned ? "Unpin" : "Pin version"}
@@ -319,7 +320,7 @@ export function SettingsPage() {
               <Button
                 variant="ghost"
                 className="h-8 px-2.5"
-                disabled={!item.previousVersion}
+                disabled={!item.supported || !item.previousVersion}
                 onClick={() => void api.rollbackManagedEngine(item.engine).then((status) => { replaceManaged(status); void detect(); }).catch((error) => setError(normalizeError(error)))}
               >
                 <RotateCcw size={14} /> Roll back
@@ -338,7 +339,7 @@ export function SettingsPage() {
             </div>
           ) : null}
         </div>
-        <p className="mt-3 text-xs leading-5 text-muted">Managed files are checked against vendor-published SHA-256 manifests, version-tested, and retained for one-click rollback. FFmpeg remains system-managed.</p>
+        <p className="mt-3 text-xs leading-5 text-muted">Managed files are checked against vendor-published SHA-256 manifests, version-tested, and retained for one-click rollback. Release packages provide bundled engine baselines.</p>
       </section>
 
       <section>
@@ -382,7 +383,7 @@ export function SettingsPage() {
           ))}
           {!loading && engines.length === 0 ? <div className="p-5 text-sm text-muted">No engine status is available.</div> : null}
         </div>
-        <p className="mt-3 text-xs leading-5 text-muted">Managed yt-dlp/gallery-dl versions take priority over PATH. Other engines are discovered from PATH.</p>
+        <p className="mt-3 text-xs leading-5 text-muted">Resolution order: managed update, bundled baseline, then PATH and standard user executable folders. The executable path above shows the active source.</p>
         <div className="panel-shadow mt-5 flex items-center justify-between rounded-[10px] border border-line/60 bg-panel/70 p-4">
           <div><h3 className="text-sm font-semibold">Support diagnostics</h3><p className="mt-1 text-xs text-muted">Export engine status and sanitized recent errors. URLs, cookies, proxy values, and profile names are excluded.</p></div>
           <Button variant="secondary" onClick={() => void exportDiagnostics()}>Export diagnostics</Button>
@@ -397,10 +398,20 @@ function DesktopSettings() {
   const setError = useAppStore((state) => state.setError);
   const setNotice = useAppStore((state) => state.setNotice);
   const [preferences, setPreferences] = useState<DesktopPreferences | null>(null);
-  useEffect(() => { void api.getDesktopPreferences().then(setPreferences).catch((error) => setError(normalizeError(error))); }, [setError]);
+  const [trayAvailable, setTrayAvailable] = useState(true);
+  useEffect(() => {
+    void Promise.all([api.getDesktopPreferences(), api.getDesktopRuntimeStatus()])
+      .then(([saved, runtime]) => { setPreferences(saved); setTrayAvailable(runtime.trayAvailable); })
+      .catch((error) => setError(normalizeError(error)));
+  }, [setError]);
   async function saveDesktop() {
     if (!preferences) return;
-    try { setPreferences(await api.updateDesktopPreferences(preferences)); setNotice({ message: "Desktop behavior saved.", view: "settings" }); }
+    try {
+      const saved = await api.updateDesktopPreferences(preferences);
+      setPreferences(saved);
+      window.dispatchEvent(new CustomEvent("nice-downloader:desktop-preferences", { detail: saved }));
+      setNotice({ message: "Desktop behavior saved.", view: "settings" });
+    }
     catch (error) { setError(normalizeError(error)); }
   }
   if (!preferences) return <div className="p-8 text-sm text-muted">Loading desktop preferences…</div>;
@@ -408,8 +419,8 @@ function DesktopSettings() {
     <div className="mb-3 flex items-center gap-2"><Settings2 size={17} className="text-muted" /><h2 className="text-sm font-semibold">Desktop lifecycle</h2></div>
     <div className="panel-shadow border border-line/60 bg-panel/75 p-5">
       <div className="grid gap-5 md:grid-cols-2">
-        <Field label="When closing the window" hint="Background mode keeps the Rust queue alive and leaves the app available from the tray."><Select value={preferences.closeBehavior} onChange={(event) => setPreferences({ ...preferences, closeBehavior: event.target.value as DesktopPreferences["closeBehavior"] })}><option value="ask">Ask while downloads are active</option><option value="background">Keep running in system tray</option><option value="quit">Quit the application</option></Select></Field>
-        <div className="space-y-4 pt-1"><label className="flex items-start gap-3 text-sm text-muted"><input className="mt-1" type="checkbox" checked={preferences.startMinimized} onChange={(event) => setPreferences({ ...preferences, startMinimized: event.target.checked })} /><span><strong className="block font-medium text-ink">Start in the background</strong>Open from the system tray when ready.</span></label><label className="flex items-start gap-3 text-sm text-muted"><input className="mt-1" type="checkbox" checked={preferences.notifyWhenBackgrounded} onChange={(event) => setPreferences({ ...preferences, notifyWhenBackgrounded: event.target.checked })} /><span><strong className="block font-medium text-ink">Background completion notices</strong>Use desktop notifications when supported.</span></label></div>
+        <Field label="When closing the window" hint={trayAvailable ? "Background mode keeps the Rust queue alive and leaves the app available from the tray." : "The system tray is unavailable, so closing must quit the application."}><Select value={preferences.closeBehavior} onChange={(event) => setPreferences({ ...preferences, closeBehavior: event.target.value as DesktopPreferences["closeBehavior"] })}><option value="ask">Ask while downloads are active</option><option value="background" disabled={!trayAvailable}>Keep running in system tray</option><option value="quit">Quit the application</option></Select></Field>
+        <div className="space-y-4 pt-1"><label className="flex items-start gap-3 text-sm text-muted"><input className="mt-1" type="checkbox" disabled={!trayAvailable} checked={preferences.startMinimized && trayAvailable} onChange={(event) => setPreferences({ ...preferences, startMinimized: event.target.checked })} /><span><strong className="block font-medium text-ink">Start in the background</strong>Open from the system tray when ready.</span></label><label className="flex items-start gap-3 text-sm text-muted"><input className="mt-1" type="checkbox" checked={preferences.notifyWhenBackgrounded} onChange={(event) => setPreferences({ ...preferences, notifyWhenBackgrounded: event.target.checked })} /><span><strong className="block font-medium text-ink">Background completion notices</strong>Use desktop notifications when supported.</span></label></div>
       </div>
       <div className="mt-5 flex items-center justify-between border-t border-line/60 pt-4"><p className="text-xs text-muted">Network interruptions retain partial files and use bounded retry; interrupted jobs recover on the next launch.</p><Button onClick={() => void saveDesktop()}><Save size={15} /> Save desktop behavior</Button></div>
     </div>

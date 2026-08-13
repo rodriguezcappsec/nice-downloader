@@ -9,9 +9,12 @@ use crate::{
     },
     queue::QueueManager,
 };
-use std::time::Duration;
+use std::{sync::OnceLock, time::Duration};
 use tauri::AppHandle;
+use tokio::sync::Mutex;
 use tokio::time::{interval, MissedTickBehavior};
+
+static CHECK_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 pub fn spawn_scheduler(app: AppHandle, database: Database, queue: QueueManager) {
     tauri::async_runtime::spawn(async move {
@@ -43,6 +46,12 @@ pub async fn check_subscription(
     queue: &QueueManager,
     subscription_id: &str,
 ) -> Result<SubscriptionCheckResult, AppError> {
+    let Ok(_guard) = CHECK_LOCK.get_or_init(|| Mutex::new(())).try_lock() else {
+        return Err(AppError::new(
+            "subscription_check_in_progress",
+            "Another subscription check is already in progress.",
+        ));
+    };
     let subscription = database.load_subscription(subscription_id)?;
     let result = check_inner(app, database, queue, &subscription).await;
     match result {
@@ -97,6 +106,7 @@ async fn check_inner(
     let discovered_count = urls.len();
     let mut queued_count = 0;
     let mut skipped_count = 0;
+    let mut queued_urls = queue.non_terminal_urls().await;
 
     for url in urls {
         let mut entry_preferences = database.load_engine_preferences()?;
@@ -114,18 +124,23 @@ async fn check_inner(
         } else {
             analysis.download_url.clone()
         };
-        if database.has_completed_duplicate(&download_url, &subscription.destination)? {
+        if queued_urls.contains(&download_url)
+            || database.has_completed_duplicate(&download_url, &subscription.destination)?
+        {
             skipped_count += 1;
             continue;
         }
         let request = StartDownloadRequest {
-            url: download_url,
+            url: download_url.clone(),
             options: options_from_preset(&analysis, &preset.intent, &subscription.destination)?,
             analysis,
             scheduled_for: None,
         };
         match queue.enqueue(app.clone(), request, entry_preferences).await {
-            Ok(_) => queued_count += 1,
+            Ok(_) => {
+                queued_urls.insert(download_url);
+                queued_count += 1;
+            }
             Err(error) if error.code == "duplicate_download" => skipped_count += 1,
             Err(error) => return Err(error),
         }

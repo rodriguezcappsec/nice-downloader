@@ -58,6 +58,7 @@ interface AppStore {
 }
 
 const savedView = typeof window !== "undefined" ? window.localStorage.getItem("nice-downloader.view") as ViewId | null : null;
+let latestAnalysisRequest = "";
 
 export const useAppStore = create<AppStore>((set, get) => ({
   view: savedView && ["new", "downloads", "queue", "history", "subscriptions", "transformations", "library", "presets", "settings"].includes(savedView) ? savedView : "new",
@@ -71,7 +72,13 @@ export const useAppStore = create<AppStore>((set, get) => ({
   },
   jobs: {},
   history: [],
-  queue: { settings: { concurrentDownloads: 2, paused: false, notifyOnCompletion: true, completionAction: "none" }, orderedJobIds: [], activeJobIds: [] },
+  queue: {
+    settings: { concurrentDownloads: 2, paused: false, notifyOnCompletion: true, completionAction: "none" },
+    orderedJobIds: [],
+    activeJobIds: [],
+    pauseSupported: true,
+    completionNotificationsSupported: true,
+  },
   analysis: null,
   galleryItems: null,
   batchAnalysis: null,
@@ -103,16 +110,20 @@ export const useAppStore = create<AppStore>((set, get) => ({
   },
 
   analyze: async (url) => {
+    const requestId = crypto.randomUUID();
+    latestAnalysisRequest = requestId;
     set({ analyzing: true, error: null, analysis: null, batchAnalysis: null, galleryItems: null });
     try {
       const analysis = await api.analyzeUrl(url);
+      if (latestAnalysisRequest !== requestId) return null;
       set({ analysis });
       return analysis;
     } catch (error) {
+      if (latestAnalysisRequest !== requestId) return null;
       set({ error: normalizeError(error) });
       return null;
     } finally {
-      set({ analyzing: false });
+      if (latestAnalysisRequest === requestId) set({ analyzing: false });
     }
   },
 
@@ -143,34 +154,45 @@ export const useAppStore = create<AppStore>((set, get) => ({
   },
 
   analyzeBatch: async (urls) => {
+    const requestId = crypto.randomUUID();
+    latestAnalysisRequest = requestId;
     set({ analyzing: true, error: null, analysis: null, batchAnalysis: null, galleryItems: null });
     try {
       const batchAnalysis = await api.analyzeUrls(urls);
+      if (latestAnalysisRequest !== requestId) return null;
       set({ batchAnalysis });
       return batchAnalysis;
     } catch (error) {
+      if (latestAnalysisRequest !== requestId) return null;
       set({ error: normalizeError(error) });
       return null;
     } finally {
-      set({ analyzing: false });
+      if (latestAnalysisRequest === requestId) set({ analyzing: false });
     }
   },
 
   analyzePlaylist: async (url) => {
+    const requestId = crypto.randomUUID();
+    latestAnalysisRequest = requestId;
     set({ analyzing: true, error: null, analysis: null, batchAnalysis: null, galleryItems: null });
     try {
       const batchAnalysis = await api.analyzePlaylist(url);
+      if (latestAnalysisRequest !== requestId) return null;
       set({ batchAnalysis });
       return batchAnalysis;
     } catch (error) {
+      if (latestAnalysisRequest !== requestId) return null;
       set({ error: normalizeError(error) });
       return null;
     } finally {
-      set({ analyzing: false });
+      if (latestAnalysisRequest === requestId) set({ analyzing: false });
     }
   },
 
-  clearAnalysis: () => set({ analysis: null, batchAnalysis: null, galleryItems: null, error: null }),
+  clearAnalysis: () => {
+    latestAnalysisRequest = crypto.randomUUID();
+    set({ analysis: null, batchAnalysis: null, galleryItems: null, analyzing: false, error: null });
+  },
 
   detectEngines: async () => {
     set({ engineLoading: true });
@@ -196,16 +218,27 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   initialize: async () => {
     let unlisten = () => {};
+    let queueEventsReady = false;
+    const pendingQueueEvents: QueueSnapshot[] = [];
     try {
-      unlisten = await api.onJobUpdated((job) => {
+      const unlistenJob = await api.onJobUpdated((job) => {
         set((state) => ({
           jobs: { ...state.jobs, [job.id]: job },
-          queue: ["Queued", "Paused"].includes(job.state)
-            ? state.queue
-            : { ...state.queue, orderedJobIds: state.queue.orderedJobIds.filter((id) => id !== job.id) },
         }));
         if (job.state === "Completed") void get().loadHistory();
       });
+      const unlistenRemoved = await api.onJobRemoved((jobId) => {
+        set((state) => {
+          const jobs = { ...state.jobs };
+          delete jobs[jobId];
+          return { jobs, history: state.history.filter((entry) => entry.id !== jobId) };
+        });
+      });
+      const unlistenQueue = await api.onQueueUpdated((queue) => {
+        if (queueEventsReady) set({ queue });
+        else pendingQueueEvents.push(queue);
+      });
+      unlisten = () => { unlistenJob(); unlistenRemoved(); unlistenQueue(); };
     } catch (error) {
       set({ error: normalizeError(error) });
       return unlisten;
@@ -231,6 +264,9 @@ export const useAppStore = create<AppStore>((set, get) => ({
       set({ enginePreferences: preferences.value });
     }
     if (queue.status === "fulfilled") set({ queue: queue.value });
+    queueEventsReady = true;
+    const latestQueueEvent = pendingQueueEvents.at(-1);
+    if (latestQueueEvent) set({ queue: latestQueueEvent });
 
     const failure = results.find((result) => result.status === "rejected");
     if (failure?.status === "rejected") set({ error: normalizeError(failure.reason) });
@@ -256,11 +292,21 @@ export const useAppStore = create<AppStore>((set, get) => ({
   startDownloads: async (requests) => {
     set({ error: null });
     try {
-      const jobs = await api.startDownloads(requests);
+      const result = await api.startDownloads(requests);
+      const jobs = result.jobs;
       set((state) => ({
         jobs: { ...state.jobs, ...Object.fromEntries(jobs.map((job) => [job.id, job])) },
-        notice: { message: `Added ${jobs.length} downloads to the queue.`, view: "queue" },
+        notice: { message: result.failures.length > 0
+          ? `Added ${jobs.length}; ${result.failures.length} could not be queued.`
+          : `Added ${jobs.length} downloads to the queue.`, view: "queue" },
       }));
+      if (result.failures.length > 0) {
+        set({ error: {
+          code: "batch_download_partial_failure",
+          message: `${result.failures.length} download${result.failures.length === 1 ? "" : "s"} could not be queued.`,
+          details: result.failures.map((failure) => `${failure.url}: ${failure.error.message}`).join("\n"),
+        } });
+      }
       void api.getQueueSnapshot().then((queue) => set({ queue }));
       return jobs;
     } catch (error) {

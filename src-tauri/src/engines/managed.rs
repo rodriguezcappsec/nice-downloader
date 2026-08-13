@@ -11,6 +11,7 @@ use url::Url;
 
 const MAX_ENGINE_BYTES: usize = 150 * 1024 * 1024;
 static MANAGED_ROOT: OnceLock<PathBuf> = OnceLock::new();
+static BUNDLED_ROOT: OnceLock<PathBuf> = OnceLock::new();
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -52,18 +53,78 @@ struct GithubAsset {
     browser_download_url: String,
 }
 
-pub fn initialize(app_data: &Path) -> Result<(), AppError> {
+pub fn initialize(app_data: &Path, resource_dir: &Path) -> Result<(), AppError> {
     let root = app_data.join("engines");
     fs::create_dir_all(&root)
         .map_err(|error| AppError::internal("could not create managed engine storage", error))?;
     let _ = MANAGED_ROOT.set(root);
+    let _ = BUNDLED_ROOT.set(resource_dir.join("engines"));
     Ok(())
 }
 
 pub fn resolve(executable: &str) -> Option<PathBuf> {
     managed_engine(executable)
         .and_then(|engine| active_path(engine).ok().flatten())
-        .or_else(|| which::which(executable).ok())
+        .or_else(|| bundled_engine(executable))
+        .or_else(|| resolve_host_executable(executable))
+}
+
+fn bundled_engine(executable: &str) -> Option<PathBuf> {
+    find_bundled_executable(BUNDLED_ROOT.get()?, executable)
+}
+
+fn find_bundled_executable(root: &Path, executable: &str) -> Option<PathBuf> {
+    let candidate = root.join(platform_executable_name(executable));
+    candidate.is_file().then_some(candidate)
+}
+
+fn resolve_host_executable(executable: &str) -> Option<PathBuf> {
+    which::which(executable)
+        .ok()
+        .or_else(|| find_executable_in_directories(executable, user_executable_directories()))
+}
+
+fn find_executable_in_directories(
+    executable: &str,
+    directories: impl IntoIterator<Item = PathBuf>,
+) -> Option<PathBuf> {
+    let executable = platform_executable_name(executable);
+    directories
+        .into_iter()
+        .map(|directory| directory.join(&executable))
+        .find(|candidate| candidate.is_file())
+}
+
+fn platform_executable_name(executable: &str) -> String {
+    if cfg!(windows) && std::path::Path::new(executable).extension().is_none() {
+        format!("{executable}.exe")
+    } else {
+        executable.to_owned()
+    }
+}
+
+fn user_executable_directories() -> Vec<PathBuf> {
+    let mut directories = Vec::new();
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        directories.push(home.join(".local/bin"));
+        directories.push(home.join("bin"));
+        directories.push(home.join(".cargo/bin"));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        directories.push(PathBuf::from("/opt/homebrew/bin"));
+        directories.push(PathBuf::from("/usr/local/bin"));
+    }
+    #[cfg(windows)]
+    {
+        if let Some(profile) = std::env::var_os("USERPROFILE").map(PathBuf::from) {
+            directories.push(profile.join(".local/bin"));
+        }
+        if let Some(app_data) = std::env::var_os("APPDATA").map(PathBuf::from) {
+            directories.push(app_data.join("Python/Scripts"));
+        }
+    }
+    directories
 }
 
 pub fn list_statuses() -> Result<Vec<ManagedEngineStatus>, AppError> {
@@ -268,7 +329,7 @@ pub async fn install(candidate: EngineUpdateCandidate) -> Result<ManagedEngineSt
 }
 
 fn status(engine: EngineId) -> Result<ManagedEngineStatus, AppError> {
-    ensure_supported(engine)?;
+    ensure_known_engine(engine)?;
     let state = read_state(engine)?;
     let directory = engine_directory(engine)?;
     let mut installed_versions = if directory.is_dir() {
@@ -285,7 +346,7 @@ fn status(engine: EngineId) -> Result<ManagedEngineStatus, AppError> {
     installed_versions.reverse();
     Ok(ManagedEngineStatus {
         engine,
-        supported: true,
+        supported: cfg!(target_os = "linux"),
         active_version: state.active_version,
         previous_version: state.previous_version,
         pinned: state.pinned,
@@ -310,13 +371,24 @@ fn managed_engine(executable: &str) -> Option<EngineId> {
 }
 
 fn ensure_supported(engine: EngineId) -> Result<(), AppError> {
-    if matches!(engine, EngineId::YtDlp | EngineId::GalleryDl) {
-        Ok(())
-    } else {
+    ensure_known_engine(engine)?;
+    if !cfg!(target_os = "linux") {
+        return Err(AppError::new(
+            "managed_engine_unsupported_platform",
+            "Managed engine installation is currently available on Linux only. Install this engine through the operating system on this platform.",
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_known_engine(engine: EngineId) -> Result<(), AppError> {
+    if !matches!(engine, EngineId::YtDlp | EngineId::GalleryDl) {
         Err(AppError::new(
             "managed_engine_unsupported",
             "Only yt-dlp and gallery-dl support managed installations right now.",
         ))
+    } else {
+        Ok(())
     }
 }
 
@@ -454,6 +526,53 @@ fn set_executable(_path: &Path) -> Result<(), AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finds_executable_in_explicit_user_directory() {
+        let root = std::env::temp_dir().join(format!(
+            "nice-downloader-engine-test-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("unnamed")
+        ));
+        let user_bin = root.join(".local/bin");
+        fs::create_dir_all(&user_bin).expect("creates test user bin");
+        let executable = user_bin.join(platform_executable_name("gallery-dl"));
+        fs::write(&executable, b"test").expect("creates test executable");
+
+        assert_eq!(
+            find_executable_in_directories("gallery-dl", [user_bin]),
+            Some(executable)
+        );
+
+        fs::remove_dir_all(root).expect("removes test directory");
+    }
+
+    #[test]
+    fn ignores_missing_executable_candidates() {
+        let root = std::env::temp_dir().join(format!(
+            "nice-downloader-missing-engine-test-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("unnamed")
+        ));
+
+        assert_eq!(find_executable_in_directories("gallery-dl", [root]), None);
+    }
+
+    #[test]
+    fn resolves_packaged_engine_from_resource_root() {
+        let root = std::env::temp_dir().join(format!(
+            "nice-downloader-bundled-engine-test-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("unnamed")
+        ));
+        fs::create_dir_all(&root).expect("creates bundled engine directory");
+        let executable = root.join(platform_executable_name("yt-dlp"));
+        fs::write(&executable, b"test").expect("creates bundled engine");
+
+        assert_eq!(find_bundled_executable(&root, "yt-dlp"), Some(executable));
+
+        fs::remove_dir_all(root).expect("removes bundled engine directory");
+    }
 
     #[test]
     fn reads_exact_checksum_entries() {

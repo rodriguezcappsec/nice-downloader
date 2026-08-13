@@ -10,6 +10,8 @@ app_dir="$bundle_dir/Nice Downloader.AppDir"
 tauri_cache="${XDG_CACHE_HOME:-$HOME/.cache}/tauri"
 linuxdeploy="$tauri_cache/linuxdeploy-x86_64.AppImage"
 
+npm run engines:prepare || exit $?
+
 if ! command -v bwrap >/dev/null 2>&1; then
   echo "error: bubblewrap (bwrap) is required for the Arch AppImage workaround" >&2
   echo "Install it with: sudo pacman -S bubblewrap" >&2
@@ -40,6 +42,25 @@ if [[ ! -x "$linuxdeploy" ]]; then
   exit "$tauri_status"
 fi
 
+# linuxdeploy recursively runs ldd against AppDir ELF files. The bundled
+# FFmpeg binaries are intentionally static, and ldd exits 1 for static ELFs.
+# Preserve the engine payload outside AppDir while linuxdeploy scans dynamic
+# application dependencies, then restore it before AppImage creation.
+engine_dir="$app_dir/usr/lib/Nice Downloader/engines"
+engine_staging="$(mktemp -d "${TMPDIR:-/tmp}/nice-downloader-engines.XXXXXX")"
+if [[ -d "$engine_dir" ]]; then
+  mv "$engine_dir" "$engine_staging/engines"
+fi
+
+restore_engines() {
+  if [[ -d "$engine_staging/engines" ]]; then
+    mkdir -p "$(dirname "$engine_dir")"
+    mv "$engine_staging/engines" "$engine_dir"
+  fi
+  rmdir "$engine_staging" 2>/dev/null || true
+}
+trap restore_engines EXIT
+
 mask_dir="$(mktemp -d "${TMPDIR:-/tmp}/nice-downloader-searxng-mask.XXXXXX")"
 trap 'rmdir "$mask_dir" 2>/dev/null || true' EXIT
 
@@ -66,8 +87,14 @@ echo "Retrying linuxdeploy in an isolated filesystem view..."
     "$linuxdeploy" \
     --appimage-extract-and-run \
     --verbosity 1 \
-    --appdir "$app_dir" \
-    --output appimage
+    --appdir "$app_dir"
+)
+
+restore_engines
+(
+  cd "$bundle_dir"
+  APPIMAGE_EXTRACT_AND_RUN=1 "$tauri_cache/linuxdeploy-plugin-appimage.AppImage" \
+    --appimage-extract-and-run --appdir "$app_dir"
 )
 
 appimage="$(find "$bundle_dir" -maxdepth 1 -type f -name '*.AppImage' -print -quit)"

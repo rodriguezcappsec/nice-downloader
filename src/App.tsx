@@ -1,5 +1,5 @@
 import { AlertTriangle, CheckCircle2, X } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { AppShell } from "./components/AppShell";
 import { OnboardingDialog } from "./components/OnboardingDialog";
@@ -25,8 +25,12 @@ export default function App() {
   const errorAction = error ? getErrorAction(error.code, error.message) : null;
   const jobs = useAppStore((state) => state.jobs);
   const [desktopPreferences, setDesktopPreferences] = useState<DesktopPreferences | null>(null);
+  const desktopPreferencesRef = useRef<DesktopPreferences | null>(null);
+  const activeJobCountRef = useRef(0);
   const [onboarding, setOnboarding] = useState<OnboardingStatus | null>(null);
   const activeJobs = Object.values(jobs).filter((job) => ["Analyzing", "Preparing", "Downloading", "PostProcessing", "Merging", "Verifying"].includes(job.state));
+  desktopPreferencesRef.current = desktopPreferences;
+  activeJobCountRef.current = activeJobs.length;
 
   useEffect(() => {
     let cleanup: (() => void) | undefined;
@@ -42,25 +46,68 @@ export default function App() {
   }, [initialize]);
 
   useEffect(() => {
-    void Promise.all([api.getDesktopPreferences(), api.getOnboardingStatus()])
-      .then(([preferences, status]) => { setDesktopPreferences(preferences); if (!status.completed) setOnboarding(status); })
+    void Promise.all([api.getDesktopPreferences(), api.getDesktopRuntimeStatus(), api.getOnboardingStatus()])
+      .then(([preferences, runtime, status]) => {
+        setDesktopPreferences(!runtime.trayAvailable && preferences.closeBehavior === "background"
+          ? { ...preferences, closeBehavior: "quit", startMinimized: false }
+          : preferences);
+        if (!status.completed) setOnboarding(status);
+      })
       .catch((error) => setError(normalizeError(error)));
   }, [setError]);
 
   useEffect(() => {
-    if (!desktopPreferences) return;
+    let disposed = false;
     let unlisten = () => {};
     void getCurrentWindow().onCloseRequested(async (event) => {
-      if (desktopPreferences.closeBehavior === "background") {
-        event.preventDefault(); await getCurrentWindow().hide(); return;
+      const preferences = desktopPreferencesRef.current;
+      if (!preferences) {
+        event.preventDefault();
+        await api.quitApp();
+        return;
       }
-      if (desktopPreferences.closeBehavior === "ask" && activeJobs.length > 0) {
-        const background = window.confirm(`${activeJobs.length} download${activeJobs.length === 1 ? " is" : "s are"} active. Choose OK to keep running in the background, or Cancel to quit.`);
-        if (background) { event.preventDefault(); await getCurrentWindow().hide(); }
+      if (preferences.closeBehavior === "quit") {
+        event.preventDefault();
+        await api.quitApp();
+        return;
       }
-    }).then((cleanup) => { unlisten = cleanup; });
-    return () => unlisten();
-  }, [activeJobs.length, desktopPreferences]);
+      if (preferences.closeBehavior === "background") {
+        event.preventDefault();
+        try {
+          await api.hideToTray();
+          setNotice({ message: "Nice Downloader is still running in the system tray." });
+        } catch (error) {
+          setError(normalizeError(error));
+        }
+        return;
+      }
+      if (activeJobCountRef.current > 0) {
+        event.preventDefault();
+        const background = window.confirm(`${activeJobCountRef.current} download${activeJobCountRef.current === 1 ? " is" : "s are"} active. Choose OK to keep running in the background, or Cancel to quit.`);
+        if (background) {
+          try { await api.hideToTray(); }
+          catch (error) { setError(normalizeError(error)); }
+        } else {
+          await api.quitApp();
+        }
+      } else {
+        event.preventDefault();
+        await api.quitApp();
+      }
+    }).then((cleanup) => {
+      if (disposed) cleanup();
+      else unlisten = cleanup;
+    });
+    return () => { disposed = true; unlisten(); };
+  }, [setError, setNotice]);
+
+  useEffect(() => {
+    const updatePreferences = (event: Event) => {
+      setDesktopPreferences((event as CustomEvent<DesktopPreferences>).detail);
+    };
+    window.addEventListener("nice-downloader:desktop-preferences", updatePreferences);
+    return () => window.removeEventListener("nice-downloader:desktop-preferences", updatePreferences);
+  }, []);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {

@@ -32,6 +32,9 @@
     "category": "Utility",
     "shortDescription": "Linux desktop media download manager",
     "longDescription": "A Linux-first desktop orchestration layer for yt-dlp, FFmpeg, gallery-dl, aria2c, and curl.",
-    "icon": ["icons/icon.png", "icons/icon.ico"]
+    "icon": ["icons/icon.png", "icons/icon.ico"],
+    "resources": {
+      "resources/engines/": "engines/"
+    }
   }
 }

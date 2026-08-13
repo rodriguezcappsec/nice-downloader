@@ -105,6 +105,7 @@ export interface DesktopPreferences {
   startMinimized: boolean;
   notifyWhenBackgrounded: boolean;
 }
+export interface DesktopRuntimeStatus { trayAvailable: boolean; }
 
 export interface OnboardingStatus {
   completed: boolean;
@@ -262,6 +263,8 @@ export interface StartDownloadRequest {
   options: DownloadOptions;
   scheduledFor?: string | null;
 }
+export interface BatchDownloadFailure { url: string; error: AppError; }
+export interface BatchDownloadResult { jobs: DownloadJob[]; failures: BatchDownloadFailure[]; }
 
 export interface QueueSettings {
   concurrentDownloads: number;
@@ -274,6 +277,8 @@ export interface QueueSnapshot {
   settings: QueueSettings;
   orderedJobIds: string[];
   activeJobIds: string[];
+  pauseSupported: boolean;
+  completionNotificationsSupported: boolean;
 }
 
 export interface DiskSpaceInfo {
