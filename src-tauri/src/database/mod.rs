@@ -3600,6 +3600,7 @@ mod tests {
         AudioQuality, DownloadOptions, MediaAnalysis, OutputConflictPolicy, OutputContainer,
         QualityKind, QualityOption, VideoCodecPreference,
     };
+    use std::time::Instant;
     use tempfile::tempdir;
 
     #[test]
@@ -3752,7 +3753,7 @@ mod tests {
 
     #[test]
     fn persists_desktop_preferences_and_onboarding() {
-        use crate::models::{CloseBehavior, DesktopPreferences};
+        use crate::models::{CloseBehavior, DesktopPreferences, PlaybackCompatibilityPreference};
         let directory = tempdir().expect("temporary directory");
         let database = Database::open(&directory.path().join("desktop.sqlite3")).expect("database");
         assert!(!database.onboarding_completed().expect("onboarding status"));
@@ -3763,6 +3764,7 @@ mod tests {
             reduce_motion: true,
             high_contrast: true,
             interface_scale_percent: 110,
+            playback_compatibility: PlaybackCompatibilityPreference::Automatic,
         };
         database
             .save_desktop_preferences(&preferences)
@@ -3914,6 +3916,97 @@ mod tests {
             )
             .expect("migration column");
         assert!(has_request_json);
+    }
+
+    #[test]
+    fn rolls_back_a_failed_migration_and_recovers_on_the_next_open() {
+        let directory = tempdir().expect("temporary directory");
+        let path = directory.path().join("migration-recovery.sqlite3");
+        {
+            let mut connection = Connection::open(&path).expect("legacy database");
+            let transaction = connection.transaction().expect("legacy transaction");
+            transaction
+                .execute_batch(
+                    "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY NOT NULL);",
+                )
+                .expect("migration registry");
+            for (version, migration) in [
+                (1, MIGRATION_0001),
+                (2, MIGRATION_0002),
+                (3, MIGRATION_0003),
+                (4, MIGRATION_0004),
+                (5, MIGRATION_0005),
+                (6, MIGRATION_0006),
+                (7, MIGRATION_0007),
+                (8, MIGRATION_0008),
+            ] {
+                transaction
+                    .execute_batch(migration)
+                    .expect("legacy migration");
+                transaction
+                    .execute(
+                        "INSERT INTO schema_migrations(version) VALUES (?1)",
+                        [version],
+                    )
+                    .expect("legacy migration version");
+            }
+            transaction.commit().expect("legacy commit");
+            connection
+                .execute_batch("CREATE TABLE library_sources (id TEXT PRIMARY KEY NOT NULL);")
+                .expect("malformed future table");
+        }
+
+        let error = match Database::open(&path) {
+            Ok(_) => panic!("malformed migration unexpectedly succeeded"),
+            Err(error) => error,
+        };
+        assert!(error.message.contains("database") || error.details.is_some());
+
+        {
+            let connection = Connection::open(&path).expect("inspect rolled-back database");
+            let latest_version: i64 = connection
+                .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                    row.get(0)
+                })
+                .expect("latest migration");
+            assert_eq!(latest_version, 8);
+            let has_scan_jobs: bool = connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'library_scan_jobs')",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("scan job table state");
+            let has_source_id: bool = connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('media_library') WHERE name = 'source_id')",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("source column state");
+            assert!(!has_scan_jobs);
+            assert!(!has_source_id);
+            connection
+                .execute("DROP TABLE library_sources", [])
+                .expect("remove malformed table");
+        }
+
+        let database = Database::open(&path).expect("migration recovery");
+        let connection = database.connection.lock().expect("database lock");
+        let latest_version: i64 = connection
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
+            .expect("recovered migration version");
+        assert_eq!(latest_version, 15);
+        let has_playback: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'library_playback')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("playback table state");
+        assert!(has_playback);
     }
 
     #[test]
@@ -4531,6 +4624,140 @@ mod tests {
                 completed: false,
             })
             .is_err());
+    }
+
+    #[test]
+    #[ignore = "manual large-library profile; optionally set NICE_DOWNLOADER_LIBRARY_PROFILE_DIR"]
+    fn profiles_large_library_queries_on_a_selected_filesystem() {
+        let temporary_directory = tempdir().expect("temporary directory");
+        let external_directory =
+            std::env::var_os("NICE_DOWNLOADER_LIBRARY_PROFILE_DIR").map(std::path::PathBuf::from);
+        let profile_directory = external_directory
+            .as_deref()
+            .unwrap_or_else(|| temporary_directory.path());
+        assert!(
+            profile_directory.is_dir(),
+            "NICE_DOWNLOADER_LIBRARY_PROFILE_DIR must be an existing directory"
+        );
+        let item_count = std::env::var("NICE_DOWNLOADER_LIBRARY_PROFILE_ITEMS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(50_000);
+        assert!(
+            (10_000..=250_000).contains(&item_count),
+            "profile item count must be between 10,000 and 250,000"
+        );
+        let path = profile_directory.join(format!(
+            "nice-downloader-profile-{}.sqlite3",
+            Uuid::new_v4()
+        ));
+        let opened_at = Instant::now();
+        let database = Database::open(&path).expect("profile database");
+        let open_elapsed = opened_at.elapsed();
+        let source = database
+            .save_library_source(SaveLibrarySourceRequest {
+                id: None,
+                name: "Profile archive".to_owned(),
+                path: profile_directory.to_string_lossy().into_owned(),
+                media_kind: LibraryMediaKind::Video,
+                recursive: true,
+                watch_enabled: false,
+                private: false,
+                include_patterns: vec![],
+                exclude_patterns: vec![],
+            })
+            .expect("profile source");
+
+        let seeded_at = Instant::now();
+        {
+            let mut connection = database.connection.lock().expect("database lock");
+            let transaction = connection.transaction().expect("profile transaction");
+            {
+                let mut statement = transaction
+                    .prepare(
+                        "INSERT INTO media_library
+                         (id, path, title, tags_json, metadata_json, missing, added_at,
+                          updated_at, source_id, relative_path, media_kind, favorite)
+                         VALUES (?1, ?2, ?3, ?4, '{}', 0, ?5, ?5, ?6, ?7, 'video', 0)",
+                    )
+                    .expect("profile insert statement");
+                for index in 0..item_count {
+                    let relative_path = format!(
+                        "collection-{}/season-{}/video-{index}.mp4",
+                        index % 100,
+                        index % 12
+                    );
+                    let title = if index % 1_000 == 0 {
+                        format!("Profile needle video {index}")
+                    } else {
+                        format!("Profile video {index}")
+                    };
+                    statement
+                        .execute(params![
+                            format!("00000000-0000-4000-8000-{index:012x}"),
+                            profile_directory.join(&relative_path).to_string_lossy(),
+                            title,
+                            if index % 20 == 0 {
+                                "[\"profile\"]"
+                            } else {
+                                "[]"
+                            },
+                            i64::try_from(index).expect("profile timestamp"),
+                            &source.id,
+                            relative_path,
+                        ])
+                        .expect("insert profile item");
+                }
+            }
+            transaction.commit().expect("commit profile catalog");
+        }
+        let seed_elapsed = seeded_at.elapsed();
+
+        let first_page_at = Instant::now();
+        let first_page = database
+            .query_library_items(library_query_request())
+            .expect("profile first page");
+        let first_page_elapsed = first_page_at.elapsed();
+        assert_eq!(first_page.total_items, item_count);
+        assert_eq!(first_page.items.len(), 60);
+
+        let search_at = Instant::now();
+        let mut search_request = library_query_request();
+        search_request.search = Some("Profile needle".to_owned());
+        let search_result = database
+            .query_library_items(search_request)
+            .expect("profile search");
+        let search_elapsed = search_at.elapsed();
+        assert_eq!(search_result.total_items, item_count.div_ceil(1_000));
+
+        let facets_at = Instant::now();
+        let facets = database
+            .library_facets(LibraryFacetRequest {
+                source_id: Some(source.id),
+                availability: LibraryAvailabilityFilter::Available,
+            })
+            .expect("profile facets");
+        let facets_elapsed = facets_at.elapsed();
+        assert_eq!(facets.total_items, item_count);
+        assert!(facets.tags.iter().any(|tag| tag == "profile"));
+        assert!(facets.folders.len() >= 100);
+
+        let database_size = std::fs::metadata(&path)
+            .map(|metadata| metadata.len())
+            .unwrap_or_default();
+        println!(
+            "library-profile items={item_count} filesystem={} database={} bytes open_ms={} seed_ms={} first_page_ms={} search_ms={} facets_ms={}",
+            profile_directory.display(),
+            database_size,
+            open_elapsed.as_millis(),
+            seed_elapsed.as_millis(),
+            first_page_elapsed.as_millis(),
+            search_elapsed.as_millis(),
+            facets_elapsed.as_millis(),
+        );
+        if external_directory.is_some() {
+            println!("library-profile database retained at {}", path.display());
+        }
     }
 
     #[test]

@@ -29,6 +29,7 @@ import {
   Eraser,
   ExternalLink,
   Maximize,
+  RotateCcw,
   Save,
   Search,
   Square,
@@ -63,6 +64,7 @@ import type {
   LibraryFolderFacet,
   LibraryMediaKind,
   LibraryPlaybackEntry,
+  LibraryPlaybackPreflight,
   LibraryPlaybackSession,
   LibraryQueryRequest,
   LibraryQueryResult,
@@ -82,6 +84,7 @@ const LIBRARY_PAGE_SIZE = 60;
 const WATCH_BROWSE_PAGE_SIZE = 24;
 const EMPTY_LIBRARY_RESULT: LibraryQueryResult = { items: [], totalItems: 0, page: 1, pageSize: LIBRARY_PAGE_SIZE, totalPages: 1 };
 const EMPTY_LIBRARY_FACETS: LibraryFacets = { totalItems: 0, availableItems: 0, missingItems: 0, containers: [], tags: [], folders: [] };
+type LiveAnnouncement = { signature: string; message: string; assertive?: boolean };
 
 export function LibraryPage() {
   const setError = useAppStore((state) => state.setError);
@@ -134,7 +137,88 @@ export function LibraryPage() {
   const [artworkCacheStatus, setArtworkCacheStatus] = useState<LibraryArtworkCacheStatus | null>(null);
   const [queryLoading, setQueryLoading] = useState(true);
   const [libraryRevision, setLibraryRevision] = useState(0);
+  const [libraryAnnouncement, setLibraryAnnouncement] = useState("");
+  const [libraryAlert, setLibraryAlert] = useState("");
   const refreshTimer = useRef<number | null>(null);
+  const scanAnnouncementSignatures = useRef<Map<string, string>>(new Map());
+  const duplicateAnnouncementSignature = useRef("");
+  const resultAnnouncementSignature = useRef("");
+  const detailsReturnFocus = useRef<HTMLElement | null>(null);
+  const bulkMoveReturnFocus = useRef<HTMLElement | null>(null);
+  const sourceFormReturnFocus = useRef<HTMLElement | null>(null);
+
+  function activeElement(): HTMLElement | null {
+    return document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  }
+
+  function restoreFocus(target: HTMLElement | null, fallbackId: string) {
+    window.setTimeout(() => {
+      if (target?.isConnected) {
+        target.focus();
+        return;
+      }
+      (document.getElementById(fallbackId) || document.getElementById("main-content"))?.focus();
+    }, 0);
+  }
+
+  function openDetails(item: LibraryItem) {
+    if (!selectedItem) detailsReturnFocus.current = activeElement();
+    setSelectedItem(item);
+  }
+
+  function closeDetails(shouldRestoreFocus = true) {
+    const target = detailsReturnFocus.current;
+    detailsReturnFocus.current = null;
+    setSelectedItem(null);
+    if (shouldRestoreFocus) restoreFocus(target, watchItem ? "watch-details-button" : "library-search");
+  }
+
+  function openBulkMove() {
+    bulkMoveReturnFocus.current = activeElement();
+    setBulkMoveOpen(true);
+  }
+
+  function closeBulkMove() {
+    const target = bulkMoveReturnFocus.current;
+    bulkMoveReturnFocus.current = null;
+    setBulkMoveOpen(false);
+    restoreFocus(target, "library-search");
+  }
+
+  function openSourceForm() {
+    sourceFormReturnFocus.current = activeElement();
+    setShowSourceForm(true);
+  }
+
+  function closeSourceForm() {
+    const target = sourceFormReturnFocus.current;
+    sourceFormReturnFocus.current = null;
+    setShowSourceForm(false);
+    restoreFocus(target, "library-add-folder-button");
+  }
+
+  function publishAnnouncement(announcement: LiveAnnouncement) {
+    if (announcement.assertive) setLibraryAlert(announcement.message);
+    else setLibraryAnnouncement(announcement.message);
+  }
+
+  function announceScan(job: LibraryScanJob) {
+    const announcement = libraryScanAnnouncement(job);
+    if (scanAnnouncementSignatures.current.get(job.id) === announcement.signature) return;
+    if (!scanAnnouncementSignatures.current.has(job.id) && scanAnnouncementSignatures.current.size >= 200) {
+      const oldestJobId = scanAnnouncementSignatures.current.keys().next().value;
+      if (oldestJobId) scanAnnouncementSignatures.current.delete(oldestJobId);
+    }
+    scanAnnouncementSignatures.current.set(job.id, announcement.signature);
+    publishAnnouncement(announcement);
+  }
+
+  function announceDuplicateAnalysis(job: LibraryDuplicateAnalysisJob) {
+    const announcement = duplicateAnalysisAnnouncement(job);
+    if (duplicateAnnouncementSignature.current === announcement.signature) return;
+    duplicateAnnouncementSignature.current = announcement.signature;
+    publishAnnouncement(announcement);
+  }
 
   async function load() {
     try {
@@ -154,6 +238,8 @@ export function LibraryPage() {
       setDuplicateJob(nextDuplicateJob);
       setDuplicateGroups(nextDuplicateGroups);
       setFileOperations(nextFileOperations);
+      nextJobs.filter((job) => job.state === "running").forEach(announceScan);
+      if (nextDuplicateJob?.state === "running") announceDuplicateAnalysis(nextDuplicateJob);
       scheduleLibraryRefresh(0);
     } catch (error) {
       setError(normalizeError(error));
@@ -183,6 +269,7 @@ export function LibraryPage() {
     const unlisteners: Array<() => void> = [];
     void api.onLibraryScanUpdated((job) => {
       setScanJobs((current) => upsertById(current, job));
+      announceScan(job);
       if (job.state !== "running") {
         void api.listLibrarySources().then((nextSources) => {
           if (!disposed) {
@@ -204,6 +291,7 @@ export function LibraryPage() {
     }).then((unlisten) => disposed ? unlisten() : unlisteners.push(unlisten));
     void api.onLibraryDuplicateAnalysisUpdated((job) => {
       setDuplicateJob(job);
+      announceDuplicateAnalysis(job);
       if (job.state === "completed") {
         void api.listLibraryDuplicateGroups().then((groups) => { if (!disposed) setDuplicateGroups(groups); });
       }
@@ -294,6 +382,15 @@ export function LibraryPage() {
       if (disposed) return;
       setQueryResult(result);
       if (result.page !== resultPage) setResultPage(result.page);
+      const signature = JSON.stringify(libraryRequest);
+      if (resultAnnouncementSignature.current !== signature) {
+        resultAnnouncementSignature.current = signature;
+        const start = result.totalItems === 0 || result.items.length === 0 ? 0 : (result.page - 1) * result.pageSize + 1;
+        const end = start === 0 ? 0 : Math.min(start + result.items.length - 1, result.totalItems);
+        setLibraryAnnouncement(result.totalItems === 0 || result.items.length === 0
+          ? "No library items match the current filters."
+          : `Library results updated. Showing ${start} through ${end} of ${result.totalItems}, page ${result.page} of ${result.totalPages}.`);
+      }
     }).catch((error) => {
       if (!disposed) setError(normalizeError(error));
     }).finally(() => {
@@ -399,13 +496,14 @@ export function LibraryPage() {
     const candidates = watchItem ? [watchItem, ...watchBrowseResult.items] : watchBrowseResult.items;
     return Array.from(new Map(candidates.filter((item) => item.mediaKind === "video" && !item.missing).map((item) => [item.id, item])).values());
   }, [watchBrowseResult.items, watchItem]);
+  const detailsNavigationItems = watchItem ? watchPlaybackQueue : navigationItems;
   const continueProgress = useMemo(() => new Map(continueWatching.map((entry) => [entry.item.id, Math.min(100, entry.playback.positionSeconds / entry.playback.durationSeconds * 100)])), [continueWatching]);
 
   useEffect(() => {
-    if (selectedItem && !navigationItems.some((item) => item.id === selectedItem.id)) {
-      setSelectedItem(null);
+    if (selectedItem && !detailsNavigationItems.some((item) => item.id === selectedItem.id)) {
+      closeDetails();
     }
-  }, [navigationItems, selectedItem]);
+  }, [detailsNavigationItems, selectedItem]);
 
   useEffect(() => {
     if (!selectedItem) return;
@@ -414,21 +512,21 @@ export function LibraryPage() {
       if (target?.matches("input, textarea, select, [contenteditable='true']")) return;
       if (event.key === "Escape") {
         event.preventDefault();
-        setSelectedItem(null);
+        closeDetails();
         return;
       }
       if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
-      const index = navigationItems.findIndex((item) => item.id === selectedItem.id);
+      const index = detailsNavigationItems.findIndex((item) => item.id === selectedItem.id);
       if (index < 0) return;
       const next = event.key === "ArrowRight" ? index + 1 : index - 1;
-      if (next >= 0 && next < navigationItems.length) {
+      if (next >= 0 && next < detailsNavigationItems.length) {
         event.preventDefault();
-        setSelectedItem(navigationItems[next]);
+        setSelectedItem(detailsNavigationItems[next]);
       }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [navigationItems, selectedItem]);
+  }, [detailsNavigationItems, selectedItem]);
 
   function updateItem(changed: LibraryItem) {
     setManageItems((current) => current.map((item) => item.id === changed.id ? changed : item));
@@ -439,7 +537,7 @@ export function LibraryPage() {
 
   function removeItem(id: string) {
     setManageItems((current) => current.filter((item) => item.id !== id));
-    setSelectedItem((current) => current?.id === id ? null : current);
+    if (selectedItem?.id === id) closeDetails();
     setWatchItem((current) => current?.id === id ? null : current);
     scheduleLibraryRefresh(0);
   }
@@ -513,7 +611,7 @@ export function LibraryPage() {
   }
 
   function closeSelectionMode() {
-    setBulkMoveOpen(false);
+    if (bulkMoveOpen) closeBulkMove();
     setSelectionMode(false);
     setSelectedIds(new Set());
   }
@@ -624,19 +722,20 @@ export function LibraryPage() {
   if (manageOpen) {
     return (
       <div className="mx-auto w-full max-w-[1440px] px-8 pb-14 pt-8 xl:px-10">
+        <LibraryLiveRegions polite={libraryAnnouncement} assertive={libraryAlert} />
         <header className="mb-7 flex flex-wrap items-end justify-between gap-4">
           <div><p className="text-[11px] font-medium text-accent">Library settings</p><h1 className="mt-1 text-[30px] font-semibold tracking-[-0.04em]">Sources and catalog</h1><p className="mt-2 max-w-2xl text-[13px] leading-5 text-muted">Choose what Nice Downloader indexes. Removing a source here removes catalog records, never the original media.</p></div>
           <Button variant="secondary" onClick={() => setManageOpen(false)}><ChevronRight className="rotate-180" size={16} /> Back to library</Button>
         </header>
 
         <div className="mb-5 flex flex-wrap gap-2">
-          <Button onClick={() => setShowSourceForm((visible) => !visible)}><FolderPlus size={16} /> Add folder</Button>
+          <Button id="library-add-folder-button" onClick={() => showSourceForm ? closeSourceForm() : openSourceForm()}><FolderPlus size={16} /> Add folder</Button>
           <Button variant="secondary" onClick={() => void reconcile()}><FolderSearch size={16} /> Verify files</Button>
         </div>
-        {showSourceForm ? <SourceForm onClose={() => setShowSourceForm(false)} onSaved={(source, job) => {
+        {showSourceForm ? <SourceForm onClose={closeSourceForm} onSaved={(source, job) => {
           setSources((current) => upsertById(current, source));
           setScanJobs((current) => upsertById(current, job));
-          setShowSourceForm(false);
+          closeSourceForm();
         }} /> : null}
         <SourceSection
           sources={sources}
@@ -689,6 +788,7 @@ export function LibraryPage() {
       : null;
     return (
       <div className="mx-auto w-full max-w-[1640px] px-6 pb-12 pt-5 xl:px-8">
+        <LibraryLiveRegions polite={libraryAnnouncement} assertive={libraryAlert} />
         <WatchWorkspace
           item={watchItem}
           sourceName={sourceLabel(watchItem, sourceNames)}
@@ -701,22 +801,23 @@ export function LibraryPage() {
           sourceNames={sourceNames}
           onSearch={setWatchSearch}
           onBack={() => { setWatchItem(null); scheduleLibraryRefresh(0); }}
-          onDetails={() => setSelectedItem(watchItem)}
+          onDetails={() => openDetails(watchItem)}
           onSelectVideo={(item) => { setSelectedItem(null); setWatchItem(item); }}
           onPrevious={previousVideo ? () => setWatchItem(previousVideo) : undefined}
           onNext={nextVideo ? () => setWatchItem(nextVideo) : undefined}
           onBrowsePage={(page) => setWatchBrowsePage(Math.min(Math.max(1, page), watchBrowseResult.totalPages))}
         />
-        {selectedItem ? <MediaDetails item={selectedItem} sourceName={sourceLabel(selectedItem, sourceNames)} onClose={() => setSelectedItem(null)} onWatch={() => { setWatchItem(selectedItem); setSelectedItem(null); }} onChanged={updateItem} onRemoved={() => removeItem(selectedItem.id)} onOperation={applyFileOperationResult} /> : null}
+        {selectedItem ? <MediaDetails item={selectedItem} sourceName={sourceLabel(selectedItem, sourceNames)} onClose={closeDetails} onWatch={() => { setWatchItem(selectedItem); closeDetails(); }} onChanged={updateItem} onRemoved={() => removeItem(selectedItem.id)} onOperation={applyFileOperationResult} /> : null}
       </div>
     );
   }
 
   return (
     <div className="mx-auto w-full max-w-[1520px] px-7 pb-16 pt-6 xl:px-9">
+      <LibraryLiveRegions polite={libraryAnnouncement} assertive={libraryAlert} />
       <header className="sticky top-0 z-10 -mx-2 flex items-center gap-5 bg-canvas/90 px-2 py-3 backdrop-blur-xl">
         <div className="min-w-fit"><h1 className="text-[25px] font-semibold tracking-[-0.04em]">Your library</h1><p className="text-[11px] text-muted">{availableItemCount} available item{availableItemCount === 1 ? "" : "s"} across {sources.length} source{sources.length === 1 ? "" : "s"}{missingItemCount > 0 ? <button className="ml-1 font-medium text-amber-300/85 hover:text-amber-200" onClick={() => { resetFilters(); setAvailabilityFilter("missing"); }}>· {missingItemCount} missing</button> : null}</p></div>
-        <label className="relative mx-auto w-full max-w-2xl"><span className="sr-only">Search library</span><Search className="absolute left-4 top-3.5 text-muted" size={17} /><Input className="h-12 rounded-[12px] bg-panel/85 pl-11 pr-4 text-sm shadow-control" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search your videos, images, tags, and folders" /></label>
+        <label className="relative mx-auto w-full max-w-2xl"><span className="sr-only">Search library</span><Search className="absolute left-4 top-3.5 text-muted" size={17} /><Input id="library-search" className="h-12 rounded-[12px] bg-panel/85 pl-11 pr-4 text-sm shadow-control" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search your videos, images, tags, and folders" /></label>
         <div className="flex shrink-0 items-center gap-1"><div className="flex rounded-[8px] bg-elevated/70 p-0.5" role="group" aria-label="Library view"><button className={`grid size-8 place-items-center rounded-[6px] transition ${viewMode === "grid" ? "bg-panel text-ink shadow-control" : "text-muted hover:text-ink"}`} onClick={() => changeViewMode("grid")} aria-pressed={viewMode === "grid"} aria-label="Grid view"><LayoutGrid size={15} /></button><button className={`grid size-8 place-items-center rounded-[6px] transition ${viewMode === "list" ? "bg-panel text-ink shadow-control" : "text-muted hover:text-ink"}`} onClick={() => changeViewMode("list")} aria-pressed={viewMode === "list"} aria-label="List view"><List size={15} /></button></div><Button variant={selectionMode ? "secondary" : "ghost"} onClick={() => selectionMode ? closeSelectionMode() : setSelectionMode(true)}>{selectionMode ? <X size={16} /> : <CheckSquare2 size={16} />} {selectionMode ? "Done" : "Select"}</Button><Button variant={changes.length > 0 ? "secondary" : "ghost"} onClick={() => { setManageOpen(true); void api.listLibraryFileOperations().then(setFileOperations).catch((error) => setError(normalizeError(error))); }}><Settings2 size={16} /> Manage{changes.length > 0 ? <span className="number-font rounded bg-accent/15 px-1.5 py-0.5 text-[10px] text-accent">{changes.length}</span> : null}</Button></div>
       </header>
 
@@ -743,24 +844,92 @@ export function LibraryPage() {
       {queryLoading && facets.totalItems === 0 ? (
         <div className="mt-16 flex items-center justify-center gap-2 text-sm text-muted" role="status"><LoaderCircle className="animate-spin text-accent" size={17} /> Loading your library…</div>
       ) : facets.totalItems === 0 ? (
-        <EmptyLibrary onAdd={() => { setManageOpen(true); setShowSourceForm(true); }} />
+        <EmptyLibrary onAdd={() => { setManageOpen(true); openSourceForm(); }} />
       ) : isFiltered || selectionMode ? (
-        <><div id="library-results" className={`scroll-mt-24 transition-opacity ${queryLoading ? "opacity-55" : "opacity-100"}`} aria-busy={queryLoading}><MediaSection title={selectionMode ? "Select media" : search.trim() ? `Results for “${search.trim()}”` : mediaFilter === "video" ? "Videos" : mediaFilter === "image" ? "Images" : sourceNames.get(sourceFilter) || "All media"} subtitle={queryLoading ? "Updating results…" : queryResult.totalItems === 0 ? "No matching items" : selectionMode ? `${selectedIds.size} selected · showing ${resultStart + 1}–${resultEnd} of ${queryResult.totalItems}` : `Showing ${resultStart + 1}–${resultEnd} of ${queryResult.totalItems} matching item${queryResult.totalItems === 1 ? "" : "s"}`} items={items} sourceNames={sourceNames} onSelect={setSelectedItem} selectionMode={selectionMode} selectedIds={selectedIds} onToggleSelection={toggleSelection} viewMode={viewMode} /></div><LibraryPagination currentPage={currentResultPage} pageCount={resultPageCount} totalItems={queryResult.totalItems} onPageChange={changeResultPage} /></>
+        <><div id="library-results" className={`scroll-mt-24 transition-opacity ${queryLoading ? "opacity-55" : "opacity-100"}`} aria-busy={queryLoading}><MediaSection title={selectionMode ? "Select media" : search.trim() ? `Results for “${search.trim()}”` : mediaFilter === "video" ? "Videos" : mediaFilter === "image" ? "Images" : sourceNames.get(sourceFilter) || "All media"} subtitle={queryLoading ? "Updating results…" : queryResult.totalItems === 0 ? "No matching items" : selectionMode ? `${selectedIds.size} selected · showing ${resultStart + 1}–${resultEnd} of ${queryResult.totalItems}` : `Showing ${resultStart + 1}–${resultEnd} of ${queryResult.totalItems} matching item${queryResult.totalItems === 1 ? "" : "s"}`} items={items} sourceNames={sourceNames} onSelect={openDetails} selectionMode={selectionMode} selectedIds={selectedIds} onToggleSelection={toggleSelection} viewMode={viewMode} /></div><LibraryPagination currentPage={currentResultPage} pageCount={resultPageCount} totalItems={queryResult.totalItems} onPageChange={changeResultPage} /></>
       ) : (
         <>
-          {featured ? <FeaturedMedia item={featured} sourceName={sourceLabel(featured, sourceNames)} onSelect={() => setSelectedItem(featured)} onWatch={() => featured.mediaKind === "video" ? setWatchItem(featured) : setSelectedItem(featured)} /> : null}
+          {featured ? <FeaturedMedia item={featured} sourceName={sourceLabel(featured, sourceNames)} onSelect={() => openDetails(featured)} onWatch={() => featured.mediaKind === "video" ? setWatchItem(featured) : openDetails(featured)} /> : null}
           {continueWatching.length > 0 ? <MediaSection title="Continue watching" subtitle="Pick up where you left off" items={continueWatching.map((entry) => entry.item)} progress={continueProgress} sourceNames={sourceNames} onSelect={(item) => setWatchItem(item)} viewMode={viewMode} /> : null}
-          <MediaSection title="Recently added" subtitle="The newest media across your folders" items={recentResult.items} sourceNames={sourceNames} onSelect={setSelectedItem} viewMode={viewMode} />
-          {videos.length > 0 ? <MediaSection title="Videos" subtitle={`${videoResult.totalItems} video${videoResult.totalItems === 1 ? "" : "s"} ready to watch`} items={videos} sourceNames={sourceNames} onSelect={setSelectedItem} viewMode={viewMode} /> : null}
-          {images.length > 0 ? <MediaSection title="Images" subtitle={`${imageResult.totalItems} image${imageResult.totalItems === 1 ? "" : "s"} in your catalog`} items={images} sourceNames={sourceNames} onSelect={setSelectedItem} viewMode={viewMode} /> : null}
+          <MediaSection title="Recently added" subtitle="The newest media across your folders" items={recentResult.items} sourceNames={sourceNames} onSelect={openDetails} viewMode={viewMode} />
+          {videos.length > 0 ? <MediaSection title="Videos" subtitle={`${videoResult.totalItems} video${videoResult.totalItems === 1 ? "" : "s"} ready to watch`} items={videos} sourceNames={sourceNames} onSelect={openDetails} viewMode={viewMode} /> : null}
+          {images.length > 0 ? <MediaSection title="Images" subtitle={`${imageResult.totalItems} image${imageResult.totalItems === 1 ? "" : "s"} in your catalog`} items={images} sourceNames={sourceNames} onSelect={openDetails} viewMode={viewMode} /> : null}
         </>
       )}
 
-      {selectedItem ? <MediaDetails item={selectedItem} sourceName={sourceLabel(selectedItem, sourceNames)} onClose={() => setSelectedItem(null)} onWatch={() => { setWatchItem(selectedItem); setSelectedItem(null); }} onChanged={updateItem} onRemoved={() => removeItem(selectedItem.id)} onOperation={applyFileOperationResult} /> : null}
-      {selectionMode ? <BulkActionBar selectedIds={selectedIds} collections={collections} busy={busy} onMove={() => setBulkMoveOpen(true)} onApply={applyBulkAction} onClose={closeSelectionMode} /> : null}
-      {bulkMoveOpen ? <BulkMoveDialog selectedIds={selectedIds} onClose={() => setBulkMoveOpen(false)} onComplete={(result) => { applyBulkMoveResult(result); setBulkMoveOpen(false); }} /> : null}
+      {selectedItem ? <MediaDetails item={selectedItem} sourceName={sourceLabel(selectedItem, sourceNames)} onClose={closeDetails} onWatch={() => { setWatchItem(selectedItem); closeDetails(); }} onChanged={updateItem} onRemoved={() => removeItem(selectedItem.id)} onOperation={applyFileOperationResult} /> : null}
+      {selectionMode ? <BulkActionBar selectedIds={selectedIds} collections={collections} busy={busy} onMove={openBulkMove} onApply={applyBulkAction} onClose={closeSelectionMode} /> : null}
+      {bulkMoveOpen ? <BulkMoveDialog selectedIds={selectedIds} onClose={closeBulkMove} onComplete={(result) => { applyBulkMoveResult(result); closeBulkMove(); }} /> : null}
     </div>
   );
+}
+
+function LibraryLiveRegions({ polite, assertive }: { polite: string; assertive: string }) {
+  return <div className="sr-only">
+    <p role="status" aria-live="polite" aria-atomic="true">{polite}</p>
+    <p role="alert" aria-live="assertive" aria-atomic="true">{assertive}</p>
+  </div>;
+}
+
+function libraryScanAnnouncement(job: LibraryScanJob): LiveAnnouncement {
+  if (job.state === "completed") {
+    return {
+      signature: "completed",
+      message: `Library scan completed. ${job.discoveredCount} files discovered, ${job.indexedCount} indexed, ${job.skippedCount} skipped, and ${job.warningCount} warnings.`,
+    };
+  }
+  if (job.state === "cancelled") {
+    return {
+      signature: "cancelled",
+      message: `Library scan cancelled after discovering ${job.discoveredCount} files and indexing ${job.indexedCount}.`,
+    };
+  }
+  if (job.state === "failed") {
+    return {
+      signature: "failed",
+      message: "Library scan failed. Open Library management for details and recovery actions.",
+      assertive: true,
+    };
+  }
+  const bucket = Math.floor(job.discoveredCount / 100);
+  return {
+    signature: `running:${bucket}`,
+    message: job.discoveredCount === 0
+      ? "Library scan started."
+      : `Library scan in progress. ${job.discoveredCount} files discovered and ${job.indexedCount} indexed.`,
+  };
+}
+
+function duplicateAnalysisAnnouncement(job: LibraryDuplicateAnalysisJob): LiveAnnouncement {
+  if (job.state === "completed") {
+    return {
+      signature: "completed",
+      message: `Duplicate analysis completed. ${job.groupsFound} exact duplicate group${job.groupsFound === 1 ? "" : "s"} found; ${job.hashedItems} files verified and ${job.skippedItems} skipped.`,
+    };
+  }
+  if (job.state === "cancelled") {
+    return {
+      signature: "cancelled",
+      message: `Duplicate analysis cancelled after checking ${job.hashedItems + job.skippedItems} files.`,
+    };
+  }
+  if (job.state === "failed") {
+    return {
+      signature: "failed",
+      message: "Duplicate analysis failed. Open Library management for details and recovery actions.",
+      assertive: true,
+    };
+  }
+  if (job.candidateItems === 0) {
+    return { signature: "running:candidates", message: "Duplicate analysis started. Finding same-size candidates." };
+  }
+  const checked = job.hashedItems + job.skippedItems;
+  const percent = Math.min(100, Math.floor(checked / job.candidateItems * 100));
+  const bucket = Math.floor(percent / 20) * 20;
+  return {
+    signature: `running:${bucket}`,
+    message: `Duplicate analysis ${bucket} percent complete. ${checked} of ${job.candidateItems} candidate files checked.`,
+  };
 }
 
 function FilterChip({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
@@ -870,7 +1039,7 @@ function WatchWorkspace({ item, sourceName, browseItems, browseTotal, browsePage
         <section className="mt-5 border-b border-line/60 pb-6" aria-labelledby="watch-title">
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div className="min-w-0 max-w-4xl"><h2 id="watch-title" className="text-[24px] font-semibold leading-tight tracking-[-0.035em] text-balance">{item.title}</h2><p className="mt-2 text-xs text-muted">{sourceName}{item.durationSeconds != null ? ` · ${formatDuration(item.durationSeconds)}` : ""}{item.container ? ` · ${item.container.toLocaleUpperCase()}` : ""}{item.width && item.height ? ` · ${item.width} × ${item.height}` : ""}</p></div>
-            <Button variant="secondary" onClick={onDetails}><Settings2 size={15} /> Details and organize</Button>
+            <Button id="watch-details-button" variant="secondary" onClick={onDetails}><Settings2 size={15} /> Details and organize</Button>
           </div>
           {item.tags.length > 0 ? <div className="mt-4 flex flex-wrap gap-1.5">{item.tags.map((tag) => <span key={tag} className="rounded-[5px] bg-elevated px-2 py-1 text-[10px] font-medium text-muted">#{tag}</span>)}</div> : null}
           <p className="mt-4 max-w-[76ch] break-all text-[11px] leading-5 text-muted/80" title={item.path}>{item.relativePath || item.path}</p>
@@ -878,7 +1047,7 @@ function WatchWorkspace({ item, sourceName, browseItems, browseTotal, browsePage
       </article>
 
       <aside className="panel-shadow flex max-h-[calc(100vh-104px)] min-h-[540px] flex-col overflow-hidden rounded-[12px] border border-line/70 bg-panel/65 xl:sticky xl:top-[76px] xl:self-start" aria-label="Browse videos while watching">
-        <div className="flex items-start justify-between gap-3 border-b border-line/60 px-4 py-4"><div><h2 className="text-sm font-semibold">{search.trim() ? "Search results" : "Up next"}</h2><p className="mt-1 text-[10px] text-muted">{browseLoading ? "Updating videos…" : `${browseTotal} available video${browseTotal === 1 ? "" : "s"}`}</p></div>{browsePages > 1 ? <span className="number-font text-[10px] text-muted">{browsePage}/{browsePages}</span> : null}</div>
+        <div className="flex items-start justify-between gap-3 border-b border-line/60 px-4 py-4"><div><h2 className="text-sm font-semibold">{search.trim() ? "Search results" : "Up next"}</h2><p className="mt-1 text-[10px] text-muted">{browseLoading ? "Updating videos…" : `${browseTotal} available video${browseTotal === 1 ? "" : "s"}`}</p><p className="sr-only" role="status" aria-live="polite" aria-atomic="true">{browseLoading ? "Updating watch browser results." : `Watch browser showing page ${browsePage} of ${browsePages}, with ${browseTotal} available videos.`}</p></div>{browsePages > 1 ? <span className="number-font text-[10px] text-muted">{browsePage}/{browsePages}</span> : null}</div>
         <div className="min-h-0 flex-1 overflow-y-auto p-2" aria-busy={browseLoading}>
           {browseLoading && browseItems.length === 0 ? <WatchQueueSkeleton /> : browseItems.length > 0 ? browseItems.map((candidate) => <WatchQueueItem key={candidate.id} item={candidate} sourceName={sourceLabel(candidate, sourceNames)} active={candidate.id === item.id} onSelect={() => onSelectVideo(candidate)} />) : <div className="px-5 py-12 text-center"><Film className="mx-auto text-muted/40" size={28} /><p className="mt-3 text-xs font-medium">No videos found</p><p className="mt-1 text-[10px] leading-4 text-muted">Try a title, tag, filename, or folder name.</p></div>}
         </div>
@@ -903,8 +1072,14 @@ function EmbeddedVideoPlayer({ item, sourceName, onClose, onPrevious, onNext }: 
   const setError = useAppStore((state) => state.setError);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const playerRef = useRef<HTMLElement | null>(null);
+  const consentDialogRef = useRef<HTMLElement | null>(null);
+  const consentReturnFocus = useRef<HTMLElement | null>(null);
   const lastSavedPosition = useRef(0);
   const [session, setSession] = useState<LibraryPlaybackSession | null>(null);
+  const [preflight, setPreflight] = useState<LibraryPlaybackPreflight | null>(null);
+  const [consent, setConsent] = useState<LibraryPlaybackPreflight | null>(null);
+  const [consentBusy, setConsentBusy] = useState(false);
+  const [rememberAutomatic, setRememberAutomatic] = useState(false);
   const [loading, setLoading] = useState(true);
   const [playbackError, setPlaybackError] = useState<string | null>(null);
   const [resumedAt, setResumedAt] = useState<number | null>(null);
@@ -912,18 +1087,39 @@ function EmbeddedVideoPlayer({ item, sourceName, onClose, onPrevious, onNext }: 
 
   useEffect(() => {
     let disposed = false;
+    setSession(null);
+    setPreflight(null);
+    setConsent(null);
+    setConsentBusy(false);
+    setRememberAutomatic(false);
     setLoading(true);
     setPlaybackError(null);
-    void api.prepareLibraryPlayback(item.id).then((prepared) => {
-      if (!disposed) setSession(prepared);
-    }).catch((error) => {
-      if (!disposed) {
-        setPlaybackError(normalizeError(error).message);
-        setLoading(false);
-      }
-    });
+    void api.inspectLibraryPlayback(item.id)
+      .then(async (inspected) => {
+        if (disposed) return;
+        setPreflight(inspected);
+        if (inspected.requiresConfirmation) {
+          consentReturnFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+          setConsent(inspected);
+          setLoading(false);
+          return;
+        }
+        const prepared = await api.prepareLibraryPlayback(item.id, false);
+        if (!disposed) setSession(prepared);
+      })
+      .catch((error) => {
+        if (!disposed) {
+          setPlaybackError(normalizeError(error).message);
+          setLoading(false);
+        }
+      });
     return () => { disposed = true; };
   }, [item.id]);
+
+  useEffect(() => {
+    if (!consent) return;
+    consentDialogRef.current?.querySelector<HTMLElement>("[data-consent-cancel]")?.focus();
+  }, [consent]);
 
   useEffect(() => {
     if (!session || !loading) return;
@@ -979,6 +1175,7 @@ function EmbeddedVideoPlayer({ item, sourceName, onClose, onPrevious, onNext }: 
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      if (consent) return;
       const target = event.target as HTMLElement | null;
       if (target?.matches("input, textarea, select, [contenteditable='true']")) return;
       const key = event.key.toLocaleLowerCase();
@@ -991,7 +1188,86 @@ function EmbeddedVideoPlayer({ item, sourceName, onClose, onPrevious, onNext }: 
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  });
+  }, [consent]);
+
+  function restoreConsentFocus() {
+    window.requestAnimationFrame(() => {
+      if (consentReturnFocus.current?.isConnected) consentReturnFocus.current.focus();
+      else playerRef.current?.querySelector<HTMLElement>("button")?.focus();
+    });
+  }
+
+  function dismissConsent() {
+    if (consentBusy) return;
+    setConsent(null);
+    setLoading(false);
+    setPlaybackError("Embedded playback was not started. The original video is unchanged and can still be opened with your system player.");
+    restoreConsentFocus();
+  }
+
+  function trapConsentFocus(event: React.KeyboardEvent<HTMLElement>) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      dismissConsent();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const controls = Array.from(event.currentTarget.querySelectorAll<HTMLElement>("button:not(:disabled), input:not(:disabled), select:not(:disabled), [tabindex]:not([tabindex='-1'])"));
+    if (controls.length === 0) return;
+    const first = controls[0];
+    const last = controls[controls.length - 1];
+    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+  }
+
+  async function rememberCompatibilityPreference() {
+    if (!rememberAutomatic) return;
+    try {
+      const current = await api.getDesktopPreferences();
+      const saved = await api.updateDesktopPreferences({ ...current, playbackCompatibility: "automatic" });
+      window.dispatchEvent(new CustomEvent("nice-downloader:desktop-preferences", { detail: saved }));
+    } catch (error) {
+      setError(normalizeError(error));
+    }
+  }
+
+  async function approveCompatibilityCopy() {
+    if (!consent || consentBusy) return;
+    setConsentBusy(true);
+    setLoading(true);
+    if (!consent.reencodeRequired) await rememberCompatibilityPreference();
+    try {
+      const prepared = consent.reencodeRequired
+        ? await api.prepareLibraryPlaybackFallback(item.id, true)
+        : await api.prepareLibraryPlayback(item.id, true);
+      setSession(prepared);
+      setConsent(null);
+      restoreConsentFocus();
+    } catch (error) {
+      setConsent(null);
+      setPlaybackError(normalizeError(error).message);
+      setLoading(false);
+      restoreConsentFocus();
+    } finally {
+      setConsentBusy(false);
+    }
+  }
+
+  async function openOriginalFromConsent() {
+    if (consentBusy) return;
+    setConsentBusy(true);
+    try {
+      await api.openLibraryItem(item.id);
+      setConsent(null);
+      setLoading(false);
+      setPlaybackError("The original video was opened in your system player. No compatibility copy was created.");
+      restoreConsentFocus();
+    } catch (error) {
+      setError(normalizeError(error));
+    } finally {
+      setConsentBusy(false);
+    }
+  }
 
   async function openExternal() {
     try {
@@ -1000,6 +1276,27 @@ function EmbeddedVideoPlayer({ item, sourceName, onClose, onPrevious, onNext }: 
       await api.openLibraryItem(item.id);
     } catch (error) {
       setError(normalizeError(error));
+    }
+  }
+
+  async function retryEmbeddedPlayback() {
+    setPlaybackError(null);
+    setSession(null);
+    setLoading(true);
+    try {
+      const inspected = await api.inspectLibraryPlaybackFallback(item.id);
+      setPreflight(inspected);
+      if (inspected.requiresConfirmation) {
+        consentReturnFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        setConsent(inspected);
+        setLoading(false);
+        return;
+      }
+      const prepared = await api.prepareLibraryPlaybackFallback(item.id, false);
+      setSession(prepared);
+    } catch (error) {
+      setPlaybackError(normalizeError(error).message);
+      setLoading(false);
     }
   }
 
@@ -1016,7 +1313,7 @@ function EmbeddedVideoPlayer({ item, sourceName, onClose, onPrevious, onNext }: 
     }
   }
 
-  return <section ref={playerRef} className="panel-shadow min-w-0 overflow-hidden rounded-[12px] border border-white/10 bg-[#06080b] text-white" aria-label={`Playing ${item.title}`}>
+  return <><section ref={playerRef} className="panel-shadow min-w-0 overflow-hidden rounded-[12px] border border-white/10 bg-[#06080b] text-white" aria-label={`Playing ${item.title}`}>
     <header className="flex min-h-16 items-center gap-4 border-b border-white/10 bg-black/45 px-5 py-3 backdrop-blur-xl">
       <div className="min-w-0 flex-1"><h1 className="truncate text-sm font-semibold">{item.title}</h1><p className="mt-0.5 truncate text-[11px] text-white/55">{sourceName}{item.container ? ` · ${item.container.toLocaleUpperCase()}` : ""}{item.width && item.height ? ` · ${item.width} × ${item.height}` : ""}</p></div>
       <Button variant="ghost" className="text-white/75 hover:text-white" onClick={() => void openExternal()}><ExternalLink size={15} /> Open in system player</Button>
@@ -1024,7 +1321,7 @@ function EmbeddedVideoPlayer({ item, sourceName, onClose, onPrevious, onNext }: 
     </header>
     <div className="relative flex aspect-video min-h-0 items-center justify-center bg-black">
       {loading ? <div className="absolute inset-0 z-[1] flex items-center justify-center gap-2 bg-black/80 text-sm text-white/60" role="status"><LoaderCircle className="animate-spin text-accent" size={18} /> Preparing embedded playback…</div> : null}
-      {playbackError ? <div className="max-w-lg border border-white/10 bg-white/5 p-6 text-center"><Film className="mx-auto text-white/35" size={34} /><h2 className="mt-4 text-lg font-semibold">This video could not be played here</h2><p className="mt-2 text-sm leading-6 text-white/55">{playbackError}</p><Button className="mt-5" onClick={() => void openExternal()}><ExternalLink size={15} /> Open in system player</Button></div> : null}
+      {playbackError ? <div className="max-w-lg border border-white/10 bg-white/5 p-6 text-center"><Film className="mx-auto text-white/35" size={34} /><h2 className="mt-4 text-lg font-semibold">This video could not be played here</h2><p className="mt-2 text-sm leading-6 text-white/55">{playbackError}</p><div className="mt-5 flex flex-wrap justify-center gap-2">{!session?.compatibilityTranscoded ? <Button variant="secondary" onClick={() => void retryEmbeddedPlayback()}><RotateCcw size={15} /> Create H.264 playback copy</Button> : null}<Button onClick={() => void openExternal()}><ExternalLink size={15} /> Open in system player</Button></div></div> : null}
       {session && !playbackError ? <video
         ref={videoRef}
         className="max-h-full max-w-full bg-black shadow-[0_30px_100px_rgb(0_0_0/0.65)]"
@@ -1049,8 +1346,9 @@ function EmbeddedVideoPlayer({ item, sourceName, onClose, onPrevious, onNext }: 
       <label className="flex items-center gap-2 text-xs text-white/55"><span>Speed</span><Select className="h-8 w-24 border-white/10 bg-white/5 text-xs text-white" value={playbackRate} onChange={(event) => { const rate = Number(event.target.value); setPlaybackRate(rate); if (videoRef.current) videoRef.current.playbackRate = rate; }}><option value={0.5}>0.5×</option><option value={0.75}>0.75×</option><option value={1}>1×</option><option value={1.25}>1.25×</option><option value={1.5}>1.5×</option><option value={2}>2×</option></Select></label>
       <p className="ml-auto text-[10px] text-white/40">Space/K play · J/L seek · M mute · F fullscreen · Esc close</p>
       {resumedAt != null ? <p className="w-full text-[10px] text-accent" role="status">Resumed at {formatDuration(resumedAt)}</p> : null}
+      {session?.compatibilityMode ? <p className="w-full text-[10px] text-accent" role="status">{session.compatibilityTranscoded ? "Using an H.264/AAC embedded-playback copy." : preflight?.compatibilityCached ? "Using an existing cached compatibility copy. AV1 timing is optimized for the embedded player." : "A lossless AV1 timing copy was created for this playback."} The original is unchanged.</p> : null}
     </footer>
-  </section>;
+  </section>{consent ? <div className="fixed inset-0 z-[90] grid place-items-center bg-black/75 p-5 backdrop-blur-sm" onMouseDown={dismissConsent}><section ref={consentDialogRef} className="panel-shadow w-full max-w-xl overflow-hidden rounded-[14px] border border-line bg-panel" role="dialog" aria-modal="true" aria-labelledby="compatibility-copy-title" aria-describedby="compatibility-copy-description" aria-busy={consentBusy} onKeyDown={trapConsentFocus} onMouseDown={(event) => event.stopPropagation()}><header className="flex items-start gap-4 border-b border-line/70 px-5 py-5"><div className="grid size-11 shrink-0 place-items-center rounded-[10px] border border-accent/20 bg-accent/10 text-accent"><Copy size={20} /></div><div><p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-accent">Embedded playback compatibility</p><h2 id="compatibility-copy-title" className="mt-1 text-xl font-semibold tracking-[-0.03em]">{consent.reencodeRequired ? "Create an H.264 playback copy?" : "Create a temporary playback copy?"}</h2><p id="compatibility-copy-description" className="mt-2 text-xs leading-5 text-muted">{consent.reason}</p></div></header><div className="space-y-4 px-5 py-5"><dl className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-5 gap-y-2.5 border-y border-line/60 py-4 text-xs"><dt className="text-muted">Estimated copy size</dt><dd className="number-font font-medium text-ink">{formatBytes(consent.estimatedCopyBytes)}</dd><dt className="text-muted">Free space available</dt><dd className="number-font font-medium text-ink">{consent.availableSpaceBytes != null ? formatBytes(consent.availableSpaceBytes) : "Unknown"}</dd><dt className="text-muted">Conversion</dt><dd className="font-medium text-ink">{consent.reencodeRequired ? "H.264/AAC · video re-encode" : "Stream-copy · no re-encoding"}</dd></dl>{consent.availableSpaceBytes != null && consent.estimatedCopyBytes > consent.availableSpaceBytes ? <p className="border-l-2 border-red-400/70 bg-red-400/5 px-3 py-2 text-xs leading-5 text-red-300" role="alert">There may not be enough free space to create this copy.</p> : null}{consent.unusuallyLarge ? <p className="border-l-2 border-amber-400/70 bg-amber-400/5 px-3 py-2 text-xs leading-5 text-amber-200">This is an unusually large copy, so Nice Downloader always asks before creating it—even when automatic copies are enabled.</p> : null}<div className="rounded-[9px] bg-elevated/55 p-3 text-[11px] leading-5 text-muted"><p><strong className="font-semibold text-ink">Your original stays untouched.</strong> The copy exists only in Nice Downloader’s private playback cache.</p><p className="mt-1">The oldest copies are removed automatically before the cache exceeds 4 files or 8 GiB. You can review or clear the cache in Settings.</p></div>{!consent.reencodeRequired && consent.preference === "never" ? <p className="text-[11px] leading-5 text-muted">Your saved preference is <strong className="text-ink">Never create automatically</strong>. “Create copy and play” is a one-time override unless you enable the option below.</p> : null}{!consent.reencodeRequired ? <label className="flex items-start gap-3 text-xs text-muted"><input className="mt-0.5" type="checkbox" checked={rememberAutomatic} onChange={(event) => setRememberAutomatic(event.target.checked)} /><span><strong className="block font-medium text-ink">Automatically create compatible copies in the future</strong>Large copies will still require confirmation.</span></label> : <p className="text-[11px] leading-5 text-muted">This fallback is never created automatically because it changes the cached copy’s video codec. The original file and its quality remain unchanged.</p>}{consentBusy && consent.reencodeRequired ? <p className="flex items-center gap-2 text-xs text-accent" role="status"><LoaderCircle className="animate-spin" size={14} /> Encoding the compatibility copy. Keep Nice Downloader open; this may take several minutes.</p> : null}</div><footer className="flex flex-wrap items-center justify-end gap-2 border-t border-line/70 bg-elevated/25 px-5 py-4"><Button data-consent-cancel variant="ghost" disabled={consentBusy} onClick={dismissConsent}>Cancel</Button><Button variant="secondary" disabled={consentBusy} onClick={() => void openOriginalFromConsent()}><ExternalLink size={15} /> Open original in system player</Button><Button disabled={consentBusy} onClick={() => void approveCompatibilityCopy()}>{consentBusy ? <LoaderCircle className="animate-spin" size={15} /> : <Copy size={15} />} {consentBusy && consent.reencodeRequired ? "Encoding…" : consent.reencodeRequired ? "Create H.264 copy and play" : "Create copy and play"}</Button></footer></section></div> : null}</>;
 }
 
 function MediaDetails({ item, sourceName, onClose, onWatch, onChanged, onRemoved, onOperation }: { item: LibraryItem; sourceName: string; onClose: () => void; onWatch: () => void; onChanged: (item: LibraryItem) => void; onRemoved: () => void; onOperation: (result: LibraryFileOperationResult) => void }) {
@@ -1066,6 +1364,11 @@ function MediaDetails({ item, sourceName, onClose, onWatch, onChanged, onRemoved
   const [newFileName, setNewFileName] = useState(fileNameFromPath(item.path));
   const [operationPlan, setOperationPlan] = useState<LibraryFileOperationPlan | null>(null);
   const [operationBusy, setOperationBusy] = useState(false);
+  const closeButtonRef = useRef<HTMLButtonElement | null>(null);
+
+  useEffect(() => {
+    closeButtonRef.current?.focus();
+  }, []);
 
   useEffect(() => {
     setTitle(item.title);
@@ -1151,7 +1454,22 @@ function MediaDetails({ item, sourceName, onClose, onWatch, onChanged, onRemoved
     }
   }
 
-  return <aside className="fixed bottom-0 right-0 top-0 z-50 w-[min(500px,100vw)] overflow-y-auto border-l border-line/70 bg-panel/98 shadow-[-28px_0_80px_rgb(0_0_0/0.32)] backdrop-blur-xl" role="dialog" aria-modal="true" aria-label={`${item.title} details`}><div className="sticky top-0 z-[1] flex items-center justify-between border-b border-line/60 bg-panel/90 px-5 py-4 backdrop-blur-xl"><div><p className="text-xs font-semibold">Media details</p><p className="mt-0.5 text-[10px] text-muted">Use ← → to browse · Esc to close</p></div><button className="grid size-8 place-items-center rounded-[7px] text-muted transition hover:bg-elevated hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70" onClick={onClose} aria-label="Close media details"><X size={17} /></button></div><div className="p-5"><div className="aspect-video overflow-hidden rounded-[12px] bg-elevated"><MediaArtwork item={item} eager /></div>{editing ? <div className="mt-5 space-y-3"><Field label="Title"><Input value={title} onChange={(event) => setTitle(event.target.value)} /></Field><Field label="Tags"><Input value={tags} onChange={(event) => setTags(event.target.value)} placeholder="Comma-separated tags" /></Field><div className="flex gap-2"><Button onClick={() => void update()}>Save changes</Button><Button variant="secondary" onClick={() => setEditing(false)}>Cancel</Button></div></div> : <><h2 className="mt-5 text-[22px] font-semibold leading-[1.2] tracking-[-0.035em] text-balance">{item.title}</h2><p className="mt-2 text-xs text-muted">{sourceName}{item.durationSeconds != null ? ` · ${formatDuration(item.durationSeconds)}` : ""}</p><div className="mt-5 flex flex-wrap gap-2">{item.mediaKind === "video" ? <Button className="flex-1" disabled={item.missing} onClick={onWatch}><Play size={16} fill="currentColor" /> Watch here</Button> : <Button className="flex-1" disabled={item.missing} onClick={() => void openItem()}><Play size={16} /> Open image</Button>}<Button variant="secondary" disabled={item.missing} onClick={() => void openItem()}><ExternalLink size={15} /> System player</Button><Button variant="secondary" onClick={() => setEditing(true)}>Edit</Button></div></>}
+  function trapFocus(event: React.KeyboardEvent<HTMLElement>) {
+    if (event.key !== "Tab") return;
+    const controls = Array.from(event.currentTarget.querySelectorAll<HTMLElement>("button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [href], [tabindex]:not([tabindex='-1'])"));
+    const first = controls[0];
+    const last = controls.at(-1);
+    if (!first || !last) return;
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+
+  return <aside className="fixed bottom-0 right-0 top-0 z-50 w-[min(500px,100vw)] overflow-y-auto border-l border-line/70 bg-panel/98 shadow-[-28px_0_80px_rgb(0_0_0/0.32)] backdrop-blur-xl" role="dialog" aria-modal="true" aria-label={`${item.title} details`} onKeyDown={trapFocus}><div className="sticky top-0 z-[1] flex items-center justify-between border-b border-line/60 bg-panel/90 px-5 py-4 backdrop-blur-xl"><div><p className="text-xs font-semibold">Media details</p><p className="mt-0.5 text-[10px] text-muted">Use ← → to browse · Esc to close</p></div><button ref={closeButtonRef} className="grid size-8 place-items-center rounded-[7px] text-muted transition hover:bg-elevated hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70" onClick={onClose} aria-label="Close media details"><X size={17} /></button></div><div className="p-5"><div className="aspect-video overflow-hidden rounded-[12px] bg-elevated"><MediaArtwork item={item} eager /></div>{editing ? <div className="mt-5 space-y-3"><Field label="Title"><Input value={title} onChange={(event) => setTitle(event.target.value)} /></Field><Field label="Tags"><Input value={tags} onChange={(event) => setTags(event.target.value)} placeholder="Comma-separated tags" /></Field><div className="flex gap-2"><Button onClick={() => void update()}>Save changes</Button><Button variant="secondary" onClick={() => setEditing(false)}>Cancel</Button></div></div> : <><h2 className="mt-5 text-[22px] font-semibold leading-[1.2] tracking-[-0.035em] text-balance">{item.title}</h2><p className="mt-2 text-xs text-muted">{sourceName}{item.durationSeconds != null ? ` · ${formatDuration(item.durationSeconds)}` : ""}</p><div className="mt-5 flex flex-wrap gap-2">{item.mediaKind === "video" ? <Button className="flex-1" disabled={item.missing} onClick={onWatch}><Play size={16} fill="currentColor" /> Watch here</Button> : <Button className="flex-1" disabled={item.missing} onClick={() => void openItem()}><Play size={16} /> Open image</Button>}<Button variant="secondary" disabled={item.missing} onClick={() => void openItem()}><ExternalLink size={15} /> System player</Button><Button variant="secondary" onClick={() => setEditing(true)}>Edit</Button></div></>}
       <div className="mt-4 flex items-center gap-2"><Button variant="secondary" className={item.favorite ? "text-rose-300" : ""} onClick={() => void updateCuration(!item.favorite, item.rating)}><Heart size={15} fill={item.favorite ? "currentColor" : "none"} /> {item.favorite ? "Favorited" : "Favorite"}</Button><label className="flex flex-1 items-center gap-2 text-xs text-muted"><Star size={15} /><span className="sr-only">Rating</span><Select className="h-10" value={item.rating ?? ""} onChange={(event) => void updateCuration(item.favorite, event.target.value ? Number(event.target.value) : null)}><option value="">Not rated</option>{[5, 4, 3, 2, 1].map((rating) => <option key={rating} value={rating}>{rating} star{rating === 1 ? "" : "s"}</option>)}</Select></label></div>
       <dl className="mt-7 grid grid-cols-[110px_1fr] gap-x-4 gap-y-3 border-t border-line/60 pt-5 text-xs"><dt className="text-muted">Type</dt><dd>{item.mediaKind === "image" ? "Image" : "Video"}{item.container ? ` · ${item.container.toLocaleUpperCase()}` : ""}</dd>{item.width && item.height ? <><dt className="text-muted">Dimensions</dt><dd className="number-font">{item.width} × {item.height}{item.fps ? ` · ${formatFps(item.fps)} fps` : ""}{item.dynamicRange ? ` · ${item.dynamicRange}` : ""}</dd></> : null}{item.videoCodec || item.audioCodec ? <><dt className="text-muted">Codecs</dt><dd>{[formatCodec(item.videoCodec), formatCodec(item.audioCodec)].filter(Boolean).join(" + ")}</dd></> : null}{item.fileSizeBytes != null ? <><dt className="text-muted">File size</dt><dd className="number-font">{formatBytes(item.fileSizeBytes)}</dd></> : null}<dt className="text-muted">Added</dt><dd>{new Date(item.addedAt).toLocaleString()}</dd>{item.modifiedAtMs ? <><dt className="text-muted">Modified</dt><dd>{new Date(item.modifiedAtMs).toLocaleString()}</dd></> : null}<dt className="text-muted">Location</dt><dd className="break-all text-muted" title={item.path}>{item.relativePath || item.path}</dd>{item.site ? <><dt className="text-muted">Origin</dt><dd>{item.site}</dd></> : null}</dl>
       {item.metadataState === "pending" ? <p className="mt-5 flex items-center gap-2 text-[11px] text-muted" role="status"><LoaderCircle className="animate-spin text-accent" size={13} /> Inspecting resolution, codecs, and duration…</p> : null}
@@ -1241,7 +1559,10 @@ function BulkMoveDialog({ selectedIds, onClose, onComplete }: { selectedIds: Set
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !busy) onClose();
+      if (event.key === "Escape" && !busy) {
+        event.preventDefault();
+        onClose();
+      }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
@@ -1372,7 +1693,7 @@ function DuplicateSection({ job, groups, items, onJob, onTrashed }: { job: Libra
     } catch (error) { setError(normalizeError(error)); } finally { setTrashBusy(null); }
   }
 
-  return <section className="mt-8 border-t border-line/60 pt-7" aria-labelledby="library-duplicates-title"><div className="mb-4 flex flex-wrap items-end justify-between gap-3"><div><div className="flex items-center gap-2"><Fingerprint className="text-accent" size={18} /><h2 id="library-duplicates-title" className="text-lg font-semibold tracking-[-0.025em]">Duplicate intelligence</h2></div><p className="mt-1 max-w-2xl text-xs leading-5 text-muted">Size identifies candidates; streaming SHA-256 verifies byte-for-byte matches. Cleanup is always an explicit, confirmed move to the system Trash.</p></div>{running ? <Button variant="secondary" className="h-9 text-xs" onClick={() => void cancel()}><Ban size={14} /> Cancel analysis</Button> : <Button variant="secondary" className="h-9 text-xs" onClick={() => void start()}><Fingerprint size={14} /> {groups.length > 0 ? "Analyze again" : "Analyze duplicates"}</Button>}</div>{running && job ? <div className="bg-panel/55 p-4" role="status" aria-live="polite"><div className="flex items-center justify-between gap-4 text-xs"><span className="flex min-w-0 items-center gap-2 text-ink"><LoaderCircle className="shrink-0 animate-spin text-accent" size={14} /><span className="truncate">{job.currentTitle ? `Checking ${job.currentTitle}` : "Finding same-size candidates"}</span></span><span className="number-font shrink-0 text-muted">{job.hashedItems + job.skippedItems} / {job.candidateItems}</span></div><div className="mt-3 h-1.5 overflow-hidden rounded-full bg-elevated"><div className="h-full bg-accent transition-[width]" style={{ width: `${progress}%` }} /></div><p className="mt-2 text-[10px] text-muted">{formatBytes(job.hashedBytes)} verified · {job.skippedItems} skipped · cached hashes are reused while fingerprints match</p></div> : null}{job?.state === "failed" ? <p className="border-l-2 border-red-400/60 pl-3 text-xs text-red-300">{job.error || "Duplicate analysis failed."}</p> : null}{!running && groups.length === 0 ? <div className="border border-dashed border-line/70 bg-panel/25 px-5 py-7 text-center text-xs text-muted">{job?.state === "completed" ? "No byte-for-byte duplicate groups were found." : "Run analysis to verify possible duplicates without changing any files."}</div> : <div className="space-y-3">{groups.map((group, index) => <article key={group.id} className="bg-panel/55 p-4"><div className="flex flex-wrap items-start justify-between gap-3"><div><div className="flex items-center gap-2"><Copy className="text-accent" size={16} /><h3 className="text-sm font-semibold">Exact duplicate group {index + 1}</h3></div><p className="mt-1 text-[10px] text-muted">SHA-256 verified · {formatBytes(group.fileSizeBytes)} each · up to {formatBytes(group.potentialReclaimBytes)} duplicated data</p></div><span className="number-font rounded bg-elevated px-2 py-1 text-[10px] text-muted">{group.itemIds.length} files</span></div><div className="mt-3 divide-y divide-line/60 border-t border-line/60">{group.itemIds.map((id) => { const item = itemsById.get(id); const confirming = confirmTrash === id; return <div key={id} className="flex items-center gap-3 py-2.5"><div className="grid size-8 shrink-0 place-items-center rounded-[7px] bg-elevated text-accent">{item?.mediaKind === "image" ? <ImageIcon size={14} /> : <Film size={14} />}</div><div className="min-w-0 flex-1"><p className="truncate text-xs font-medium text-ink">{item?.title || "Media record"}</p><p className="mt-0.5 truncate text-[10px] text-muted" title={item?.path}>{item?.path || "Location unavailable"}</p></div>{item && !item.missing ? <><Button variant="ghost" className="h-8 px-2 text-xs" disabled={trashBusy != null} onClick={() => void openItem(item.id)}>Open</Button>{confirming ? <Button variant="secondary" className="h-8 px-2 text-xs" disabled={trashBusy != null} onClick={() => setConfirmTrash(null)}>Keep</Button> : null}<Button variant={confirming ? "danger" : "ghost"} className="h-8 px-2 text-xs" disabled={trashBusy != null} onClick={() => void moveToTrash(group.id, item.id)}>{trashBusy === item.id ? <LoaderCircle className="animate-spin" size={13} /> : <Trash2 size={13} />} {confirming ? "Confirm Trash" : "Move to Trash"}</Button></> : null}</div>; })}</div></article>)}</div>}<p className="mt-3 text-[10px] leading-4 text-muted">Before cleanup, Rust re-hashes the selected file and a retained copy. Potential duplicated data is informational; hard links or filesystem compression can make actual recoverable space different.</p></section>;
+  return <section className="mt-8 border-t border-line/60 pt-7" aria-labelledby="library-duplicates-title"><div className="mb-4 flex flex-wrap items-end justify-between gap-3"><div><div className="flex items-center gap-2"><Fingerprint className="text-accent" size={18} /><h2 id="library-duplicates-title" className="text-lg font-semibold tracking-[-0.025em]">Duplicate intelligence</h2></div><p className="mt-1 max-w-2xl text-xs leading-5 text-muted">Size identifies candidates; streaming SHA-256 verifies byte-for-byte matches. Cleanup is always an explicit, confirmed move to the system Trash.</p></div>{running ? <Button variant="secondary" className="h-9 text-xs" onClick={() => void cancel()}><Ban size={14} /> Cancel analysis</Button> : <Button variant="secondary" className="h-9 text-xs" onClick={() => void start()}><Fingerprint size={14} /> {groups.length > 0 ? "Analyze again" : "Analyze duplicates"}</Button>}</div>{running && job ? <div className="bg-panel/55 p-4" aria-label="Duplicate analysis progress"><div className="flex items-center justify-between gap-4 text-xs"><span className="flex min-w-0 items-center gap-2 text-ink"><LoaderCircle className="shrink-0 animate-spin text-accent" size={14} /><span className="truncate">{job.currentTitle ? `Checking ${job.currentTitle}` : "Finding same-size candidates"}</span></span><span className="number-font shrink-0 text-muted">{job.hashedItems + job.skippedItems} / {job.candidateItems}</span></div><div className="mt-3 h-1.5 overflow-hidden rounded-full bg-elevated" role="progressbar" aria-label="Exact duplicate analysis" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(progress)}><div className="h-full bg-accent transition-[width]" style={{ width: `${progress}%` }} /></div><p className="mt-2 text-[10px] text-muted">{formatBytes(job.hashedBytes)} verified · {job.skippedItems} skipped · cached hashes are reused while fingerprints match</p></div> : null}{job?.state === "failed" ? <p className="border-l-2 border-red-400/60 pl-3 text-xs text-red-300">{job.error || "Duplicate analysis failed."}</p> : null}{!running && groups.length === 0 ? <div className="border border-dashed border-line/70 bg-panel/25 px-5 py-7 text-center text-xs text-muted">{job?.state === "completed" ? "No byte-for-byte duplicate groups were found." : "Run analysis to verify possible duplicates without changing any files."}</div> : <div className="space-y-3">{groups.map((group, index) => <article key={group.id} className="bg-panel/55 p-4"><div className="flex flex-wrap items-start justify-between gap-3"><div><div className="flex items-center gap-2"><Copy className="text-accent" size={16} /><h3 className="text-sm font-semibold">Exact duplicate group {index + 1}</h3></div><p className="mt-1 text-[10px] text-muted">SHA-256 verified · {formatBytes(group.fileSizeBytes)} each · up to {formatBytes(group.potentialReclaimBytes)} duplicated data</p></div><span className="number-font rounded bg-elevated px-2 py-1 text-[10px] text-muted">{group.itemIds.length} files</span></div><div className="mt-3 divide-y divide-line/60 border-t border-line/60">{group.itemIds.map((id) => { const item = itemsById.get(id); const confirming = confirmTrash === id; return <div key={id} className="flex items-center gap-3 py-2.5"><div className="grid size-8 shrink-0 place-items-center rounded-[7px] bg-elevated text-accent">{item?.mediaKind === "image" ? <ImageIcon size={14} /> : <Film size={14} />}</div><div className="min-w-0 flex-1"><p className="truncate text-xs font-medium text-ink">{item?.title || "Media record"}</p><p className="mt-0.5 truncate text-[10px] text-muted" title={item?.path}>{item?.path || "Location unavailable"}</p></div>{item && !item.missing ? <><Button variant="ghost" className="h-8 px-2 text-xs" disabled={trashBusy != null} onClick={() => void openItem(item.id)}>Open</Button>{confirming ? <Button variant="secondary" className="h-8 px-2 text-xs" disabled={trashBusy != null} onClick={() => setConfirmTrash(null)}>Keep</Button> : null}<Button variant={confirming ? "danger" : "ghost"} className="h-8 px-2 text-xs" disabled={trashBusy != null} onClick={() => void moveToTrash(group.id, item.id)}>{trashBusy === item.id ? <LoaderCircle className="animate-spin" size={13} /> : <Trash2 size={13} />} {confirming ? "Confirm Trash" : "Move to Trash"}</Button></> : null}</div>; })}</div></article>)}</div>}<p className="mt-3 text-[10px] leading-4 text-muted">Before cleanup, Rust re-hashes the selected file and a retained copy. Potential duplicated data is informational; hard links or filesystem compression can make actual recoverable space different.</p></section>;
 }
 
 function FileOperationsSection({ operations, onResult, onChanged }: { operations: LibraryFileOperation[]; onResult: (result: LibraryFileOperationResult) => void; onChanged: (operations: LibraryFileOperation[]) => void }) {
@@ -1453,7 +1774,7 @@ function SourceForm({ onClose, onSaved }: { onClose: () => void; onSaved: (sourc
     } catch (error) { setError(normalizeError(error)); } finally { setBusy(false); }
   }
 
-  return <section className="panel-shadow mb-6 border border-accent/25 bg-panel/90 p-5" aria-labelledby="add-source-title"><div className="flex items-start justify-between gap-4"><div><h2 id="add-source-title" className="text-sm font-semibold">Add a library source</h2><p className="mt-1 text-xs text-muted">Files stay in this folder. Nice Downloader only creates catalog records.</p></div><button className="text-muted hover:text-ink" onClick={onClose} aria-label="Close add folder form"><X size={18} /></button></div><div className="mt-4 grid gap-3 lg:grid-cols-[1fr_1fr_180px]"><Field label="Folder"><div className="flex gap-2"><Input value={path} readOnly placeholder="Choose a folder" /><Button variant="secondary" className="shrink-0" onClick={() => void chooseFolder()}><FolderOpen size={15} /> Browse</Button></div></Field><Field label="Source name"><Input value={name} onChange={(event) => setName(event.target.value)} placeholder="Media archive" /></Field><Field label="Media"><Select value={mediaKind} onChange={(event) => setMediaKind(event.target.value as LibraryMediaKind)}><option value="both">Videos and images</option><option value="video">Videos only</option><option value="image">Images only</option></Select></Field></div><div className="mt-4 flex flex-wrap items-center justify-between gap-4 border-t border-line/60 pt-4"><div className="flex flex-wrap gap-5 text-xs text-muted"><label className="flex items-center gap-2"><input type="checkbox" checked={recursive} onChange={(event) => setRecursive(event.target.checked)} /> Include subfolders</label><label className="flex items-center gap-2"><input type="checkbox" checked={watchEnabled} onChange={(event) => setWatchEnabled(event.target.checked)} /> Auto scan changes</label><label className="flex items-center gap-2"><input type="checkbox" checked={privateSource} onChange={(event) => setPrivateSource(event.target.checked)} /> Mark as private</label></div><div className="flex gap-2"><Button variant="secondary" onClick={onClose}>Cancel</Button><Button disabled={busy || !path || !name.trim()} onClick={() => void addSource()}>{busy ? <LoaderCircle className="animate-spin" size={15} /> : <Play size={15} />} Add and scan</Button></div></div></section>;
+  return <section className="panel-shadow mb-6 border border-accent/25 bg-panel/90 p-5" aria-labelledby="add-source-title"><div className="flex items-start justify-between gap-4"><div><h2 id="add-source-title" className="text-sm font-semibold">Add a library source</h2><p className="mt-1 text-xs text-muted">Files stay in this folder. Nice Downloader only creates catalog records.</p></div><button className="text-muted hover:text-ink" onClick={onClose} aria-label="Close add folder form"><X size={18} /></button></div><div className="mt-4 grid gap-3 lg:grid-cols-[1fr_1fr_180px]"><Field label="Folder"><div className="flex gap-2"><Input value={path} readOnly placeholder="Choose a folder" /><Button autoFocus variant="secondary" className="shrink-0" onClick={() => void chooseFolder()}><FolderOpen size={15} /> Browse</Button></div></Field><Field label="Source name"><Input value={name} onChange={(event) => setName(event.target.value)} placeholder="Media archive" /></Field><Field label="Media"><Select value={mediaKind} onChange={(event) => setMediaKind(event.target.value as LibraryMediaKind)}><option value="both">Videos and images</option><option value="video">Videos only</option><option value="image">Images only</option></Select></Field></div><div className="mt-4 flex flex-wrap items-center justify-between gap-4 border-t border-line/60 pt-4"><div className="flex flex-wrap gap-5 text-xs text-muted"><label className="flex items-center gap-2"><input type="checkbox" checked={recursive} onChange={(event) => setRecursive(event.target.checked)} /> Include subfolders</label><label className="flex items-center gap-2"><input type="checkbox" checked={watchEnabled} onChange={(event) => setWatchEnabled(event.target.checked)} /> Auto scan changes</label><label className="flex items-center gap-2"><input type="checkbox" checked={privateSource} onChange={(event) => setPrivateSource(event.target.checked)} /> Mark as private</label></div><div className="flex gap-2"><Button variant="secondary" onClick={onClose}>Cancel</Button><Button disabled={busy || !path || !name.trim()} onClick={() => void addSource()}>{busy ? <LoaderCircle className="animate-spin" size={15} /> : <Play size={15} />} Add and scan</Button></div></div></section>;
 }
 
 function SourceSection({ sources, scanJobs, onJob, onRemoved }: { sources: LibrarySource[]; scanJobs: LibraryScanJob[]; onJob: (job: LibraryScanJob) => void; onRemoved: (id: string) => void }) {
@@ -1481,7 +1802,7 @@ function SourceCard({ source, latestJob, onJob, onRemoved }: { source: LibrarySo
       setNotice({ message: changed.watchEnabled ? `${source.name} will rescan automatically after folder changes.` : `Automatic scans disabled for ${source.name}.`, view: "library" });
     } catch (error) { setError(normalizeError(error)); } finally { setWatchBusy(false); }
   }
-  return <article className="bg-panel/65 p-4"><div className="flex min-w-0 items-start gap-3"><div className="grid size-10 shrink-0 place-items-center rounded-[9px] bg-elevated text-accent"><HardDrive size={18} /></div><div className="min-w-0 flex-1"><div className="flex items-center gap-2"><h3 className="truncate text-sm font-semibold">{source.name}</h3><SourceStatus status={runningJob ? "scanning" : source.status} />{source.private ? <span className="text-[9px] font-semibold uppercase tracking-[0.08em] text-muted">Private</span> : null}</div><p className="mt-1 truncate text-[11px] text-muted" title={source.path}>{source.path}</p></div></div>{runningJob ? <div className="mt-3 border-t border-line/60 pt-3" role="status"><div className="flex items-center justify-between text-[11px] text-muted"><span className="flex items-center gap-1.5"><LoaderCircle className="animate-spin" size={12} /> Indexing {runningJob.currentPath || "folder"}</span><span className="number-font">{runningJob.indexedCount} added</span></div><p className="mt-1 truncate text-[10px] text-muted/70">{runningJob.discoveredCount} discovered · {runningJob.skippedCount} skipped · {runningJob.warningCount} warnings</p></div> : <p className="mt-3 text-[11px] text-muted">{source.itemCount} indexed · {source.mediaKind === "both" ? "videos and images" : `${source.mediaKind}s`}{source.lastScannedAt ? ` · scanned ${new Date(source.lastScannedAt).toLocaleDateString()}` : " · not scanned"}</p>}{source.lastError && !runningJob ? <p className="mt-2 text-[11px] text-red-400">{source.lastError}</p> : null}{latestJob && !runningJob && latestJob.warningCount > 0 ? <details className="mt-2 text-[11px] text-amber-400"><summary className="cursor-pointer">{latestJob.warningCount} scan warning{latestJob.warningCount === 1 ? "" : "s"}</summary><ul className="mt-1 space-y-1 pl-4 text-muted">{latestJob.warnings.map((warning, index) => <li key={`${latestJob.id}-${index}`} className="list-disc">{warning}</li>)}</ul></details> : null}<div className="mt-3 flex flex-wrap items-center gap-2 border-t border-line/60 pt-3">{runningJob ? <Button variant="secondary" className="h-7 px-2 text-xs" onClick={() => void cancel()}><Ban size={13} /> Cancel scan</Button> : <Button variant="secondary" className="h-7 px-2 text-xs" onClick={() => void scan()}><FolderSearch size={13} /> Scan now</Button>}<label className="flex items-center gap-2 px-1 text-[11px] text-muted"><input type="checkbox" checked={watchEnabled} disabled={watchBusy} onChange={() => void toggleWatch()} /> Auto scan</label>{confirmRemove ? <button className="ml-auto text-[11px] text-muted hover:text-ink" onClick={() => setConfirmRemove(false)}>Keep source</button> : null}<Button variant={confirmRemove ? "danger" : "ghost"} className="ml-auto h-7 px-2 text-xs" disabled={Boolean(runningJob)} onClick={() => void remove()}><Trash2 size={13} /> {confirmRemove ? "Remove catalog records" : "Remove"}</Button></div></article>;
+  return <article className="bg-panel/65 p-4"><div className="flex min-w-0 items-start gap-3"><div className="grid size-10 shrink-0 place-items-center rounded-[9px] bg-elevated text-accent"><HardDrive size={18} /></div><div className="min-w-0 flex-1"><div className="flex items-center gap-2"><h3 className="truncate text-sm font-semibold">{source.name}</h3><SourceStatus status={runningJob ? "scanning" : source.status} />{source.private ? <span className="text-[9px] font-semibold uppercase tracking-[0.08em] text-muted">Private</span> : null}</div><p className="mt-1 truncate text-[11px] text-muted" title={source.path}>{source.path}</p></div></div>{runningJob ? <div className="mt-3 border-t border-line/60 pt-3" aria-label={`Scan progress for ${source.name}`}><div className="flex items-center justify-between text-[11px] text-muted"><span className="flex items-center gap-1.5"><LoaderCircle className="animate-spin" size={12} /> Indexing {runningJob.currentPath || "folder"}</span><span className="number-font">{runningJob.indexedCount} added</span></div><p className="mt-1 truncate text-[10px] text-muted/70">{runningJob.discoveredCount} discovered · {runningJob.skippedCount} skipped · {runningJob.warningCount} warnings</p></div> : <p className="mt-3 text-[11px] text-muted">{source.itemCount} indexed · {source.mediaKind === "both" ? "videos and images" : `${source.mediaKind}s`}{source.lastScannedAt ? ` · scanned ${new Date(source.lastScannedAt).toLocaleDateString()}` : " · not scanned"}</p>}{source.lastError && !runningJob ? <p className="mt-2 text-[11px] text-red-400">{source.lastError}</p> : null}{latestJob && !runningJob && latestJob.warningCount > 0 ? <details className="mt-2 text-[11px] text-amber-400"><summary className="cursor-pointer">{latestJob.warningCount} scan warning{latestJob.warningCount === 1 ? "" : "s"}</summary><ul className="mt-1 space-y-1 pl-4 text-muted">{latestJob.warnings.map((warning, index) => <li key={`${latestJob.id}-${index}`} className="list-disc">{warning}</li>)}</ul></details> : null}<div className="mt-3 flex flex-wrap items-center gap-2 border-t border-line/60 pt-3">{runningJob ? <Button variant="secondary" className="h-7 px-2 text-xs" onClick={() => void cancel()}><Ban size={13} /> Cancel scan</Button> : <Button variant="secondary" className="h-7 px-2 text-xs" onClick={() => void scan()}><FolderSearch size={13} /> Scan now</Button>}<label className="flex items-center gap-2 px-1 text-[11px] text-muted"><input type="checkbox" checked={watchEnabled} disabled={watchBusy} onChange={() => void toggleWatch()} /> Auto scan</label>{confirmRemove ? <button className="ml-auto text-[11px] text-muted hover:text-ink" onClick={() => setConfirmRemove(false)}>Keep source</button> : null}<Button variant={confirmRemove ? "danger" : "ghost"} className="ml-auto h-7 px-2 text-xs" disabled={Boolean(runningJob)} onClick={() => void remove()}><Trash2 size={13} /> {confirmRemove ? "Remove catalog records" : "Remove"}</Button></div></article>;
 }
 
 function SourceStatus({ status }: { status: LibrarySource["status"] }) {

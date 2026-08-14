@@ -732,6 +732,31 @@ pub struct LibraryPlaybackSession {
     pub url: String,
     pub playback: Option<LibraryPlaybackState>,
     pub subtitles: Vec<LibrarySubtitleTrack>,
+    pub compatibility_mode: bool,
+    pub compatibility_transcoded: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryPlaybackPreflight {
+    pub compatibility_required: bool,
+    pub compatibility_cached: bool,
+    pub unusually_large: bool,
+    pub reencode_required: bool,
+    pub estimated_copy_bytes: u64,
+    pub available_space_bytes: Option<u64>,
+    pub reason: Option<String>,
+    pub preference: PlaybackCompatibilityPreference,
+    pub requires_confirmation: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryPlaybackCacheStatus {
+    pub file_count: usize,
+    pub total_bytes: u64,
+    pub max_files: usize,
+    pub max_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -1119,6 +1144,15 @@ pub enum CloseBehavior {
     Quit,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum PlaybackCompatibilityPreference {
+    #[default]
+    Ask,
+    Automatic,
+    Never,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 #[serde(default)]
@@ -1129,6 +1163,7 @@ pub struct DesktopPreferences {
     pub reduce_motion: bool,
     pub high_contrast: bool,
     pub interface_scale_percent: u16,
+    pub playback_compatibility: PlaybackCompatibilityPreference,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1146,6 +1181,7 @@ impl Default for DesktopPreferences {
             reduce_motion: false,
             high_contrast: false,
             interface_scale_percent: 100,
+            playback_compatibility: PlaybackCompatibilityPreference::Ask,
         }
     }
 }
@@ -1367,5 +1403,9 @@ mod tests {
         assert!(!preferences.reduce_motion);
         assert!(!preferences.high_contrast);
         assert_eq!(preferences.interface_scale_percent, 100);
+        assert_eq!(
+            preferences.playback_compatibility,
+            PlaybackCompatibilityPreference::Ask
+        );
     }
 }

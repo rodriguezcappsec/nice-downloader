@@ -107,6 +107,7 @@ export interface DesktopPreferences {
   reduceMotion: boolean;
   highContrast: boolean;
   interfaceScalePercent: 90 | 100 | 110 | 125;
+  playbackCompatibility: "ask" | "automatic" | "never";
 }
 export interface DesktopRuntimeStatus { trayAvailable: boolean; }
 
@@ -518,6 +519,27 @@ export interface LibraryPlaybackSession {
   url: string;
   playback?: LibraryPlaybackState | null;
   subtitles: LibrarySubtitleTrack[];
+  compatibilityMode: boolean;
+  compatibilityTranscoded: boolean;
+}
+
+export interface LibraryPlaybackPreflight {
+  compatibilityRequired: boolean;
+  compatibilityCached: boolean;
+  unusuallyLarge: boolean;
+  reencodeRequired: boolean;
+  estimatedCopyBytes: number;
+  availableSpaceBytes?: number | null;
+  reason?: string | null;
+  preference: DesktopPreferences["playbackCompatibility"];
+  requiresConfirmation: boolean;
+}
+
+export interface LibraryPlaybackCacheStatus {
+  fileCount: number;
+  totalBytes: number;
+  maxFiles: number;
+  maxBytes: number;
 }
 
 export interface LibraryCacheResult {

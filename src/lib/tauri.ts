@@ -30,6 +30,8 @@ import type {
   LibraryQueryRequest,
   LibraryQueryResult,
   LibraryPlaybackEntry,
+  LibraryPlaybackPreflight,
+  LibraryPlaybackCacheStatus,
   LibraryPlaybackSession,
   LibraryPlaybackState,
   SaveLibraryPlaybackRequest,
@@ -137,8 +139,14 @@ export const api = {
     invoke<LibraryFacets>("get_library_facets", { request }),
   getLibraryItemsByIds: (ids: string[]) =>
     invoke<LibraryItem[]>("get_library_items_by_ids", { ids }),
-  prepareLibraryPlayback: (id: string) =>
-    invoke<LibraryPlaybackSession>("prepare_library_playback", { id }),
+  inspectLibraryPlayback: (id: string) =>
+    invoke<LibraryPlaybackPreflight>("inspect_library_playback", { id }),
+  inspectLibraryPlaybackFallback: (id: string) =>
+    invoke<LibraryPlaybackPreflight>("inspect_library_playback_fallback", { id }),
+  prepareLibraryPlayback: (id: string, userApproved = false) =>
+    invoke<LibraryPlaybackSession>("prepare_library_playback", { id, userApproved }),
+  prepareLibraryPlaybackFallback: (id: string, userApproved = false) =>
+    invoke<LibraryPlaybackSession>("prepare_library_playback_fallback", { id, userApproved }),
   saveLibraryPlaybackProgress: (request: SaveLibraryPlaybackRequest) =>
     invoke<LibraryPlaybackState>("save_library_playback_progress", { request }),
   listContinueWatching: (limit = 12) =>
@@ -166,6 +174,8 @@ export const api = {
   getLibraryArtwork: (id: string) => invoke<string | null>("get_library_artwork", { id }),
   clearLibraryArtworkCache: () => invoke<LibraryCacheResult>("clear_library_artwork_cache"),
   getLibraryArtworkCacheStatus: () => invoke<LibraryArtworkCacheStatus>("get_library_artwork_cache_status"),
+  clearLibraryPlaybackCache: () => invoke<LibraryCacheResult>("clear_library_playback_cache"),
+  getLibraryPlaybackCacheStatus: () => invoke<LibraryPlaybackCacheStatus>("get_library_playback_cache_status"),
   openLibraryItem: (id: string) => invoke<void>("open_library_item", { id }),
   reconcileLibrary: () => invoke<LibraryScanResult>("reconcile_library"),
   exportLibrary: (path: string) => invoke<void>("export_library", { path }),

@@ -80,7 +80,8 @@ warning because current builds are not code-signed.
   previewable Move/Copy/Rename with Undo, and metadata backup/restore
 - Integrated Watch workspace with embedded playback, resume positions,
   Continue Watching, subtitle tracks, searchable paginated browsing, and an
-  explicit system-player fallback
+  explicit system-player fallback; compatibility copies require informed
+  consent and have visible cache controls
 - Scheduled playlist/channel subscriptions with archive-aware deduplication
 - FFmpeg-powered media transformations with progress and cancellation
 - Per-site browser-cookie, browser-profile, and proxy preferences
@@ -128,7 +129,23 @@ checksummed sources in `engines.lock.json`.
 
 The integrated player uses WebKitGTK's GStreamer runtime. Nice Downloader
 checks for `autoaudiosink` before opening a video and keeps **Open in system
-player** available when the embedded runtime or a codec is missing.
+player** available when the embedded runtime or a codec is missing. AV1 MP4
+tracks with fractional timing that WebKitGTK can misinterpret are prepared as
+a bounded, cached FFmpeg Matroska stream-copy. This routes the unchanged AV1
+and audio streams through GStreamer's reliable Matroska timing path without
+re-encoding or modifying the original file; the first embedded play may take
+a moment while the compatibility copy is created. Before creating an uncached
+copy, the player explains why it is needed, shows its estimated size and free
+space, and offers **Create copy and play**, **Open original in system player**,
+or **Cancel**. Settings can keep this behavior on Ask, make ordinary copies
+automatic, or prevent automatic creation; copies of 2 GiB or larger are always
+confirmed. Compatibility cache usage and clearing are available under
+Settings > Desktop and accessibility.
+
+If WebKitGTK still rejects the lossless AV1 timing copy, the player offers a
+separate H.264/AAC MP4 fallback. This second-stage copy requires explicit
+confirmation because it re-encodes video, may take several minutes, and may be
+larger. It is never created by the Automatic stream-copy preference.
 
 ```bash
 # Arch Linux

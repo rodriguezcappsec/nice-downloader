@@ -20,15 +20,15 @@ use crate::{
         LibraryBulkMoveResult, LibraryCacheResult, LibraryChange, LibraryCollection,
         LibraryDuplicateAnalysisJob, LibraryDuplicateGroup, LibraryDuplicateTrashResult,
         LibraryFacetRequest, LibraryFacets, LibraryFileOperation, LibraryFileOperationPlan,
-        LibraryFileOperationResult, LibraryItem, LibraryPlaybackEntry, LibraryPlaybackSession,
-        LibraryPlaybackState, LibraryQueryRequest, LibraryQueryResult, LibraryScanJob,
-        LibraryScanResult, LibrarySource, MediaAnalysis, OnboardingStatus, Preset,
-        PreviewLibraryBulkMoveRequest, PreviewLibraryFileOperationRequest, QueueSettings,
-        QueueSnapshot, SaveAuthenticationProfileRequest, SaveLibraryCollectionRequest,
-        SaveLibraryPlaybackRequest, SaveLibrarySourceRequest, SavePresetRequest,
-        SaveSitePresetRuleRequest, SaveSubscriptionRequest, SitePresetRule, StartDownloadRequest,
-        StartTransformationRequest, Subscription, SubscriptionCheckResult, TransformationTask,
-        UpdateLibraryItemRequest,
+        LibraryFileOperationResult, LibraryItem, LibraryPlaybackCacheStatus, LibraryPlaybackEntry,
+        LibraryPlaybackPreflight, LibraryPlaybackSession, LibraryPlaybackState,
+        LibraryQueryRequest, LibraryQueryResult, LibraryScanJob, LibraryScanResult, LibrarySource,
+        MediaAnalysis, OnboardingStatus, Preset, PreviewLibraryBulkMoveRequest,
+        PreviewLibraryFileOperationRequest, QueueSettings, QueueSnapshot,
+        SaveAuthenticationProfileRequest, SaveLibraryCollectionRequest, SaveLibraryPlaybackRequest,
+        SaveLibrarySourceRequest, SavePresetRequest, SaveSitePresetRuleRequest,
+        SaveSubscriptionRequest, SitePresetRule, StartDownloadRequest, StartTransformationRequest,
+        Subscription, SubscriptionCheckResult, TransformationTask, UpdateLibraryItemRequest,
     },
     queue::{disk_space, QueueManager},
     subscriptions,
@@ -105,8 +105,52 @@ pub fn get_library_items_by_ids(
 pub async fn prepare_library_playback(
     media_server: State<'_, MediaServerState>,
     id: String,
+    user_approved: bool,
 ) -> Result<LibraryPlaybackSession, AppError> {
-    media_server.prepare_webview_playback(&id).await
+    media_server
+        .prepare_webview_playback(&id, user_approved)
+        .await
+}
+
+#[tauri::command]
+pub async fn inspect_library_playback(
+    media_server: State<'_, MediaServerState>,
+    id: String,
+) -> Result<LibraryPlaybackPreflight, AppError> {
+    media_server.inspect_webview_playback(&id).await
+}
+
+#[tauri::command]
+pub async fn inspect_library_playback_fallback(
+    media_server: State<'_, MediaServerState>,
+    id: String,
+) -> Result<LibraryPlaybackPreflight, AppError> {
+    media_server.inspect_transcoded_webview_playback(&id).await
+}
+
+#[tauri::command]
+pub async fn prepare_library_playback_fallback(
+    media_server: State<'_, MediaServerState>,
+    id: String,
+    user_approved: bool,
+) -> Result<LibraryPlaybackSession, AppError> {
+    media_server
+        .prepare_transcoded_webview_playback(&id, user_approved)
+        .await
+}
+
+#[tauri::command]
+pub async fn get_library_playback_cache_status(
+    media_server: State<'_, MediaServerState>,
+) -> Result<LibraryPlaybackCacheStatus, AppError> {
+    media_server.compatibility_cache_status().await
+}
+
+#[tauri::command]
+pub async fn clear_library_playback_cache(
+    media_server: State<'_, MediaServerState>,
+) -> Result<crate::models::LibraryCacheResult, AppError> {
+    media_server.clear_compatibility_cache().await
 }
 
 #[tauri::command]
