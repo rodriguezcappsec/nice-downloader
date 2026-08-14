@@ -632,6 +632,22 @@ pub enum LibraryFolderScope {
     Direct,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum LibrarySort {
+    #[default]
+    Recent,
+    Oldest,
+    TitleAsc,
+    TitleDesc,
+    DurationDesc,
+    DurationAsc,
+    SizeDesc,
+    SizeAsc,
+    FileDateDesc,
+    FileDateAsc,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LibraryQueryRequest {
@@ -652,6 +668,8 @@ pub struct LibraryQueryRequest {
     pub rating: Option<String>,
     pub collection_id: Option<String>,
     pub favorite_only: bool,
+    #[serde(default)]
+    pub sort: LibrarySort,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -719,6 +737,14 @@ pub struct LibraryPlaybackEntry {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct LibraryWatchState {
+    pub item_id: String,
+    pub watch_later: bool,
+    pub playback: Option<LibraryPlaybackState>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LibrarySubtitleTrack {
     pub label: String,
     pub language: Option<String>,
@@ -734,6 +760,13 @@ pub struct LibraryPlaybackSession {
     pub subtitles: Vec<LibrarySubtitleTrack>,
     pub compatibility_mode: bool,
     pub compatibility_transcoded: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryImageSession {
+    pub item_id: String,
+    pub url: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -816,6 +849,17 @@ pub struct UpdateLibraryItemRequest {
 pub struct LibraryCollection {
     pub id: String,
     pub name: String,
+    pub item_ids: Vec<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryPlaylist {
+    pub id: String,
+    pub name: String,
+    pub description: String,
     pub item_ids: Vec<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -994,6 +1038,14 @@ pub struct LibraryBulkMoveResult {
 pub struct SaveLibraryCollectionRequest {
     pub id: Option<String>,
     pub name: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveLibraryPlaylistRequest {
+    pub id: Option<String>,
+    pub name: String,
+    pub description: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -6,7 +6,10 @@ use crate::{
         DownloadEngine,
     },
     errors::AppError,
-    models::{DownloadEngineKind, EnginePreferences, MediaAnalysis, StartDownloadRequest},
+    models::{
+        DownloadEngineKind, EnginePreferences, MediaAnalysis, OutputConflictPolicy,
+        StartDownloadRequest,
+    },
 };
 use std::path::PathBuf;
 
@@ -25,6 +28,7 @@ pub struct PreparedDownload {
     pub args: Vec<String>,
     pub output_relative_path: Option<String>,
     pub expected_item_count: Option<u32>,
+    pub output_conflict_policy: Option<OutputConflictPolicy>,
 }
 
 pub async fn analyze(
@@ -61,6 +65,7 @@ pub async fn prepare_download(
                     .as_ref()
                     .and_then(|items| u32::try_from(items.len()).ok())
                     .or(request.analysis.item_count),
+                output_conflict_policy: None,
             })
         }
         DownloadEngineKind::GalleryDl => Err(AppError::new(
@@ -95,6 +100,7 @@ pub async fn prepare_download(
                 args,
                 output_relative_path: None,
                 expected_item_count: None,
+                output_conflict_policy: None,
             })
         }
         DownloadEngineKind::DirectHttp if is_direct_download_url(&request.url) => {
@@ -106,6 +112,7 @@ pub async fn prepare_download(
                 args: prepared.args,
                 output_relative_path: Some(prepared.filename),
                 expected_item_count: Some(1),
+                output_conflict_policy: Some(request.options.output_conflict_policy),
             })
         }
         DownloadEngineKind::DirectHttp => Err(AppError::new(

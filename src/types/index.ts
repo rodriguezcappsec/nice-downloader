@@ -438,6 +438,7 @@ export interface LibraryItem {
 
 export type LibraryAvailabilityFilter = "all" | "available" | "missing";
 export type LibraryFolderScope = "tree" | "direct";
+export type LibrarySort = "recent" | "oldest" | "titleAsc" | "titleDesc" | "durationDesc" | "durationAsc" | "sizeDesc" | "sizeAsc" | "fileDateDesc" | "fileDateAsc";
 
 export interface LibraryQueryRequest {
   page: number;
@@ -457,6 +458,7 @@ export interface LibraryQueryRequest {
   rating?: string | null;
   collectionId?: string | null;
   favoriteOnly: boolean;
+  sort: LibrarySort;
 }
 
 export interface LibraryQueryResult {
@@ -508,6 +510,12 @@ export interface LibraryPlaybackEntry {
   playback: LibraryPlaybackState;
 }
 
+export interface LibraryWatchState {
+  itemId: string;
+  watchLater: boolean;
+  playback?: LibraryPlaybackState | null;
+}
+
 export interface LibrarySubtitleTrack {
   label: string;
   language?: string | null;
@@ -521,6 +529,11 @@ export interface LibraryPlaybackSession {
   subtitles: LibrarySubtitleTrack[];
   compatibilityMode: boolean;
   compatibilityTranscoded: boolean;
+}
+
+export interface LibraryImageSession {
+  itemId: string;
+  url: string;
 }
 
 export interface LibraryPlaybackPreflight {
@@ -565,6 +578,15 @@ export interface UpdateLibraryItemRequest {
 export interface LibraryCollection {
   id: string;
   name: string;
+  itemIds: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface LibraryPlaylist {
+  id: string;
+  name: string;
+  description: string;
   itemIds: string[];
   createdAt: string;
   updatedAt: string;
@@ -681,6 +703,12 @@ export interface LibraryBulkMoveResult {
 export interface SaveLibraryCollectionRequest {
   id?: string | null;
   name: string;
+}
+
+export interface SaveLibraryPlaylistRequest {
+  id?: string | null;
+  name: string;
+  description: string;
 }
 
 export type LibraryBulkAction =

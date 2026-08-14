@@ -4,6 +4,7 @@ use sha2::{Digest, Sha256};
 use std::{
     fs,
     path::{Path, PathBuf},
+    process::Stdio,
     sync::OnceLock,
 };
 use tokio::{process::Command, time::timeout};
@@ -296,30 +297,60 @@ pub async fn install(candidate: EngineUpdateCandidate) -> Result<ManagedEngineSt
     let temporary = directory.join("download.tmp");
     fs::write(&temporary, &bytes)
         .map_err(|error| AppError::internal("could not store the managed engine", error))?;
-    set_executable(&temporary)?;
+    if let Err(error) = set_executable(&temporary) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
+    }
     let mut version_command = Command::new(&temporary);
     crate::utils::process::sanitize_tokio_command(&mut version_command);
-    let version_output = timeout(
-        std::time::Duration::from_secs(10),
-        version_command.arg("--version").output(),
-    )
-    .await
-    .map_err(|_| {
-        AppError::new(
-            "engine_validation_failed",
-            "The downloaded engine did not start in time.",
-        )
-    })?
-    .map_err(|error| AppError::internal("could not validate the managed engine", error))?;
-    if !version_output.status.success() {
+    version_command
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    let mut version_child = match version_command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            let _ = fs::remove_file(&temporary);
+            return Err(AppError::internal(
+                "could not validate the managed engine",
+                error,
+            ));
+        }
+    };
+    let version_status =
+        match timeout(std::time::Duration::from_secs(10), version_child.wait()).await {
+            Ok(Ok(status)) => status,
+            Ok(Err(error)) => {
+                let _ = version_child.kill().await;
+                let _ = version_child.wait().await;
+                let _ = fs::remove_file(&temporary);
+                return Err(AppError::internal(
+                    "could not validate the managed engine",
+                    error,
+                ));
+            }
+            Err(_) => {
+                let _ = version_child.kill().await;
+                let _ = version_child.wait().await;
+                let _ = fs::remove_file(&temporary);
+                return Err(AppError::new(
+                    "engine_validation_failed",
+                    "The downloaded engine did not start in time.",
+                ));
+            }
+        };
+    if !version_status.success() {
         let _ = fs::remove_file(&temporary);
         return Err(AppError::new(
             "engine_validation_failed",
             "The downloaded engine failed its version check and was discarded.",
         ));
     }
-    fs::rename(&temporary, &path)
-        .map_err(|error| AppError::internal("could not activate the managed engine file", error))?;
+    fs::rename(&temporary, &path).map_err(|error| {
+        let _ = fs::remove_file(&temporary);
+        AppError::internal("could not activate the managed engine file", error)
+    })?;
     let mut state = state;
     if state.active_version.as_deref() != Some(&version) {
         state.previous_version = state.active_version.replace(version);

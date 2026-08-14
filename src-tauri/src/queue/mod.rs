@@ -7,8 +7,8 @@ use crate::{
     },
     errors::AppError,
     models::{
-        DiskSpaceInfo, DownloadJob, DownloadState, EnginePreferences, QueueSettings, QueueSnapshot,
-        StartDownloadRequest,
+        DiskSpaceInfo, DownloadJob, DownloadState, EnginePreferences, OutputConflictPolicy,
+        QueueSettings, QueueSnapshot, StartDownloadRequest,
     },
     utils::validation::{
         validate_destination, validate_destination_writable, validate_engine_preferences,
@@ -49,7 +49,7 @@ pub struct QueueManager {
     retry_cancellations: Arc<Mutex<HashMap<String, CancellationToken>>>,
     retry_claims: Arc<Mutex<HashSet<String>>>,
     enqueue_lock: Arc<Mutex<()>>,
-    pending_recovery: Arc<Mutex<Vec<String>>>,
+    pending_recovery: Arc<Mutex<Vec<(String, bool)>>>,
     scheduler: Arc<Mutex<SchedulerState>>,
     scheduler_notify: Arc<Notify>,
     process_ids: Arc<Mutex<HashMap<String, u32>>>,
@@ -70,8 +70,26 @@ impl QueueManager {
         let mut jobs = HashMap::new();
         let mut requests = HashMap::new();
         let mut pending_recovery = Vec::new();
-        for (mut job, request) in persisted {
+        for (mut job, mut request) in persisted {
+            let mut request_changed = false;
+            if let Ok(url) = validate_media_url(&request.url) {
+                let url = url.to_string();
+                request_changed = request.url != url || job.url != url;
+                request.url = url.clone();
+                job.url = url;
+            }
+            if let Ok(destination) = validate_destination(&request.options.destination) {
+                let destination = destination.to_string_lossy().into_owned();
+                request_changed = request_changed
+                    || request.options.destination != destination
+                    || job.destination != destination;
+                request.options.destination = destination.clone();
+                job.destination = destination;
+            }
             if !is_terminal_state(job.state) {
+                let resume_direct = request.analysis.engine
+                    == crate::models::DownloadEngineKind::DirectHttp
+                    && !matches!(job.state, DownloadState::Queued | DownloadState::Paused);
                 job.state = DownloadState::Queued;
                 job.progress_percent = 0.0;
                 job.speed_bytes_per_second = None;
@@ -80,7 +98,9 @@ impl QueueManager {
                 job.current_operation = "Recovered after application restart".to_owned();
                 job.updated_at = Utc::now();
                 database.save_job(&job, &request)?;
-                pending_recovery.push(job.id.clone());
+                pending_recovery.push((job.id.clone(), resume_direct));
+            } else if request_changed {
+                database.save_job(&job, &request)?;
             }
             requests.insert(job.id.clone(), request);
             jobs.insert(job.id.clone(), job);
@@ -111,7 +131,7 @@ impl QueueManager {
         request: StartDownloadRequest,
         preferences: EnginePreferences,
     ) -> Result<DownloadJob, AppError> {
-        self.enqueue_with_lineage(app, request, preferences, 1, None)
+        self.enqueue_with_lineage(app, request, preferences, 1, None, false)
             .await
     }
 
@@ -120,7 +140,7 @@ impl QueueManager {
             let mut pending = self.pending_recovery.lock().await;
             std::mem::take(&mut *pending)
         };
-        for id in ids {
+        for (id, resume_direct) in ids {
             let request = self.requests.read().await.get(&id).cloned();
             let Some(request) = request else {
                 self.transition_failed(
@@ -131,8 +151,19 @@ impl QueueManager {
                 .await;
                 continue;
             };
+            let request = if resume_direct {
+                resume_capable_request(request)
+            } else {
+                request
+            };
             if let Err(error) = self
-                .start_existing(app.clone(), id.clone(), request, preferences.clone())
+                .start_existing(
+                    app.clone(),
+                    id.clone(),
+                    request,
+                    preferences.clone(),
+                    resume_direct,
+                )
                 .await
             {
                 self.transition_failed(&app, &id, error.message).await;
@@ -185,6 +216,7 @@ impl QueueManager {
                 preferences,
                 previous.attempt_count.saturating_add(1),
                 Some(previous.id),
+                true,
             )
             .await
         }
@@ -201,21 +233,23 @@ impl QueueManager {
     ) -> Result<DownloadJob, AppError> {
         let mut request = self.database.load_download_request(job_id)?;
         request.options.output_conflict_policy = crate::models::OutputConflictPolicy::Overwrite;
-        self.enqueue_with_lineage(app, request, preferences, 1, Some(job_id.to_owned()))
+        self.enqueue_with_lineage(app, request, preferences, 1, Some(job_id.to_owned()), false)
             .await
     }
 
     async fn enqueue_with_lineage(
         &self,
         app: AppHandle,
-        request: StartDownloadRequest,
+        mut request: StartDownloadRequest,
         preferences: EnginePreferences,
         attempt_count: u32,
         retry_of_id: Option<String>,
+        resume_direct: bool,
     ) -> Result<DownloadJob, AppError> {
-        validate_media_url(&request.url)?;
+        request.url = validate_media_url(&request.url)?.to_string();
         validate_engine_preferences(&preferences)?;
         let destination = validate_destination(&request.options.destination)?;
+        request.options.destination = destination.to_string_lossy().into_owned();
         validate_destination_writable(&destination)?;
         let prepared = router::prepare_download(&request, &preferences).await?;
 
@@ -231,7 +265,18 @@ impl QueueManager {
                 ));
             }
         }
-        if request.options.output_conflict_policy == crate::models::OutputConflictPolicy::Skip {
+        let already_queued = {
+            let jobs = self.jobs.read().await;
+            has_live_duplicate(jobs.values(), &request.url, &request.options.destination)
+        };
+        if already_queued {
+            return Err(AppError::new(
+                "duplicate_download",
+                "This URL is already queued for the selected destination.",
+            ));
+        }
+
+        if request.options.output_conflict_policy == OutputConflictPolicy::Skip {
             let already_queued = self.jobs.read().await.values().any(|job| {
                 !is_terminal_state(job.state)
                     && job.url == request.url
@@ -278,6 +323,7 @@ impl QueueManager {
             prepared,
             cancellation,
             scheduled_for: request.scheduled_for,
+            resume_direct,
         };
         tokio::spawn(async move {
             let id = context.id.clone();
@@ -293,6 +339,7 @@ impl QueueManager {
         id: String,
         request: StartDownloadRequest,
         preferences: EnginePreferences,
+        resume_direct: bool,
     ) -> Result<(), AppError> {
         validate_media_url(&request.url)?;
         validate_engine_preferences(&preferences)?;
@@ -322,6 +369,7 @@ impl QueueManager {
                     prepared,
                     cancellation,
                     scheduled_for: request.scheduled_for,
+                    resume_direct,
                 })
                 .await;
             queue.release_slot(&app, &run_id).await;
@@ -594,15 +642,19 @@ impl QueueManager {
                 .filter(|(_, job)| job.state == DownloadState::Paused)
                 .map(|(id, _)| id.clone())
                 .collect::<HashSet<_>>();
-            let due = scheduled_for.is_none_or(|time| time <= Utc::now());
+            let now = Utc::now();
+            let due_ids = self
+                .requests
+                .read()
+                .await
+                .iter()
+                .filter(|(_, request)| request.scheduled_for.is_none_or(|time| time <= now))
+                .map(|(id, _)| id.clone())
+                .collect::<HashSet<_>>();
             {
                 let mut scheduler = self.scheduler.lock().await;
-                let next = scheduler
-                    .pending
-                    .iter()
-                    .find(|pending_id| !paused_ids.contains(*pending_id));
+                let next = next_runnable_pending(&scheduler.pending, &paused_ids, &due_ids);
                 if !scheduler.settings.paused
-                    && due
                     && scheduler.active.len() < scheduler.settings.concurrent_downloads
                     && next.is_some_and(|next_id| next_id == id)
                 {
@@ -654,6 +706,7 @@ impl QueueManager {
             prepared,
             cancellation,
             scheduled_for,
+            resume_direct,
         } = context;
         if !self
             .wait_for_turn(&app, &id, &cancellation, scheduled_for)
@@ -665,6 +718,57 @@ impl QueueManager {
         if cancellation.is_cancelled() {
             self.transition_cancelled(&app, &id).await;
             return;
+        }
+
+        if prepared.kind == PreparedEngineKind::DirectHttp {
+            let Some(relative_path) = prepared.output_relative_path.as_deref() else {
+                self.transition_failed(
+                    &app,
+                    &id,
+                    "The direct-download output path was unavailable.".to_owned(),
+                )
+                .await;
+                return;
+            };
+            let output_path = destination.join(relative_path);
+            if prepared.output_conflict_policy == Some(OutputConflictPolicy::Overwrite)
+                && !resume_direct
+            {
+                let aria_control = output_path.with_file_name(format!(
+                    "{}.aria2",
+                    output_path
+                        .file_name()
+                        .and_then(|value| value.to_str())
+                        .unwrap_or_default()
+                ));
+                let _ = std::fs::remove_file(aria_control);
+            }
+            match prepared.output_conflict_policy {
+                Some(OutputConflictPolicy::Skip) if output_path.exists() => {
+                    self.transition_failed(
+                        &app,
+                        &id,
+                        "The direct-download output already exists. Choose overwrite or a different destination."
+                            .to_owned(),
+                    )
+                    .await;
+                    return;
+                }
+                Some(OutputConflictPolicy::Overwrite) if !resume_direct && output_path.exists() => {
+                    if let Err(error) = std::fs::remove_file(&output_path) {
+                        self.transition_failed(
+                            &app,
+                            &id,
+                            format!(
+                                "Could not replace the existing direct-download output: {error}"
+                            ),
+                        )
+                        .await;
+                        return;
+                    }
+                }
+                _ => {}
+            }
         }
 
         self.update_job(&app, &id, |job| {
@@ -768,6 +872,9 @@ impl QueueManager {
                         tracker.last_bytes = downloaded;
                         tracker.last_sample = Instant::now();
                         self.update_job(&app, &id, |job| {
+                            if job.state == DownloadState::Paused {
+                                return;
+                            }
                             job.state = DownloadState::Downloading;
                             job.current_operation =
                                 format!("Downloading with {}", prepared.engine_name);
@@ -815,7 +922,25 @@ impl QueueManager {
         }
 
         if exit_status.is_some_and(|status| status.success()) {
-            let verification = self.verify_output(&app, &id).await;
+            if cancellation.is_cancelled() {
+                self.transition_cancelled(&app, &id).await;
+                return;
+            }
+            let verification = self.verify_output(&app, &id, &cancellation).await;
+            if matches!(verification, VerificationResult::Cancelled) {
+                self.transition_cancelled(&app, &id).await;
+                return;
+            }
+            if matches!(verification, VerificationResult::Missing) {
+                self.transition_failed(
+                    &app,
+                    &id,
+                    "The download engine exited successfully, but its reported output file is missing."
+                        .to_owned(),
+                )
+                .await;
+                return;
+            }
             let completed = self
                 .update_job(&app, &id, |job| {
                     job.state = DownloadState::Completed;
@@ -833,7 +958,6 @@ impl QueueManager {
                 })
                 .await;
             if let Some(job) = completed {
-                self.persist_job(&job).await;
                 let settings = self.scheduler.lock().await.settings.clone();
                 if settings.notify_on_completion {
                     send_completion_notification(&job);
@@ -841,6 +965,10 @@ impl QueueManager {
                 if settings.completion_action == crate::models::CompletionAction::OpenFolder {
                     open_completed_folder(&job);
                 }
+            } else {
+                tracing::error!(job_id = %id, "download completion was not persisted");
+                self.cancellations.lock().await.remove(&id);
+                return;
             }
             self.cancellations.lock().await.remove(&id);
             tracing::info!(job_id = %id, "download completed");
@@ -878,19 +1006,24 @@ impl QueueManager {
             .and_then(parse_progress)
         {
             self.update_job(app, id, |job| {
-                job.state = DownloadState::Downloading;
-                job.current_operation = "Downloading media".to_owned();
-                job.progress_percent = progress.percent;
-                job.downloaded_bytes = progress.downloaded_bytes;
-                job.total_bytes = progress.total_bytes;
-                job.speed_bytes_per_second = progress.speed;
-                job.eta_seconds = progress.eta;
+                update_unless_paused(job, |job| {
+                    job.state = DownloadState::Downloading;
+                    job.current_operation = "Downloading media".to_owned();
+                    job.progress_percent = progress.percent;
+                    job.downloaded_bytes = progress.downloaded_bytes;
+                    job.total_bytes = progress.total_bytes;
+                    job.speed_bytes_per_second = progress.speed;
+                    job.eta_seconds = progress.eta;
+                });
             })
             .await;
             return;
         }
         if line.text.starts_with("nicedl:postprocess:") {
             self.update_job(app, id, |job| {
+                if job.state == DownloadState::Paused {
+                    return;
+                }
                 job.state = DownloadState::PostProcessing;
                 job.current_operation = "Post-processing media".to_owned();
             })
@@ -923,6 +1056,9 @@ impl QueueManager {
 
         if engine_kind == PreparedEngineKind::GalleryDl && is_rate_limit_line(&line.text) {
             self.update_job(app, id, |job| {
+                if job.state == DownloadState::Paused {
+                    return;
+                }
                 job.state = DownloadState::Downloading;
                 job.current_operation =
                     "Bunkr rate limited the transfer; waiting before retry".to_owned();
@@ -935,6 +1071,9 @@ impl QueueManager {
 
         if engine_kind == PreparedEngineKind::GalleryDl && is_incomplete_read_line(&line.text) {
             self.update_job(app, id, |job| {
+                if job.state == DownloadState::Paused {
+                    return;
+                }
                 job.state = DownloadState::Downloading;
                 job.current_operation =
                     "Connection interrupted; resuming the partial download".to_owned();
@@ -948,6 +1087,9 @@ impl QueueManager {
         let operation = operation_from_engine_line(&line.text);
         if let Some((state, message)) = operation {
             self.update_job(app, id, |job| {
+                if job.state == DownloadState::Paused {
+                    return;
+                }
                 job.state = state;
                 job.current_operation = message.to_owned();
                 job.speed_bytes_per_second = None;
@@ -957,7 +1099,12 @@ impl QueueManager {
         }
     }
 
-    async fn verify_output(&self, app: &AppHandle, id: &str) -> VerificationResult {
+    async fn verify_output(
+        &self,
+        app: &AppHandle,
+        id: &str,
+        cancellation: &CancellationToken,
+    ) -> VerificationResult {
         let Some(path) = self
             .jobs
             .read()
@@ -968,6 +1115,9 @@ impl QueueManager {
         else {
             return VerificationResult::Unavailable;
         };
+        if !path.exists() {
+            return VerificationResult::Missing;
+        }
         if !path.is_file() || !is_media_output(&path) {
             return VerificationResult::NotApplicable;
         }
@@ -983,10 +1133,12 @@ impl QueueManager {
         .await;
         let mut command = Command::new(ffprobe);
         crate::utils::process::sanitize_tokio_command(&mut command);
-        let output = timeout(
-            Duration::from_secs(30),
-            command
-                .args([
+        command.kill_on_drop(true);
+        let output = tokio::select! {
+            _ = cancellation.cancelled() => return VerificationResult::Cancelled,
+            output = timeout(
+                Duration::from_secs(30),
+                command.args([
                     "-v",
                     "error",
                     "-show_entries",
@@ -994,11 +1146,9 @@ impl QueueManager {
                     "-of",
                     "json",
                     "-i",
-                ])
-                .arg(&path)
-                .output(),
-        )
-        .await;
+                ]).arg(&path).output(),
+            ) => output,
+        };
         let Ok(Ok(output)) = output else {
             return VerificationResult::Warning("ffprobe could not complete output verification.");
         };
@@ -1092,7 +1242,7 @@ impl QueueManager {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<DownloadJob, AppError>> + Send>>
     {
         Box::pin(async move {
-            self.enqueue_with_lineage(app, request, preferences, attempt_count, retry_of_id)
+            self.enqueue_with_lineage(app, request, preferences, attempt_count, retry_of_id, true)
                 .await
         })
     }
@@ -1128,6 +1278,9 @@ impl QueueManager {
             tracker.current_size = size;
             tracker.current_name = filename.chars().take(180).collect();
             self.update_job(app, id, |job| {
+                if job.state == DownloadState::Paused {
+                    return;
+                }
                 job.state = DownloadState::Downloading;
                 job.current_operation = format!(
                     "Downloading item {} of {}: {}",
@@ -1156,6 +1309,9 @@ impl QueueManager {
             };
             let downloaded = tracker.completed_bytes.saturating_add(current_downloaded);
             self.update_job(app, id, |job| {
+                if job.state == DownloadState::Paused {
+                    return;
+                }
                 job.state = DownloadState::Downloading;
                 job.current_operation = format!(
                     "Downloading item {} of {}: {}",
@@ -1197,6 +1353,9 @@ impl QueueManager {
                         tracker.item_count = count;
                     }
                     self.update_job(app, id, |job| {
+                        if job.state == DownloadState::Paused {
+                            return;
+                        }
                         job.state = DownloadState::Downloading;
                         job.current_operation = format!(
                             "Processed item {} of {}",
@@ -1256,18 +1415,23 @@ impl QueueManager {
             job.updated_at = Utc::now();
             job.clone()
         };
+        if let Err(error) = self.persist_job(&job).await {
+            tracing::error!(job_id = %job.id, %error, "could not persist download job");
+            return None;
+        }
         emit_job(app, &job);
-        self.persist_job(&job).await;
         Some(job)
     }
 
-    async fn persist_job(&self, job: &DownloadJob) {
+    async fn persist_job(&self, job: &DownloadJob) -> Result<(), AppError> {
         let request = self.requests.read().await.get(&job.id).cloned();
-        if let Some(request) = request {
-            if let Err(error) = self.database.save_job(job, &request) {
-                tracing::error!(job_id = %job.id, %error, "could not persist download job");
-            }
-        }
+        let request = request.ok_or_else(|| {
+            AppError::new(
+                "download_request_missing",
+                "The download request could not be persisted.",
+            )
+        })?;
+        self.database.save_job(job, &request)
     }
 }
 
@@ -1278,6 +1442,7 @@ struct JobRunContext {
     prepared: PreparedDownload,
     cancellation: CancellationToken,
     scheduled_for: Option<chrono::DateTime<Utc>>,
+    resume_direct: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1345,6 +1510,8 @@ enum VerificationResult {
     Warning(&'static str),
     Unavailable,
     NotApplicable,
+    Missing,
+    Cancelled,
 }
 
 impl VerificationResult {
@@ -1354,6 +1521,7 @@ impl VerificationResult {
             Self::Warning(_) => "Download completed with a verification warning",
             Self::Unavailable => "Download completed; verification unavailable",
             Self::NotApplicable => "Download completed",
+            Self::Missing | Self::Cancelled => "Download did not complete",
         }
     }
 
@@ -1578,6 +1746,33 @@ fn is_terminal_state(state: DownloadState) -> bool {
     )
 }
 
+fn has_live_duplicate<'a>(
+    jobs: impl IntoIterator<Item = &'a DownloadJob>,
+    url: &str,
+    destination: &str,
+) -> bool {
+    jobs.into_iter().any(|job| {
+        !is_terminal_state(job.state) && job.url == url && job.destination == destination
+    })
+}
+
+fn next_runnable_pending<'a>(
+    pending: &'a VecDeque<String>,
+    paused_ids: &HashSet<String>,
+    due_ids: &HashSet<String>,
+) -> Option<&'a str> {
+    pending
+        .iter()
+        .find(|id| !paused_ids.contains(*id) && due_ids.contains(*id))
+        .map(String::as_str)
+}
+
+fn update_unless_paused(job: &mut DownloadJob, update: impl FnOnce(&mut DownloadJob)) {
+    if job.state != DownloadState::Paused {
+        update(job);
+    }
+}
+
 fn request_estimated_bytes(request: &StartDownloadRequest) -> Option<u64> {
     request
         .options
@@ -1744,6 +1939,56 @@ mod tests {
     };
     use tempfile::tempdir;
 
+    fn sample_request(destination: &std::path::Path) -> StartDownloadRequest {
+        let quality = QualityOption {
+            id: "best".to_owned(),
+            label: "Best".to_owned(),
+            description: "Highest available quality".to_owned(),
+            kind: QualityKind::Best,
+            max_height: None,
+        };
+        StartDownloadRequest {
+            url: "https://example.com/video".to_owned(),
+            analysis: MediaAnalysis {
+                engine: crate::models::DownloadEngineKind::YtDlp,
+                title: "Example".to_owned(),
+                uploader: None,
+                duration_seconds: None,
+                thumbnail: None,
+                webpage_url: "https://example.com/video".to_owned(),
+                download_url: "https://example.com/video".to_owned(),
+                extractor: "generic".to_owned(),
+                site_name: "Generic".to_owned(),
+                playlist_title: None,
+                playlist_index: None,
+                formats: vec![],
+                quality_options: vec![quality.clone()],
+                item_count: None,
+                total_size_bytes: None,
+            },
+            options: crate::models::DownloadOptions {
+                quality,
+                container: OutputContainer::Mp4,
+                video_codec_preference: VideoCodecPreference::Any,
+                format_strategy: crate::models::FormatStrategy::Recommended,
+                audio_quality: AudioQuality::Best,
+                audio_only: false,
+                subtitles: false,
+                subtitle_languages: vec![],
+                embed_thumbnail: false,
+                embed_metadata: true,
+                chapters: false,
+                sponsorblock: false,
+                sponsorblock_categories: vec![],
+                destination: destination.to_string_lossy().into_owned(),
+                filename_template: "%(title)s.%(ext)s".to_owned(),
+                output_conflict_policy: OutputConflictPolicy::Skip,
+                gallery_selection: None,
+            },
+            scheduled_for: None,
+        }
+    }
+
     #[test]
     fn parses_structured_progress() {
         assert_eq!(
@@ -1836,6 +2081,59 @@ mod tests {
     fn verifies_only_media_file_extensions() {
         assert!(is_media_output(std::path::Path::new("video.MKV")));
         assert!(!is_media_output(std::path::Path::new("gallery.zip")));
+    }
+
+    #[test]
+    fn detects_live_duplicates_for_every_output_policy() {
+        let directory = tempdir().expect("temporary directory");
+        let request = sample_request(directory.path());
+        let mut job = DownloadJob::from_request("live".to_owned(), &request);
+        job.state = DownloadState::Downloading;
+
+        assert!(has_live_duplicate(
+            [&job],
+            &request.url,
+            &request.options.destination
+        ));
+        job.state = DownloadState::Completed;
+        assert!(!has_live_duplicate(
+            [&job],
+            &request.url,
+            &request.options.destination
+        ));
+    }
+
+    #[test]
+    fn selects_first_due_unpaused_pending_job() {
+        let pending =
+            VecDeque::from(["future".to_owned(), "paused".to_owned(), "ready".to_owned()]);
+        let paused = HashSet::from(["paused".to_owned()]);
+        let due = HashSet::from(["paused".to_owned(), "ready".to_owned()]);
+
+        assert_eq!(
+            next_runnable_pending(&pending, &paused, &due),
+            Some("ready")
+        );
+    }
+
+    #[test]
+    fn buffered_progress_does_not_change_paused_job() {
+        let directory = tempdir().expect("temporary directory");
+        let request = sample_request(directory.path());
+        let mut job = DownloadJob::from_request("paused".to_owned(), &request);
+        job.state = DownloadState::Paused;
+        job.current_operation = "Download paused".to_owned();
+        job.progress_percent = 42.0;
+
+        update_unless_paused(&mut job, |job| {
+            job.state = DownloadState::Downloading;
+            job.current_operation = "Downloading media".to_owned();
+            job.progress_percent = 95.0;
+        });
+
+        assert_eq!(job.state, DownloadState::Paused);
+        assert_eq!(job.current_operation, "Download paused");
+        assert_eq!(job.progress_percent, 42.0);
     }
 
     #[tokio::test]

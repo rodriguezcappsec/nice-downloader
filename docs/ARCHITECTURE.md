@@ -130,7 +130,7 @@ Library scans write catalog identity immediately, then enqueue IDs into a global
 
 Library curation is persisted separately from filesystem scanning. Favorites and ratings live on catalog items; collections use dedicated collection and membership tables. Bulk curation commands validate a bounded set of UUIDs and execute in a single SQLite transaction. Rescanning an existing path preserves its title, tags, favorite, rating, and collection membership.
 
-Library browsing is also SQLite-authoritative. A typed query command composes parameterized search, source/folder depth, media metadata, availability, tag, rating, collection, and favorite filters, returning at most 60 records with an exact count and clamped page. Separate facet queries return only aggregate availability, container/tag choices, and folder counts. React keeps the current page, three bounded 12-item Home shelves, and up to 500 selected IDs; it never loads the full catalog for browsing or filtering. Indexed-item event bursts trigger one debounced refresh, while terminal scan events refresh queries, facets, shelves, and source status.
+Library browsing is also SQLite-authoritative. A typed query command composes parameterized search, source/folder depth, media metadata, availability, tag, rating, collection, and favorite filters, returning at most 60 records with an exact count and clamped page. Sort intent is a closed enum mapped to static SQL clauses with deterministic ID tie-breakers; unknown duration and size values remain after inspected media. Separate facet queries return only aggregate availability, container/tag choices, and folder counts. React keeps the current page, three bounded 12-item Home shelves, and up to 500 selected IDs; it never loads the full catalog for browsing or filtering. Indexed-item event bursts trigger one debounced refresh, while terminal scan events refresh queries, facets, shelves, and source status.
 
 Opt-in library watching is owned by `LibraryManager`. The native watcher coalesces event bursts before requesting a normal bounded scan; it never applies filesystem mutations. A lightweight source monitor detects unavailable watched volumes, emits normalized source status events, recreates watchers when volumes return, and schedules a source-scoped reconciliation scan. React can enable or disable watching but does not own watcher tasks or scan state.
 
@@ -138,7 +138,7 @@ Reconciliation stores stable filesystem identity separately from user-facing met
 
 Missing catalog records are retained for removable-volume and move reconciliation but excluded from normal Library browsing. Scans, artwork lookup, and failed open attempts persist the missing transition and emit the same normalized item/change events. Users can reveal these recovery records with the Missing files filter and explicitly forget one without modifying disk.
 
-Library backup format version 2 carries explicit catalog and media-metadata schema versions plus source definitions, items, curation, and collection membership. Restore treats JSON as bounded untrusted input, validates the complete shape before writes, remaps source and item identities around existing path ownership, and imports version 1 item-only backups without dangling source references. It is a non-destructive merge; on-disk fingerprints decide whether technical metadata can be reused or must return to Pending for reprobe.
+Library backup format version 2 carries explicit catalog and media-metadata schema versions plus source definitions, items, curation, collection membership, and ordered video playlists. Restore treats JSON as bounded untrusted input, validates the complete shape before writes, remaps source, item, and playlist identities around existing ownership, and imports version 1 item-only backups without dangling references. It is a non-destructive merge; on-disk fingerprints decide whether technical metadata can be reused or must return to Pending for reprobe.
 
 Generated Library artwork is an app-cache concern, never source-folder state. A Rust-owned maintenance lock coordinates status, clearing, and post-generation pruning with both FFmpeg artwork permits. Cache reads refresh filesystem recency; pruning keeps no more than 20,000 regular preview files or 1 GiB and removes oldest entries first while protecting the output serving the active request.
 
@@ -152,6 +152,8 @@ If the WebView rejects a valid lossless Matroska timing copy, a distinct fallbac
 
 Migration `0015_library_playback.sql` stores one normalized progress record per catalog item and cascades with catalog deletion. React writes finite position/duration snapshots at bounded playback intervals, pause, close, and completion. SQLite derives the bounded Continue Watching shelf from available, incomplete video records. Only same-stem `.vtt` sidecars are exposed, and each subtitle request revalidates its catalog parent and filename boundary.
 
+The Library player is mounted once per selected catalog item and switches between full Watch workspace and fixed bottom-right mini-player layouts without replacing the HTML `<video>` node. Library-to-home and cross-workspace navigation therefore preserve the active media session, buffering, audio, subtitle selection, playback rate, and native control state. Restoring the mini player returns to the Library Watch workspace; closing it persists progress and releases the session. Compact mode does not register app-wide media shortcuts, preventing playback keys from interfering with other workspaces.
+
 Duplicate analysis is an explicit, cancellable `LibraryManager` task. It narrows candidates by size, streams files through SHA-256 without following symlinks, verifies the fingerprint before and after reading, and caches only current hashes. React renders exact-content evidence and progress but cannot bypass the backend cleanup policy.
 
 Exact duplicate cleanup is a separate narrow command. It accepts only a current duplicate-group ID and member ID, re-derives the group from current SQLite fingerprints, requires another available member, and re-hashes the selected and retained files before invoking the platform Trash API. The catalog row is removed only after that recoverable operation succeeds; no permanent-delete command is exposed.
@@ -163,6 +165,10 @@ Folder browsing is presentation state derived from normalized `sourceId` plus `r
 
 The tray and desktop settings form a small platform boundary. Window close policy is applied in the Tauri frontend while process survival, queue recovery, and persisted preferences remain backend-owned. Desktop preferences also carry validated interface scale, reduced-motion, and high-contrast intent. React applies the visual classes and uses Tauri's narrowly permitted webview zoom command; only 90%, 100%, 110%, and 125% are accepted by Rust.
 
+Migration `0016_library_watch_later.sql` stores ordered video IDs with catalog-delete cascading. Watch Later and Recently Watched are separate bounded SQLite queries: the former reflects explicit user intent, while the latter derives from normalized playback timestamps. Watched/reset mutations validate the catalog media kind in Rust and update the same playback record used by Continue Watching. Autoplay remains presentation state and can request only the next catalog item already returned by the typed Library query.
+
+Migration `0017_library_playlists.sql` stores named playlists and ordered, cascade-safe video membership. Rust owns playlist validation, the 500-item bound, add/remove/reorder transactions, and position normalization. React receives playlist IDs and catalog items through narrow Tauri commands; it never persists order or supplies paths. Playlist playback skips missing entries and stops at both boundaries. Version 2 backup/restore merges validated playlist membership without deleting current data or touching source media.
+
 ## Media organizer boundary
 
 The Library can index multiple user-selected folders independently of download destinations. Sources, durable scan jobs, and catalog items are persisted in SQLite. A Rust-owned scanner performs bounded directory walks, ignores symlinks by default, classifies supported video and image extensions, and emits normalized progress events. Files remain in place; scanning and record removal never mutate external media.
@@ -170,6 +176,8 @@ The Library can index multiple user-selected folders independently of download d
 The default Library presentation is a browse-first media hub. React may request artwork only by catalog item ID. Rust validates the stored item, resolves FFmpeg internally, limits concurrent artwork work, and returns a bounded cached JPEG data URL; the webview never receives arbitrary filesystem read access. Opening media likewise accepts an item ID and resolves the persisted path in Rust.
 
 `docs/MEDIA_ORGANIZER.md` is the source of truth for organizer milestones, safety invariants, acceptance criteria, and deferred scope.
+
+Full-resolution image viewing shares the tokenized loopback boundary through a separate `/image/{catalogId}` route. Rust requires an image catalog record, revalidates a regular non-symlink file on every request, and maps only JPEG, PNG, WebP, GIF, and AVIF extensions to `nosniff` response types. React receives a fresh session URL and never a source path.
 
 ## Remaining extension points
 

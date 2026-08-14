@@ -75,13 +75,15 @@ warning because current builds are not code-signed.
 - Subtitles, metadata, thumbnails, chapters, audio quality, codec preferences,
   output containers, filename templates, and reusable presets
 - Searchable download history, duplicate prevention, and output verification
-- Local media library with hierarchical folder filters, tags, collections,
-  change review, exact-duplicate analysis, recoverable Trash cleanup,
-  previewable Move/Copy/Rename with Undo, and metadata backup/restore
+- Local media library with hierarchical folder filters, stable paginated sorting,
+  tags, collections, change review, exact-duplicate analysis, recoverable Trash
+  cleanup, previewable Move/Copy/Rename with Undo, and metadata backup/restore
 - Integrated Watch workspace with embedded playback, resume positions,
   Continue Watching, subtitle tracks, searchable paginated browsing, and an
-  explicit system-player fallback; compatibility copies require informed
-  consent and have visible cache controls
+  persistent in-app mini player; compatibility copies require informed consent
+  and have visible cache controls, with an explicit system-player fallback
+- Integrated full-resolution image viewer with zoom, pan, rotation, keyboard
+  browsing, slideshows, and explicit system-viewer fallback
 - Scheduled playlist/channel subscriptions with archive-aware deduplication
 - FFmpeg-powered media transformations with progress and cancellation
 - Per-site browser-cookie, browser-profile, and proxy preferences
@@ -90,6 +92,11 @@ warning because current builds are not code-signed.
 - Dark/light themes, system tray behavior, diagnostics, and desktop notifications
 - Keyboard workspace commands, shortcut help, interface scaling, reduced motion,
   high contrast, and assistive-technology status announcements
+
+- Persistent Watch Later, private Recently Watched history, watched/reset
+  controls, and optional non-looping Autoplay
+- Ordered local video playlists with Play all, add/remove/reorder controls,
+  non-looping Up next, and backup/restore
 
 ## Site and engine support
 

@@ -42,7 +42,9 @@ pub fn validate_destination(value: &str) -> Result<PathBuf, AppError> {
             "The selected destination is not a folder.",
         ));
     }
-    Ok(path.to_path_buf())
+    std::fs::canonicalize(path).map_err(|error| {
+        AppError::internal("could not resolve the selected destination folder", error)
+    })
 }
 
 pub fn validate_destination_writable(path: &Path) -> Result<(), AppError> {
@@ -143,6 +145,7 @@ pub fn validate_filename_template(value: &str) -> Result<&str, AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn accepts_http_urls_only() {
@@ -155,6 +158,17 @@ mod tests {
     fn rejects_filename_path_separators() {
         assert!(validate_filename_template("%(title)s.%(ext)s").is_ok());
         assert!(validate_filename_template("../%(title)s").is_err());
+    }
+
+    #[test]
+    fn canonicalizes_equivalent_destination_paths() {
+        let directory = tempdir().expect("temporary directory");
+        let ordinary = validate_destination(&directory.path().to_string_lossy())
+            .expect("ordinary destination");
+        let dotted = validate_destination(&directory.path().join(".").to_string_lossy())
+            .expect("dotted destination");
+
+        assert_eq!(ordinary, dotted);
     }
 
     #[test]

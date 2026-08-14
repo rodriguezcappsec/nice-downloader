@@ -3,9 +3,9 @@ use crate::{
     engines::managed,
     errors::AppError,
     models::{
-        LibraryCacheResult, LibraryItem, LibraryMediaKind, LibraryPlaybackCacheStatus,
-        LibraryPlaybackPreflight, LibraryPlaybackSession, LibrarySubtitleTrack,
-        PlaybackCompatibilityPreference,
+        LibraryCacheResult, LibraryImageSession, LibraryItem, LibraryMediaKind,
+        LibraryPlaybackCacheStatus, LibraryPlaybackPreflight, LibraryPlaybackSession,
+        LibrarySubtitleTrack, PlaybackCompatibilityPreference,
     },
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
@@ -102,6 +102,7 @@ impl MediaServerState {
         }
         let item = self.database.get_library_item(item_id)?;
         validate_playable_item(&item)?;
+        let _guard = self.compatibility_lock.lock().await;
         let compatibility_path = self
             .prepare_compatibility_playback(&item, user_approved)
             .await?;
@@ -209,6 +210,7 @@ impl MediaServerState {
         }
         let item = self.database.get_library_item(item_id)?;
         validate_playable_item(&item)?;
+        let _guard = self.compatibility_lock.lock().await;
         let compatibility_path = self
             .prepare_transcoded_playback(&item, user_approved)
             .await?;
@@ -223,12 +225,29 @@ impl MediaServerState {
 
     pub async fn clear_compatibility_cache(&self) -> Result<LibraryCacheResult, AppError> {
         let _guard = self.compatibility_lock.lock().await;
+        if !self
+            .playback_paths
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_empty()
+        {
+            return Err(AppError::new(
+                "playback_cache_in_use",
+                "Close embedded videos before clearing the compatibility cache.",
+            ));
+        }
         let result = clear_playback_cache(&self.cache_directory)?;
         self.playback_paths
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clear();
         Ok(result)
+    }
+
+    pub fn release_playback(&self, item_id: &str) -> Result<(), AppError> {
+        validate_item_id(item_id)?;
+        self.set_playback_path(item_id, None);
+        Ok(())
     }
 
     pub fn prepare_playback(&self, item_id: &str) -> Result<LibraryPlaybackSession, AppError> {
@@ -279,6 +298,28 @@ impl MediaServerState {
         })
     }
 
+    pub fn prepare_image_view(&self, item_id: &str) -> Result<LibraryImageSession, AppError> {
+        let base_url = self.base_url.as_deref().ok_or_else(|| {
+            AppError::new(
+                "embedded_image_unavailable",
+                "The embedded image viewer is unavailable. Open the image in your system viewer instead.",
+            )
+        })?;
+        validate_item_id(item_id)?;
+        let item = self.database.get_library_item(item_id)?;
+        validate_viewable_image(&item)?;
+        Ok(LibraryImageSession {
+            item_id: item.id.clone(),
+            url: format!(
+                "{}/image/{}?token={}&session={}",
+                base_url,
+                item.id,
+                self.token,
+                Uuid::new_v4()
+            ),
+        })
+    }
+
     fn set_playback_path(&self, item_id: &str, path: Option<PathBuf>) {
         let mut paths = self
             .playback_paths
@@ -307,7 +348,6 @@ impl MediaServerState {
         let Some(target) = self.compatibility_target(item).await? else {
             return Ok(None);
         };
-        let _guard = self.compatibility_lock.lock().await;
         std::fs::create_dir_all(&self.cache_directory).map_err(|error| {
             AppError::internal("could not create the embedded playback cache", error)
         })?;
@@ -374,7 +414,6 @@ impl MediaServerState {
         user_approved: bool,
     ) -> Result<PathBuf, AppError> {
         let target = self.transcode_target(item)?;
-        let _guard = self.compatibility_lock.lock().await;
         std::fs::create_dir_all(&self.cache_directory).map_err(|error| {
             AppError::internal("could not create the embedded playback cache", error)
         })?;
@@ -538,6 +577,24 @@ fn validate_playable_item(item: &LibraryItem) -> Result<(), AppError> {
         ));
     }
     validate_regular_media_file(Path::new(&item.path))
+}
+
+fn validate_viewable_image(item: &LibraryItem) -> Result<(), AppError> {
+    if item.media_kind != Some(LibraryMediaKind::Image) {
+        return Err(AppError::new(
+            "library_image_not_found",
+            "Choose an image from your media library.",
+        ));
+    }
+    let path = Path::new(&item.path);
+    validate_regular_media_file(path)?;
+    if image_content_type(path).is_none() {
+        return Err(AppError::new(
+            "unsupported_library_image",
+            "This image format is not supported by the embedded viewer. Open it in your system viewer instead.",
+        ));
+    }
+    Ok(())
 }
 
 fn is_iso_base_media(path: &Path) -> bool {
@@ -1055,6 +1112,7 @@ async fn handle_request(
         .collect::<Vec<_>>();
     let resolved = match segments.as_slice() {
         ["media", item_id] => resolve_media_path(&state, item_id),
+        ["image", item_id] => resolve_image_path(&state.database, item_id),
         ["subtitle", item_id, encoded_name] => {
             resolve_subtitle_path(&state.database, item_id, encoded_name)
         }
@@ -1111,6 +1169,23 @@ fn resolve_media_path(
         }
     }
     Ok((source.clone(), video_content_type(&source)))
+}
+
+fn resolve_image_path(
+    database: &Database,
+    item_id: &str,
+) -> Result<(PathBuf, &'static str), StatusCode> {
+    Uuid::parse_str(item_id).map_err(|_| StatusCode::NOT_FOUND)?;
+    let item = database
+        .get_library_item(item_id)
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+    if item.missing || item.media_kind != Some(LibraryMediaKind::Image) {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let source = PathBuf::from(item.path);
+    validate_regular_media_file(&source).map_err(|_| StatusCode::NOT_FOUND)?;
+    let content_type = image_content_type(&source).ok_or(StatusCode::UNSUPPORTED_MEDIA_TYPE)?;
+    Ok((source, content_type))
 }
 
 fn resolve_subtitle_path(
@@ -1270,6 +1345,23 @@ fn video_content_type(path: &Path) -> &'static str {
         "mkv" => "video/x-matroska",
         "avi" => "video/x-msvideo",
         _ => "application/octet-stream",
+    }
+}
+
+fn image_content_type(path: &Path) -> Option<&'static str> {
+    match path
+        .extension()
+        .and_then(OsStr::to_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "png" => Some("image/png"),
+        "webp" => Some("image/webp"),
+        "gif" => Some("image/gif"),
+        "avif" => Some("image/avif"),
+        _ => None,
     }
 }
 
@@ -1498,13 +1590,14 @@ mod tests {
         std::fs::write(&first, vec![0u8; 32]).expect("first cache file");
         std::fs::write(&second, vec![0u8; 48]).expect("second cache file");
         let database = Database::open(&directory.path().join("media.sqlite3")).expect("database");
+        let active_item_id = Uuid::new_v4().to_string();
         let state = MediaServerState {
             database,
             base_url: Some("http://127.0.0.1:1".to_owned()),
             token: "fixture-token".to_owned(),
             cache_directory,
             playback_paths: Arc::new(RwLock::new(HashMap::from([(
-                Uuid::new_v4().to_string(),
+                active_item_id.clone(),
                 first,
             )]))),
             compatibility_lock: Arc::new(AsyncMutex::new(())),
@@ -1518,10 +1611,18 @@ mod tests {
         assert_eq!(before.file_count, 2);
         assert_eq!(before.total_bytes, 80);
 
+        let error = state
+            .clear_compatibility_cache()
+            .await
+            .expect_err("active playback blocks cache clearing");
+        assert_eq!(error.code, "playback_cache_in_use");
+        state
+            .release_playback(&active_item_id)
+            .expect("release playback");
         let cleared = state
             .clear_compatibility_cache()
             .await
-            .expect("clear cache");
+            .expect("clear released cache");
         assert_eq!(cleared.removed_files, 2);
         assert_eq!(cleared.freed_bytes, 80);
         assert!(state
@@ -1670,6 +1771,102 @@ mod tests {
         assert_ne!(first.url, second.url);
         assert!(first.url.contains("token=fixture-token&session="));
         assert!(second.url.contains("token=fixture-token&session="));
+    }
+
+    #[test]
+    fn creates_fresh_image_sessions_and_rejects_non_images() {
+        let directory = tempdir().expect("temporary directory");
+        let image_path = directory.path().join("poster.png");
+        std::fs::write(&image_path, b"image fixture").expect("image fixture");
+        let database = Database::open(&directory.path().join("media.sqlite3")).expect("database");
+        let mut image = video_item(&image_path, 13);
+        image.media_kind = Some(LibraryMediaKind::Image);
+        image.duration_seconds = None;
+        image.video_codec = None;
+        image.audio_codec = None;
+        image.container = Some("png".to_owned());
+        database.upsert_library_item(&image).expect("catalog image");
+
+        let video_path = directory.path().join("video.mp4");
+        std::fs::write(&video_path, b"video fixture").expect("video fixture");
+        let video = video_item(&video_path, 13);
+        database.upsert_library_item(&video).expect("catalog video");
+
+        let state = MediaServerState {
+            database,
+            base_url: Some("http://127.0.0.1:1".to_owned()),
+            token: "fixture-token".to_owned(),
+            cache_directory: directory.path().join("playback-cache"),
+            playback_paths: Arc::new(RwLock::new(HashMap::new())),
+            compatibility_lock: Arc::new(AsyncMutex::new(())),
+            webview_dependency_error: Arc::new(OnceCell::new()),
+        };
+
+        let first = state
+            .prepare_image_view(&image.id)
+            .expect("first image session");
+        let second = state
+            .prepare_image_view(&image.id)
+            .expect("second image session");
+        assert_ne!(first.url, second.url);
+        assert!(first
+            .url
+            .contains(&format!("/image/{}?token=fixture-token&session=", image.id)));
+        assert_eq!(
+            resolve_image_path(&state.database, &image.id),
+            Ok((image_path, "image/png"))
+        );
+        assert_eq!(
+            resolve_image_path(&state.database, &video.id),
+            Err(StatusCode::NOT_FOUND)
+        );
+        assert_eq!(
+            state
+                .prepare_image_view(&video.id)
+                .expect_err("video rejected")
+                .code,
+            "library_image_not_found"
+        );
+    }
+
+    #[tokio::test]
+    async fn streams_catalog_images_only_with_the_process_token() {
+        let directory = tempdir().expect("temporary directory");
+        let source = directory.path().join("poster.png");
+        let bytes = b"bounded image fixture";
+        std::fs::write(&source, bytes).expect("image fixture");
+        let database = Database::open(&directory.path().join("media.sqlite3")).expect("database");
+        let mut image = video_item(
+            &source,
+            u64::try_from(bytes.len()).expect("fixture size fits u64"),
+        );
+        image.media_kind = Some(LibraryMediaKind::Image);
+        image.duration_seconds = None;
+        image.container = Some("png".to_owned());
+        database.upsert_library_item(&image).expect("catalog image");
+
+        let state = start(database, directory.path().join("playback-cache")).expect("media server");
+        let session = state.prepare_image_view(&image.id).expect("image session");
+        let client = reqwest::Client::new();
+
+        let unauthorized = client
+            .get(session.url.split('?').next().expect("image path"))
+            .send()
+            .await
+            .expect("unauthorized response");
+        assert_eq!(unauthorized.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+        let response = client
+            .get(session.url)
+            .send()
+            .await
+            .expect("image response");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            response.headers().get(reqwest::header::CONTENT_TYPE),
+            Some(&reqwest::header::HeaderValue::from_static("image/png"))
+        );
+        assert_eq!(response.bytes().await.expect("image body").as_ref(), bytes);
     }
 
     #[tokio::test]

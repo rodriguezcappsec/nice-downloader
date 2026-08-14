@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import type { LibraryPlaylist, SaveLibraryPlaylistRequest } from "../types";
 import type {
   BatchAnalysisResponse,
   DownloadJob,
@@ -29,11 +30,13 @@ import type {
   LibraryFacets,
   LibraryQueryRequest,
   LibraryQueryResult,
+  LibraryImageSession,
   LibraryPlaybackEntry,
   LibraryPlaybackPreflight,
   LibraryPlaybackCacheStatus,
   LibraryPlaybackSession,
   LibraryPlaybackState,
+  LibraryWatchState,
   SaveLibraryPlaybackRequest,
   LibraryCacheResult,
   LibraryBulkAction,
@@ -139,6 +142,8 @@ export const api = {
     invoke<LibraryFacets>("get_library_facets", { request }),
   getLibraryItemsByIds: (ids: string[]) =>
     invoke<LibraryItem[]>("get_library_items_by_ids", { ids }),
+  prepareLibraryImageView: (id: string) =>
+    invoke<LibraryImageSession>("prepare_library_image_view", { id }),
   inspectLibraryPlayback: (id: string) =>
     invoke<LibraryPlaybackPreflight>("inspect_library_playback", { id }),
   inspectLibraryPlaybackFallback: (id: string) =>
@@ -147,15 +152,38 @@ export const api = {
     invoke<LibraryPlaybackSession>("prepare_library_playback", { id, userApproved }),
   prepareLibraryPlaybackFallback: (id: string, userApproved = false) =>
     invoke<LibraryPlaybackSession>("prepare_library_playback_fallback", { id, userApproved }),
+  releaseLibraryPlayback: (id: string) => invoke<void>("release_library_playback", { id }),
   saveLibraryPlaybackProgress: (request: SaveLibraryPlaybackRequest) =>
     invoke<LibraryPlaybackState>("save_library_playback_progress", { request }),
   listContinueWatching: (limit = 12) =>
     invoke<LibraryPlaybackEntry[]>("list_continue_watching", { limit }),
+  getLibraryWatchState: (id: string) =>
+    invoke<LibraryWatchState>("get_library_watch_state", { id }),
+  setLibraryWatchLater: (id: string, watchLater: boolean) =>
+    invoke<LibraryWatchState>("set_library_watch_later", { id, watchLater }),
+  setLibraryWatched: (id: string, watched: boolean) =>
+    invoke<LibraryWatchState>("set_library_watched", { id, watched }),
+  listLibraryWatchLater: (limit = 12) =>
+    invoke<LibraryItem[]>("list_library_watch_later", { limit }),
+  listRecentlyWatched: (limit = 12) =>
+    invoke<LibraryPlaybackEntry[]>("list_recently_watched", { limit }),
   importLibraryFiles: (paths: string[], tags: string[]) => invoke<LibraryItem[]>("import_library_files", { paths, tags }),
   updateLibraryItem: (request: UpdateLibraryItemRequest) => invoke<LibraryItem>("update_library_item", { request }),
   listLibraryCollections: () => invoke<LibraryCollection[]>("list_library_collections"),
   saveLibraryCollection: (request: SaveLibraryCollectionRequest) => invoke<LibraryCollection>("save_library_collection", { request }),
   deleteLibraryCollection: (id: string) => invoke<void>("delete_library_collection", { id }),
+  listLibraryPlaylists: () => invoke<LibraryPlaylist[]>("list_library_playlists"),
+  saveLibraryPlaylist: (request: SaveLibraryPlaylistRequest) =>
+    invoke<LibraryPlaylist>("save_library_playlist", { request }),
+  deleteLibraryPlaylist: (id: string) => invoke<void>("delete_library_playlist", { id }),
+  addLibraryPlaylistItem: (playlistId: string, itemId: string) =>
+    invoke<LibraryPlaylist>("add_library_playlist_item", { playlistId, itemId }),
+  removeLibraryPlaylistItem: (playlistId: string, itemId: string) =>
+    invoke<LibraryPlaylist>("remove_library_playlist_item", { playlistId, itemId }),
+  moveLibraryPlaylistItem: (playlistId: string, itemId: string, newIndex: number) =>
+    invoke<LibraryPlaylist>("move_library_playlist_item", { playlistId, itemId, newIndex }),
+  listLibraryPlaylistItems: (playlistId: string) =>
+    invoke<LibraryItem[]>("list_library_playlist_items", { playlistId }),
   applyLibraryBulkAction: (ids: string[], action: LibraryBulkAction) => invoke<LibraryItem[]>("apply_library_bulk_action", { ids, action }),
   listLibraryChanges: () => invoke<LibraryChange[]>("list_library_changes"),
   reviewLibraryChanges: (ids: string[]) => invoke<number>("review_library_changes", { ids }),

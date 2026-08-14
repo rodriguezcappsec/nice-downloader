@@ -1,3 +1,5 @@
+use crate::models::LibraryWatchState;
+use crate::models::{LibraryPlaylist, SaveLibraryPlaylistRequest};
 use crate::DesktopRuntimeState;
 use crate::{
     authentication,
@@ -20,15 +22,16 @@ use crate::{
         LibraryBulkMoveResult, LibraryCacheResult, LibraryChange, LibraryCollection,
         LibraryDuplicateAnalysisJob, LibraryDuplicateGroup, LibraryDuplicateTrashResult,
         LibraryFacetRequest, LibraryFacets, LibraryFileOperation, LibraryFileOperationPlan,
-        LibraryFileOperationResult, LibraryItem, LibraryPlaybackCacheStatus, LibraryPlaybackEntry,
-        LibraryPlaybackPreflight, LibraryPlaybackSession, LibraryPlaybackState,
-        LibraryQueryRequest, LibraryQueryResult, LibraryScanJob, LibraryScanResult, LibrarySource,
-        MediaAnalysis, OnboardingStatus, Preset, PreviewLibraryBulkMoveRequest,
-        PreviewLibraryFileOperationRequest, QueueSettings, QueueSnapshot,
-        SaveAuthenticationProfileRequest, SaveLibraryCollectionRequest, SaveLibraryPlaybackRequest,
-        SaveLibrarySourceRequest, SavePresetRequest, SaveSitePresetRuleRequest,
-        SaveSubscriptionRequest, SitePresetRule, StartDownloadRequest, StartTransformationRequest,
-        Subscription, SubscriptionCheckResult, TransformationTask, UpdateLibraryItemRequest,
+        LibraryFileOperationResult, LibraryImageSession, LibraryItem, LibraryPlaybackCacheStatus,
+        LibraryPlaybackEntry, LibraryPlaybackPreflight, LibraryPlaybackSession,
+        LibraryPlaybackState, LibraryQueryRequest, LibraryQueryResult, LibraryScanJob,
+        LibraryScanResult, LibrarySource, MediaAnalysis, OnboardingStatus, Preset,
+        PreviewLibraryBulkMoveRequest, PreviewLibraryFileOperationRequest, QueueSettings,
+        QueueSnapshot, SaveAuthenticationProfileRequest, SaveLibraryCollectionRequest,
+        SaveLibraryPlaybackRequest, SaveLibrarySourceRequest, SavePresetRequest,
+        SaveSitePresetRuleRequest, SaveSubscriptionRequest, SitePresetRule, StartDownloadRequest,
+        StartTransformationRequest, Subscription, SubscriptionCheckResult, TransformationTask,
+        UpdateLibraryItemRequest,
     },
     queue::{disk_space, QueueManager},
     subscriptions,
@@ -102,6 +105,14 @@ pub fn get_library_items_by_ids(
 }
 
 #[tauri::command]
+pub fn prepare_library_image_view(
+    media_server: State<'_, MediaServerState>,
+    id: String,
+) -> Result<LibraryImageSession, AppError> {
+    media_server.prepare_image_view(&id)
+}
+
+#[tauri::command]
 pub async fn prepare_library_playback(
     media_server: State<'_, MediaServerState>,
     id: String,
@@ -140,6 +151,14 @@ pub async fn prepare_library_playback_fallback(
 }
 
 #[tauri::command]
+pub fn release_library_playback(
+    media_server: State<'_, MediaServerState>,
+    id: String,
+) -> Result<(), AppError> {
+    media_server.release_playback(&id)
+}
+
+#[tauri::command]
 pub async fn get_library_playback_cache_status(
     media_server: State<'_, MediaServerState>,
 ) -> Result<LibraryPlaybackCacheStatus, AppError> {
@@ -167,6 +186,48 @@ pub fn list_continue_watching(
     limit: usize,
 ) -> Result<Vec<LibraryPlaybackEntry>, AppError> {
     database.list_continue_watching(limit)
+}
+
+#[tauri::command]
+pub fn get_library_watch_state(
+    database: State<'_, Database>,
+    id: String,
+) -> Result<LibraryWatchState, AppError> {
+    database.get_library_watch_state(&id)
+}
+
+#[tauri::command]
+pub fn set_library_watch_later(
+    database: State<'_, Database>,
+    id: String,
+    watch_later: bool,
+) -> Result<LibraryWatchState, AppError> {
+    database.set_library_watch_later(&id, watch_later)
+}
+
+#[tauri::command]
+pub fn set_library_watched(
+    database: State<'_, Database>,
+    id: String,
+    watched: bool,
+) -> Result<LibraryWatchState, AppError> {
+    database.set_library_watched(&id, watched)
+}
+
+#[tauri::command]
+pub fn list_library_watch_later(
+    database: State<'_, Database>,
+    limit: usize,
+) -> Result<Vec<LibraryItem>, AppError> {
+    database.list_library_watch_later(limit)
+}
+
+#[tauri::command]
+pub fn list_recently_watched(
+    database: State<'_, Database>,
+    limit: usize,
+) -> Result<Vec<LibraryPlaybackEntry>, AppError> {
+    database.list_recently_watched(limit)
 }
 
 #[tauri::command]
@@ -208,6 +269,62 @@ pub fn delete_library_collection(
     id: String,
 ) -> Result<(), AppError> {
     database.delete_library_collection(&id)
+}
+
+#[tauri::command]
+pub fn list_library_playlists(
+    database: State<'_, Database>,
+) -> Result<Vec<LibraryPlaylist>, AppError> {
+    database.list_library_playlists()
+}
+
+#[tauri::command]
+pub fn save_library_playlist(
+    database: State<'_, Database>,
+    request: SaveLibraryPlaylistRequest,
+) -> Result<LibraryPlaylist, AppError> {
+    database.save_library_playlist(request)
+}
+
+#[tauri::command]
+pub fn delete_library_playlist(database: State<'_, Database>, id: String) -> Result<(), AppError> {
+    database.delete_library_playlist(&id)
+}
+
+#[tauri::command]
+pub fn add_library_playlist_item(
+    database: State<'_, Database>,
+    playlist_id: String,
+    item_id: String,
+) -> Result<LibraryPlaylist, AppError> {
+    database.add_library_playlist_item(&playlist_id, &item_id)
+}
+
+#[tauri::command]
+pub fn remove_library_playlist_item(
+    database: State<'_, Database>,
+    playlist_id: String,
+    item_id: String,
+) -> Result<LibraryPlaylist, AppError> {
+    database.remove_library_playlist_item(&playlist_id, &item_id)
+}
+
+#[tauri::command]
+pub fn move_library_playlist_item(
+    database: State<'_, Database>,
+    playlist_id: String,
+    item_id: String,
+    new_index: usize,
+) -> Result<LibraryPlaylist, AppError> {
+    database.move_library_playlist_item(&playlist_id, &item_id, new_index)
+}
+
+#[tauri::command]
+pub fn list_library_playlist_items(
+    database: State<'_, Database>,
+    playlist_id: String,
+) -> Result<Vec<LibraryItem>, AppError> {
+    database.list_library_playlist_items(&playlist_id)
 }
 
 #[tauri::command]
@@ -1015,7 +1132,7 @@ pub fn save_subscription(
 
 #[tauri::command]
 pub fn delete_subscription(database: State<'_, Database>, id: String) -> Result<(), AppError> {
-    database.delete_subscription(&id)
+    subscriptions::delete_subscription(&database, &id)
 }
 
 #[tauri::command]
