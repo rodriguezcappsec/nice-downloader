@@ -124,20 +124,35 @@ Cross-filesystem Move is intentionally rejected for now. Use Copy, verify the de
 
 ## Milestone 7 - Maturity and accessibility
 
-Status: accessibility and backup/recovery foundations implemented; large-library work remains.
+Status: accessibility, backup/recovery, and SQLite-backed large-library foundations implemented.
 
 - `Ctrl+K` opens a keyboard-first workspace palette; `?` opens a discoverable shortcut guide. Both dialogs trap focus, restore it when dismissed, and support Escape.
 - Persisted Desktop preferences provide 90%, 100%, 110%, and 125% native webview scaling, reduced motion, and a stronger high-contrast palette.
 - CSS also honors operating-system reduced-motion and increased-contrast preferences without requiring an app override.
 - Global error and success surfaces use assertive/polite live regions, and the existing skip link provides direct keyboard access to main content.
-- Filtered, searched, and bulk-selection Library results use reachable 60-item pages with result ranges, numbered navigation, Previous/Next controls, and polite page announcements. SQLite-backed query pagination remains the later large-library optimization.
+- Filtered, searched, and bulk-selection Library results use SQLite-backed 60-item pages with exact totals, numbered navigation, Previous/Next controls, and polite page announcements. Search is debounced, scan event bursts are coalesced, and cross-page selection retains only bounded IDs in React.
+- Home uses three independent 12-item queries for recent media, videos, and images. Rust/SQLite owns filter composition and collection membership; lightweight facets supply global availability counts plus tag, container, and hierarchical folder choices without loading full catalog records.
 - Version 2 Library backups include source definitions, collections and membership, curation, and structured media metadata with explicit catalog/metadata schema versions. Restore accepts legacy version 1 files, validates bounded untrusted input before writes, safely remaps path/ID conflicts, preserves offline source definitions, and invalidates metadata whose on-disk fingerprint changed. Restore merges and never deletes current records.
 - Generated artwork is bounded to 20,000 previews or 1 GiB. Rust updates last-use timestamps, serializes maintenance against FFmpeg generation and manual clearing, and evicts the least-recently-used entries without removing the preview currently being returned. Library management reports live file and byte usage.
 
 Remaining:
 
 - Accessible status/progress announcements with keyboard-only and Orca verification.
-- Large-library profiling, SQLite-backed paginated queries, and migration recovery tests.
+- Large-library profiling on representative network and removable filesystems, plus migration recovery tests.
+
+## Milestone 8 - Embedded playback
+
+Status: implemented on `feat/media-organizer`.
+
+- Videos open in a focused watch surface backed by the WebView's native HTML5 media engine. Nice Downloader does not implement codecs or decoding.
+- A Rust-owned loopback server binds only to a random `127.0.0.1` port and requires a process-scoped unguessable token. Playback URLs contain catalog IDs, never filesystem paths.
+- The server validates current SQLite records, rejects missing/non-video/symlink paths, streams files without buffering them in memory, and supports single HTTP byte ranges plus `HEAD` for seeking.
+- Playback position is saved to migration `0015_library_playback.sql`. In-progress videos appear in a bounded Continue Watching shelf and resume after five seconds while near-complete videos leave the shelf.
+- The player provides native accessible controls, speed selection, fullscreen, previous/next navigation, and Space/K, J/L, arrow, M, F, and Escape shortcuts.
+- Matching WebVTT sidecars (`video.vtt` or `video.en.vtt`) are exposed as subtitle tracks through the same token and catalog boundary.
+- Open in system player remains visible in media details and the watch surface. It is the supported fallback when the platform WebView cannot decode a container or codec.
+- Playback opens as an integrated Library watch workspace rather than a floating dialog. The main player and metadata occupy the primary column while a sticky, independently scrollable video rail supports debounced search, paginated browsing, and in-place video switching. An eight-second readiness timeout prevents a stalled WebKit media pipeline from trapping the UI.
+- On Linux, Nice Downloader checks an available `gst-inspect-1.0` for WebKitGTK's `autoaudiosink` before mounting the player. Missing GStreamer audio-output plugins produce an actionable distribution-specific message and leave system-player playback available.
 
 ## Explicitly deferred
 

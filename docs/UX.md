@@ -18,7 +18,7 @@ Navigation must not discard work. Page components remain mounted so analyzed met
 
 Accessibility preferences are durable desktop settings, not browser-only decoration. Native webview scaling enlarges the complete interface at 90%, 100%, 110%, or 125%. User-selected reduced motion and high contrast supplement the matching operating-system media preferences. Errors use assertive announcements, success notices use polite announcements, and the skip link remains the fastest route past global navigation.
 
-Library result limits must never make media unreachable. Search, filters, and selection mode paginate in 60-item pages, show the exact visible range, reset safely when filter intent changes, and expose numbered plus Previous/Next navigation. Page changes retain cross-page bulk selections and announce the new page politely.
+Library result limits must never make media unreachable. Search, filters, and selection mode use SQLite-backed 60-item pages, show the exact visible range, reset safely when filter intent changes, and expose numbered plus Previous/Next navigation. Search waits briefly for typing to settle, page changes retain cross-page bulk selections, and result updates are announced politely. Home remains immediate and bounded through separate recent, video, and image shelves rather than a hidden full-catalog load.
 
 Bulk organization is deliberate: selection mode exposes Move, the native folder picker chooses one destination, and a modal lists every preserved filename before confirmation. Existing files are never overwritten. Successful items leave the selection while any race-time failures remain selected for recovery.
 
@@ -27,6 +27,8 @@ Folder filtering distinguishes location from depth. Users can select a source ro
 Unavailable media does not remain mixed into Home, video, image, or search results. The Library count separates available media from missing recovery records; the availability filter can reveal those records for restoration or explicit removal. Discovering a missing file while opening or loading artwork updates the catalog immediately instead of repeatedly presenting a broken card.
 
 Library management shows artwork-cache usage as preview count and bytes against both automatic limits. Clearing remains explicit, while normal browsing quietly evicts least-recently-used previews so large catalogs cannot consume unbounded disk space.
+
+Video playback opens an integrated two-column Watch workspace without covering the application or global sidebar. The main column holds the player, title, location, and media actions; a sticky right rail supports debounced Library search, independently scrollable results, pagination, and in-place video switching. Native media controls remain available, while discoverable shortcuts cover play/pause, ten-second seeking, mute, optional fullscreen, and returning to the Library. Progress is saved quietly and represented on Continue Watching cards. The details panel and player always expose Open in system player so an unsupported WebView codec never traps the user in a dead end.
 
 Queue authority remains in Rust. The frontend displays queue position, state, progress, speed, ETA, operation, attempt number, and sanitized engine logs. Queue pause means “do not start additional jobs”; per-job pause controls a running or waiting job. Cancelling preserves resumable partial data by default. Drag reordering supplements, but does not replace, keyboard-accessible arrow controls.
 

@@ -25,6 +25,14 @@ import type {
   StartTransformationRequest,
   TransformationTask,
   LibraryItem,
+  LibraryFacetRequest,
+  LibraryFacets,
+  LibraryQueryRequest,
+  LibraryQueryResult,
+  LibraryPlaybackEntry,
+  LibraryPlaybackSession,
+  LibraryPlaybackState,
+  SaveLibraryPlaybackRequest,
   LibraryCacheResult,
   LibraryBulkAction,
   LibraryBulkMovePlan,
@@ -123,6 +131,18 @@ export const api = {
     invoke<TransformationTask>("start_transformation", { request }),
   cancelTransformation: (id: string) => invoke<void>("cancel_transformation", { id }),
   listLibraryItems: () => invoke<LibraryItem[]>("list_library_items"),
+  queryLibraryItems: (request: LibraryQueryRequest) =>
+    invoke<LibraryQueryResult>("query_library_items", { request }),
+  getLibraryFacets: (request: LibraryFacetRequest) =>
+    invoke<LibraryFacets>("get_library_facets", { request }),
+  getLibraryItemsByIds: (ids: string[]) =>
+    invoke<LibraryItem[]>("get_library_items_by_ids", { ids }),
+  prepareLibraryPlayback: (id: string) =>
+    invoke<LibraryPlaybackSession>("prepare_library_playback", { id }),
+  saveLibraryPlaybackProgress: (request: SaveLibraryPlaybackRequest) =>
+    invoke<LibraryPlaybackState>("save_library_playback_progress", { request }),
+  listContinueWatching: (limit = 12) =>
+    invoke<LibraryPlaybackEntry[]>("list_continue_watching", { limit }),
   importLibraryFiles: (paths: string[], tags: string[]) => invoke<LibraryItem[]>("import_library_files", { paths, tags }),
   updateLibraryItem: (request: UpdateLibraryItemRequest) => invoke<LibraryItem>("update_library_item", { request }),
   listLibraryCollections: () => invoke<LibraryCollection[]>("list_library_collections"),

@@ -11,6 +11,7 @@ use crate::{
     },
     errors::AppError,
     library,
+    media_server::MediaServerState,
     models::{
         AuthenticationProfile, BatchAnalysisItem, BatchAnalysisResponse, BatchDownloadFailure,
         BatchDownloadResult, BrowserProfileInfo, DesktopPreferences, DesktopRuntimeStatus,
@@ -18,13 +19,16 @@ use crate::{
         GalleryItemList, LibraryArtworkCacheStatus, LibraryBulkAction, LibraryBulkMovePlan,
         LibraryBulkMoveResult, LibraryCacheResult, LibraryChange, LibraryCollection,
         LibraryDuplicateAnalysisJob, LibraryDuplicateGroup, LibraryDuplicateTrashResult,
-        LibraryFileOperation, LibraryFileOperationPlan, LibraryFileOperationResult, LibraryItem,
-        LibraryScanJob, LibraryScanResult, LibrarySource, MediaAnalysis, OnboardingStatus, Preset,
+        LibraryFacetRequest, LibraryFacets, LibraryFileOperation, LibraryFileOperationPlan,
+        LibraryFileOperationResult, LibraryItem, LibraryPlaybackEntry, LibraryPlaybackSession,
+        LibraryPlaybackState, LibraryQueryRequest, LibraryQueryResult, LibraryScanJob,
+        LibraryScanResult, LibrarySource, MediaAnalysis, OnboardingStatus, Preset,
         PreviewLibraryBulkMoveRequest, PreviewLibraryFileOperationRequest, QueueSettings,
         QueueSnapshot, SaveAuthenticationProfileRequest, SaveLibraryCollectionRequest,
-        SaveLibrarySourceRequest, SavePresetRequest, SaveSitePresetRuleRequest,
-        SaveSubscriptionRequest, SitePresetRule, StartDownloadRequest, StartTransformationRequest,
-        Subscription, SubscriptionCheckResult, TransformationTask, UpdateLibraryItemRequest,
+        SaveLibraryPlaybackRequest, SaveLibrarySourceRequest, SavePresetRequest,
+        SaveSitePresetRuleRequest, SaveSubscriptionRequest, SitePresetRule, StartDownloadRequest,
+        StartTransformationRequest, Subscription, SubscriptionCheckResult, TransformationTask,
+        UpdateLibraryItemRequest,
     },
     queue::{disk_space, QueueManager},
     subscriptions,
@@ -71,6 +75,54 @@ pub fn list_library_items(
     library: State<'_, library::LibraryManager>,
 ) -> Result<Vec<LibraryItem>, AppError> {
     library.list_items(app)
+}
+
+#[tauri::command]
+pub fn query_library_items(
+    database: State<'_, Database>,
+    request: LibraryQueryRequest,
+) -> Result<LibraryQueryResult, AppError> {
+    database.query_library_items(request)
+}
+
+#[tauri::command]
+pub fn get_library_facets(
+    database: State<'_, Database>,
+    request: LibraryFacetRequest,
+) -> Result<LibraryFacets, AppError> {
+    database.library_facets(request)
+}
+
+#[tauri::command]
+pub fn get_library_items_by_ids(
+    database: State<'_, Database>,
+    ids: Vec<String>,
+) -> Result<Vec<LibraryItem>, AppError> {
+    database.list_library_items_by_ids(ids)
+}
+
+#[tauri::command]
+pub async fn prepare_library_playback(
+    media_server: State<'_, MediaServerState>,
+    id: String,
+) -> Result<LibraryPlaybackSession, AppError> {
+    media_server.prepare_webview_playback(&id).await
+}
+
+#[tauri::command]
+pub fn save_library_playback_progress(
+    database: State<'_, Database>,
+    request: SaveLibraryPlaybackRequest,
+) -> Result<LibraryPlaybackState, AppError> {
+    database.save_library_playback(request)
+}
+
+#[tauri::command]
+pub fn list_continue_watching(
+    database: State<'_, Database>,
+    limit: usize,
+) -> Result<Vec<LibraryPlaybackEntry>, AppError> {
+    database.list_continue_watching(limit)
 }
 
 #[tauri::command]

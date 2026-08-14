@@ -435,6 +435,91 @@ export interface LibraryItem {
   updatedAt: string;
 }
 
+export type LibraryAvailabilityFilter = "all" | "available" | "missing";
+export type LibraryFolderScope = "tree" | "direct";
+
+export interface LibraryQueryRequest {
+  page: number;
+  pageSize: number;
+  search?: string | null;
+  sourceId?: string | null;
+  folderSourceId?: string | null;
+  folderPath?: string | null;
+  folderScope: LibraryFolderScope;
+  mediaKind?: Exclude<LibraryMediaKind, "both"> | null;
+  resolution?: string | null;
+  container?: string | null;
+  duration?: string | null;
+  dateAdded?: string | null;
+  availability: LibraryAvailabilityFilter;
+  tag?: string | null;
+  rating?: string | null;
+  collectionId?: string | null;
+  favoriteOnly: boolean;
+}
+
+export interface LibraryQueryResult {
+  items: LibraryItem[];
+  totalItems: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+}
+
+export interface LibraryFacetRequest {
+  sourceId?: string | null;
+  availability: LibraryAvailabilityFilter;
+}
+
+export interface LibraryFolderFacet {
+  sourceId: string;
+  path: string;
+  directCount: number;
+  treeCount: number;
+}
+
+export interface LibraryFacets {
+  totalItems: number;
+  availableItems: number;
+  missingItems: number;
+  containers: string[];
+  tags: string[];
+  folders: LibraryFolderFacet[];
+}
+
+export interface LibraryPlaybackState {
+  itemId: string;
+  positionSeconds: number;
+  durationSeconds: number;
+  completed: boolean;
+  updatedAt: string;
+}
+
+export interface SaveLibraryPlaybackRequest {
+  itemId: string;
+  positionSeconds: number;
+  durationSeconds: number;
+  completed: boolean;
+}
+
+export interface LibraryPlaybackEntry {
+  item: LibraryItem;
+  playback: LibraryPlaybackState;
+}
+
+export interface LibrarySubtitleTrack {
+  label: string;
+  language?: string | null;
+  url: string;
+}
+
+export interface LibraryPlaybackSession {
+  item: LibraryItem;
+  url: string;
+  playback?: LibraryPlaybackState | null;
+  subtitles: LibrarySubtitleTrack[];
+}
+
 export interface LibraryCacheResult {
   removedFiles: number;
   freedBytes: number;

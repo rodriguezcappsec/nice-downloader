@@ -4,6 +4,7 @@ mod database;
 mod engines;
 mod errors;
 mod library;
+mod media_server;
 mod models;
 mod queue;
 mod subscriptions;
@@ -80,6 +81,10 @@ pub fn run() {
             })?;
             managed::initialize(&data_directory, &resource_directory)?;
             let database = Database::open(&data_directory.join("nice-downloader.sqlite3"))?;
+            let media_server = media_server::start(database.clone()).unwrap_or_else(|error| {
+                tracing::warn!(%error, "embedded playback is unavailable; system-player fallback remains enabled");
+                media_server::MediaServerState::unavailable(database.clone())
+            });
             if tray_available && database.load_desktop_preferences()?.start_minimized {
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.hide();
@@ -102,6 +107,7 @@ pub fn run() {
             app.manage(queue);
             app.manage(transformations);
             app.manage(library);
+            app.manage(media_server);
             tracing::info!(path = %data_directory.display(), "application backend initialized");
             Ok(())
         })
@@ -155,6 +161,12 @@ pub fn run() {
             commands::start_transformation,
             commands::cancel_transformation,
             commands::list_library_items,
+            commands::query_library_items,
+            commands::get_library_facets,
+            commands::get_library_items_by_ids,
+            commands::prepare_library_playback,
+            commands::save_library_playback_progress,
+            commands::list_continue_watching,
             commands::import_library_files,
             commands::update_library_item,
             commands::list_library_collections,

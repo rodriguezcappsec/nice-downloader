@@ -617,6 +617,125 @@ pub struct LibraryItem {
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub enum LibraryAvailabilityFilter {
+    All,
+    #[default]
+    Available,
+    Missing,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum LibraryFolderScope {
+    #[default]
+    Tree,
+    Direct,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryQueryRequest {
+    pub page: u32,
+    pub page_size: u32,
+    pub search: Option<String>,
+    pub source_id: Option<String>,
+    pub folder_source_id: Option<String>,
+    pub folder_path: Option<String>,
+    pub folder_scope: LibraryFolderScope,
+    pub media_kind: Option<LibraryMediaKind>,
+    pub resolution: Option<String>,
+    pub container: Option<String>,
+    pub duration: Option<String>,
+    pub date_added: Option<String>,
+    pub availability: LibraryAvailabilityFilter,
+    pub tag: Option<String>,
+    pub rating: Option<String>,
+    pub collection_id: Option<String>,
+    pub favorite_only: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryQueryResult {
+    pub items: Vec<LibraryItem>,
+    pub total_items: usize,
+    pub page: u32,
+    pub page_size: u32,
+    pub total_pages: u32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryFacetRequest {
+    pub source_id: Option<String>,
+    pub availability: LibraryAvailabilityFilter,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryFolderFacet {
+    pub source_id: String,
+    pub path: String,
+    pub direct_count: usize,
+    pub tree_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryFacets {
+    pub total_items: usize,
+    pub available_items: usize,
+    pub missing_items: usize,
+    pub containers: Vec<String>,
+    pub tags: Vec<String>,
+    pub folders: Vec<LibraryFolderFacet>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryPlaybackState {
+    pub item_id: String,
+    pub position_seconds: f64,
+    pub duration_seconds: f64,
+    pub completed: bool,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveLibraryPlaybackRequest {
+    pub item_id: String,
+    pub position_seconds: f64,
+    pub duration_seconds: f64,
+    pub completed: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryPlaybackEntry {
+    pub item: LibraryItem,
+    pub playback: LibraryPlaybackState,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibrarySubtitleTrack {
+    pub label: String,
+    pub language: Option<String>,
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryPlaybackSession {
+    pub item: LibraryItem,
+    pub url: String,
+    pub playback: Option<LibraryPlaybackState>,
+    pub subtitles: Vec<LibrarySubtitleTrack>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub enum LibraryMetadataState {
     #[default]
     Pending,

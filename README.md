@@ -78,6 +78,9 @@ warning because current builds are not code-signed.
 - Local media library with hierarchical folder filters, tags, collections,
   change review, exact-duplicate analysis, recoverable Trash cleanup,
   previewable Move/Copy/Rename with Undo, and metadata backup/restore
+- Integrated Watch workspace with embedded playback, resume positions,
+  Continue Watching, subtitle tracks, searchable paginated browsing, and an
+  explicit system-player fallback
 - Scheduled playlist/channel subscriptions with archive-aware deduplication
 - FFmpeg-powered media transformations with progress and cancellation
 - Per-site browser-cookie, browser-profile, and proxy preferences
@@ -120,6 +123,23 @@ engines, `PATH`, and standard user bin folders.
 Developers can stage the pinned sidecars with `npm run engines:prepare`. The
 generated binaries are ignored by Git and assembled by release CI from the
 checksummed sources in `engines.lock.json`.
+
+### Linux embedded playback
+
+The integrated player uses WebKitGTK's GStreamer runtime. Nice Downloader
+checks for `autoaudiosink` before opening a video and keeps **Open in system
+player** available when the embedded runtime or a codec is missing.
+
+```bash
+# Arch Linux
+sudo pacman -S --needed gst-plugins-good gst-libav
+
+# Debian or Ubuntu
+sudo apt install gstreamer1.0-plugins-good gstreamer1.0-libav
+```
+
+`gst-plugins-good` supplies the required audio-output element. `gst-libav` is
+recommended for broader codec support but is not required to build the app.
 
 ## Quick start
 
@@ -179,17 +199,80 @@ See [Release and Distribution](docs/RELEASING.md) for details.
 
 ## Development
 
-Requirements:
+### Common requirements
 
 - Node.js 22 or newer
 - Current stable Rust toolchain
-- Tauri 2 platform dependencies
-- GTK 3 and WebKitGTK 4.1 development packages on Linux
+- Git
+- Python 3 with virtual-environment support
+- Internet access for the first npm/Cargo build and bundled-engine staging
+
+Python is only needed to turn the pinned gallery-dl wheel into a standalone
+sidecar. End users of release packages do not need Python.
+
+### Linux build tools
+
+Debian/Ubuntu build host:
+
+```bash
+sudo apt update
+sudo apt install build-essential curl wget file libssl-dev \
+  libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf \
+  python3 python3-venv unzip gstreamer1.0-plugins-good gstreamer1.0-libav
+```
+
+Arch Linux build host:
+
+```bash
+sudo pacman -S --needed base-devel curl wget file openssl webkit2gtk-4.1 \
+  libappindicator-gtk3 librsvg patchelf python python-pip unzip \
+  gstreamer gst-plugins-good gst-libav
+```
+
+Building an AppImage locally on Arch additionally requires `bubblewrap`; use
+the documented `tauri:build:appimage:arch` command below.
+
+### Windows build tools
+
+Build Windows packages on Windows x86-64. Install:
+
+- Node.js 22 or newer and Python 3, both available on `PATH`
+- Rust with the `stable-x86_64-pc-windows-msvc` toolchain
+- Visual Studio 2022 Build Tools with **Desktop development with C++** and a
+  Windows 10/11 SDK
+- Microsoft Edge WebView2 Runtime for local execution
+
+The Tauri build downloads its NSIS tooling when needed. Cross-compiling the
+complete Windows desktop package from Linux is not currently supported.
+
+### Run from source
 
 ```bash
 npm ci
 npm run tauri:dev
 ```
+
+Development mode can discover engines from `PATH`. To test the same verified
+sidecars shipped in releases, run `npm run engines:prepare` first.
+
+### Bundled engines and network downloads
+
+Release builds must stage their engine payload before Tauri bundles the app:
+
+```bash
+npm run engines:prepare
+```
+
+This downloads the pinned Linux or Windows x86-64 yt-dlp, FFmpeg, ffprobe, and
+gallery-dl inputs, verifies every SHA-256 digest from `engines.lock.json`, uses
+`unzip` on Linux or PowerShell `Expand-Archive` on Windows, and builds
+gallery-dl with the pinned PyInstaller version. Downloads are cached under
+`.cache/bundled-engines/`; generated executables under
+`src-tauri/resources/engines/` are intentionally not committed.
+
+The first Tauri package build may also download platform bundlers such as
+`linuxdeploy` or NSIS. The build does not install missing operating-system
+packages automatically.
 
 Validation commands:
 
@@ -204,17 +287,25 @@ cargo test --manifest-path src-tauri/Cargo.toml --all-targets --no-fail-fast
 Build packages:
 
 ```bash
-# Linux AppImage and DEB
+# Linux x86-64: stage verified engines, then build AppImage and DEB
+npm run engines:prepare
 npm run tauri:build -- --bundles appimage,deb
 
-# Windows PowerShell on a Windows host
+# Arch Linux AppImage workaround (also stages engines)
+sudo pacman -S --needed bubblewrap
+npm run tauri:build:appimage:arch
+
+# Windows PowerShell on a Windows x86-64 host
+npm run engines:prepare
 npm run tauri:build -- --bundles nsis
 
-# Windows standalone executable, without an installer
+# Windows portable executable and adjacent engines/ directory
 npm run tauri:build -- --no-bundle
 ```
 
-Build outputs are written below `src-tauri/target/release/`. Read
+Do not distribute the Windows portable `.exe` by itself; include the adjacent
+`src-tauri/target/release/engines/` directory. Build outputs are written below
+`src-tauri/target/release/`, with installers under `bundle/`. Read
 [Architecture](docs/ARCHITECTURE.md), [UX](docs/UX.md), and the
 [Roadmap](docs/ROADMAP.md) before changing subsystem boundaries.
 

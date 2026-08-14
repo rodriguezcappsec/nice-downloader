@@ -2,7 +2,7 @@
 
 ## Active: local media organizer
 
-Implementation is tracked in `docs/MEDIA_ORGANIZER.md`. Milestones 1–6 are implemented on `feat/media-organizer`: external folders, hierarchical folder filters with direct-only depth control, cancellable scans, structured metadata, curation, watching, removable-volume recovery, change review, exact SHA-256 duplicate cleanup, previewable Move/Copy/Rename operations, and preflighted bulk moves into a chosen subfolder. Milestone 7 now includes reachable client-side Library pagination, a command palette, shortcut help, focus management, interface scaling, reduced motion, high contrast, live-region foundations, bounded versioned full-catalog backup/recovery, and LRU-bounded artwork caching with live usage. Database-backed pagination and deeper accessibility verification are next; perceptual similarity remains deferred.
+Implementation is tracked in `docs/MEDIA_ORGANIZER.md`. Milestones 1–6 are implemented on `feat/media-organizer`: external folders, hierarchical folder filters with direct-only depth control, cancellable scans, structured metadata, curation, watching, removable-volume recovery, change review, exact SHA-256 duplicate cleanup, previewable Move/Copy/Rename operations, and preflighted bulk moves into a chosen subfolder. Milestone 7 includes SQLite-backed Library filtering and pagination, bounded Home shelves and facets, accessibility foundations, versioned recovery, and bounded artwork caching. Milestone 8 adds secure embedded HTML5 playback, byte-range streaming, resume state, Continue Watching, WebVTT sidecars, and explicit system-player fallback. Representative large-library profiling and deeper accessibility verification are next; perceptual similarity remains deferred.
 
 ## Maturity roadmap delivered
 
