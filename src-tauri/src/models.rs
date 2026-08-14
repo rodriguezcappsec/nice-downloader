@@ -805,6 +805,39 @@ pub struct LibraryFileOperationResult {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PreviewLibraryBulkMoveRequest {
+    pub item_ids: Vec<String>,
+    pub destination_directory: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryBulkMovePlan {
+    pub operations: Vec<LibraryFileOperationPlan>,
+    pub destination_directory: String,
+    pub total_size_bytes: u64,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryBulkMoveFailure {
+    pub operation_id: String,
+    pub item_id: String,
+    pub code: String,
+    pub message: String,
+    pub details: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryBulkMoveResult {
+    pub results: Vec<LibraryFileOperationResult>,
+    pub failures: Vec<LibraryBulkMoveFailure>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SaveLibraryCollectionRequest {
     pub id: Option<String>,
     pub name: String,

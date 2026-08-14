@@ -2,13 +2,15 @@ use super::{file_fingerprint, file_identity, file_title, media_kind_for_path, Li
 use crate::{
     errors::AppError,
     models::{
-        LibraryChangeKind, LibraryFileOperation, LibraryFileOperationKind,
-        LibraryFileOperationPlan, LibraryFileOperationResult, LibraryFileOperationState,
-        LibraryItem, LibraryMediaKind, PreviewLibraryFileOperationRequest,
+        LibraryBulkMoveFailure, LibraryBulkMovePlan, LibraryBulkMoveResult, LibraryChangeKind,
+        LibraryFileOperation, LibraryFileOperationKind, LibraryFileOperationPlan,
+        LibraryFileOperationResult, LibraryFileOperationState, LibraryItem, LibraryMediaKind,
+        PreviewLibraryBulkMoveRequest, PreviewLibraryFileOperationRequest,
     },
 };
 use chrono::Utc;
 use std::{
+    collections::HashSet,
     fs::{self, OpenOptions},
     io::{self, BufReader, BufWriter, Write},
     path::{Component, Path, PathBuf},
@@ -17,6 +19,15 @@ use uuid::Uuid;
 
 impl LibraryManager {
     pub fn preview_file_operation(
+        &self,
+        request: PreviewLibraryFileOperationRequest,
+    ) -> Result<LibraryFileOperationPlan, AppError> {
+        let plan = self.create_file_operation_plan(request)?;
+        self.database.save_library_file_operation(&plan.operation)?;
+        Ok(plan)
+    }
+
+    fn create_file_operation_plan(
         &self,
         request: PreviewLibraryFileOperationRequest,
     ) -> Result<LibraryFileOperationPlan, AppError> {
@@ -34,6 +45,12 @@ impl LibraryManager {
                 "library_operation_conflict",
                 "A file or folder already exists at the planned destination. Nice Downloader never overwrites library files.",
             ));
+        }
+        if matches!(
+            request.kind,
+            LibraryFileOperationKind::Move | LibraryFileOperationKind::Rename
+        ) {
+            validate_move_filesystem(&source, &destination)?;
         }
         let (source_size_bytes, source_modified_at_ms) =
             file_fingerprint(&source).ok_or_else(|| {
@@ -66,7 +83,6 @@ impl LibraryManager {
             updated_at: now,
             completed_at: None,
         };
-        self.database.save_library_file_operation(&operation)?;
         let destination_source =
             catalog_location(&self.database.list_library_sources()?, &destination);
         let mut warnings = vec!["Existing files are never overwritten.".to_owned()];
@@ -87,6 +103,144 @@ impl LibraryManager {
             operation,
             warnings,
         })
+    }
+
+    pub fn preview_bulk_move(
+        &self,
+        request: PreviewLibraryBulkMoveRequest,
+    ) -> Result<LibraryBulkMovePlan, AppError> {
+        let item_ids = validate_bulk_ids(request.item_ids, "library items")?;
+        let destination = validate_operation_directory(&request.destination_directory)?;
+        let destination_directory = destination.to_string_lossy().into_owned();
+        let mut plans = Vec::with_capacity(item_ids.len());
+        let mut destinations = HashSet::with_capacity(item_ids.len());
+        let mut total_size_bytes = 0_u64;
+        for item_id in item_ids {
+            let plan = self.create_file_operation_plan(PreviewLibraryFileOperationRequest {
+                item_id,
+                kind: LibraryFileOperationKind::Move,
+                destination_directory: Some(destination_directory.clone()),
+                new_file_name: None,
+            })?;
+            if !destinations.insert(plan.operation.destination_path.clone()) {
+                return Err(AppError::new(
+                    "library_bulk_move_name_conflict",
+                    "Two selected files have the same filename. Rename one of them before moving this selection.",
+                ));
+            }
+            total_size_bytes = total_size_bytes
+                .checked_add(plan.operation.source_size_bytes)
+                .ok_or_else(|| {
+                    AppError::new(
+                        "library_bulk_move_too_large",
+                        "The selected files are too large to summarize safely.",
+                    )
+                })?;
+            plans.push(plan);
+        }
+        for plan in &plans {
+            self.database.save_library_file_operation(&plan.operation)?;
+        }
+        let mut warnings = vec![
+            "All destinations were checked before this preview. Existing files are never overwritten."
+                .to_owned(),
+            "Move is limited to the same filesystem. Cross-filesystem selections remain unchanged."
+                .to_owned(),
+        ];
+        if plans.iter().any(|plan| {
+            plan.warnings
+                .iter()
+                .any(|warning| warning.contains("outside configured"))
+        }) {
+            warnings.push(
+                "The destination is outside configured Library folders, so automatic source scans will not monitor these files."
+                    .to_owned(),
+            );
+        }
+        Ok(LibraryBulkMovePlan {
+            operations: plans,
+            destination_directory,
+            total_size_bytes,
+            warnings,
+        })
+    }
+
+    pub async fn execute_bulk_move(
+        &self,
+        operation_ids: Vec<String>,
+    ) -> Result<LibraryBulkMoveResult, AppError> {
+        let operation_ids = validate_bulk_ids(operation_ids, "file operations")?;
+        let mut operations = Vec::with_capacity(operation_ids.len());
+        let mut item_ids = HashSet::with_capacity(operation_ids.len());
+        let mut destinations = HashSet::with_capacity(operation_ids.len());
+        let mut destination_parent: Option<PathBuf> = None;
+        for operation_id in operation_ids {
+            let operation = self.preflight_move_operation(&operation_id)?;
+            if !item_ids.insert(operation.item_id.clone())
+                || !destinations.insert(operation.destination_path.clone())
+            {
+                return Err(AppError::new(
+                    "invalid_library_bulk_move",
+                    "Each selected file and destination must appear only once in a bulk move.",
+                ));
+            }
+            let parent = Path::new(&operation.destination_path)
+                .parent()
+                .map(Path::to_path_buf)
+                .ok_or_else(|| {
+                    AppError::new(
+                        "invalid_library_destination",
+                        "A planned destination folder is invalid.",
+                    )
+                })?;
+            if destination_parent
+                .as_ref()
+                .is_some_and(|expected| expected != &parent)
+            {
+                return Err(AppError::new(
+                    "invalid_library_bulk_move",
+                    "All files in a bulk move must use the same destination folder.",
+                ));
+            }
+            destination_parent = Some(parent);
+            operations.push(operation);
+        }
+
+        let mut results = Vec::with_capacity(operations.len());
+        let mut failures = Vec::new();
+        for operation in operations {
+            match self.execute_file_operation(&operation.id).await {
+                Ok(result) => results.push(result),
+                Err(error) => failures.push(LibraryBulkMoveFailure {
+                    operation_id: operation.id,
+                    item_id: operation.item_id,
+                    code: error.code,
+                    message: error.message,
+                    details: error.details,
+                }),
+            }
+        }
+        Ok(LibraryBulkMoveResult { results, failures })
+    }
+
+    fn preflight_move_operation(
+        &self,
+        operation_id: &str,
+    ) -> Result<LibraryFileOperation, AppError> {
+        let operation = self.database.get_library_file_operation(operation_id)?;
+        if operation.kind != LibraryFileOperationKind::Move
+            || operation.state != LibraryFileOperationState::Planned
+        {
+            return Err(AppError::new(
+                "invalid_library_bulk_move",
+                "This bulk move contains an operation that is no longer ready.",
+            ));
+        }
+        let item = self.database.get_library_item(&operation.item_id)?;
+        let source = validate_current_item(&item)?;
+        let destination = revalidate_plan(&operation, &source)?;
+        validate_move_filesystem(&source, &destination)?;
+        Ok(operation)
     }
 
     pub async fn execute_file_operation(
@@ -708,12 +862,64 @@ fn display_path(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
+fn validate_move_filesystem(source: &Path, destination: &Path) -> Result<(), AppError> {
+    let parent = destination.parent().ok_or_else(|| {
+        AppError::new(
+            "invalid_library_destination",
+            "The destination folder is invalid.",
+        )
+    })?;
+    if file_identity(source)
+        .zip(file_identity(parent))
+        .is_some_and(|(source, destination)| source.device_id != destination.device_id)
+    {
+        return Err(AppError::new(
+            "library_operation_cross_device",
+            "This move crosses filesystems. Copy the files first, verify them, then move the originals to Trash.",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_bulk_ids(ids: Vec<String>, label: &str) -> Result<Vec<String>, AppError> {
+    if ids.is_empty() {
+        return Err(AppError::new(
+            "empty_library_selection",
+            format!("Choose at least one {label} before continuing."),
+        ));
+    }
+    if ids.len() > 500 {
+        return Err(AppError::new(
+            "library_selection_too_large",
+            "Bulk file moves are limited to 500 items at a time.",
+        ));
+    }
+    let mut unique = HashSet::with_capacity(ids.len());
+    let mut normalized = Vec::with_capacity(ids.len());
+    for id in ids {
+        let id = Uuid::parse_str(&id)
+            .map_err(|_| {
+                AppError::new(
+                    "invalid_library_selection",
+                    format!("A selected {label} identifier is invalid."),
+                )
+            })?
+            .to_string();
+        if unique.insert(id.clone()) {
+            normalized.push(id);
+        }
+    }
+    Ok(normalized)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
         database::Database,
-        models::{LibraryMetadataState, PreviewLibraryFileOperationRequest},
+        models::{
+            LibraryMetadataState, PreviewLibraryBulkMoveRequest, PreviewLibraryFileOperationRequest,
+        },
     };
     use tempfile::tempdir;
 
@@ -855,5 +1061,113 @@ mod tests {
         assert_eq!(error.code, "library_operation_stale_plan");
         assert!(source.exists());
         assert!(!directory.path().join("renamed.mp4").exists());
+    }
+
+    #[tokio::test]
+    async fn previews_and_executes_a_multi_file_move() {
+        let directory = tempdir().expect("temporary directory");
+        let source_directory = directory.path().join("source");
+        let destination_directory = directory.path().join("destination");
+        fs::create_dir(&source_directory).expect("source directory");
+        fs::create_dir(&destination_directory).expect("destination directory");
+        let first_path = source_directory.join("first.mp4");
+        let second_path = source_directory.join("second.mp4");
+        fs::write(&first_path, b"first fixture").expect("first fixture");
+        fs::write(&second_path, b"second fixture").expect("second fixture");
+        let database = Database::open(&directory.path().join("library.sqlite3")).expect("database");
+        let first = catalog_fixture(&database, &first_path);
+        let second = catalog_fixture(&database, &second_path);
+        let manager = LibraryManager::new(database).expect("library manager");
+
+        let plan = manager
+            .preview_bulk_move(PreviewLibraryBulkMoveRequest {
+                item_ids: vec![first.id, second.id],
+                destination_directory: destination_directory.to_string_lossy().into_owned(),
+            })
+            .expect("bulk move preview");
+        assert_eq!(plan.operations.len(), 2);
+        assert_eq!(plan.total_size_bytes, 27);
+        let result = manager
+            .execute_bulk_move(
+                plan.operations
+                    .iter()
+                    .map(|plan| plan.operation.id.clone())
+                    .collect(),
+            )
+            .await
+            .expect("bulk move");
+
+        assert_eq!(result.results.len(), 2);
+        assert!(result.failures.is_empty());
+        assert!(!first_path.exists());
+        assert!(!second_path.exists());
+        assert!(destination_directory.join("first.mp4").exists());
+        assert!(destination_directory.join("second.mp4").exists());
+    }
+
+    #[tokio::test]
+    async fn bulk_move_preflight_prevents_partial_work_on_a_conflict() {
+        let directory = tempdir().expect("temporary directory");
+        let source_directory = directory.path().join("source");
+        let destination_directory = directory.path().join("destination");
+        fs::create_dir(&source_directory).expect("source directory");
+        fs::create_dir(&destination_directory).expect("destination directory");
+        let first_path = source_directory.join("first.mp4");
+        let second_path = source_directory.join("second.mp4");
+        fs::write(&first_path, b"first fixture").expect("first fixture");
+        fs::write(&second_path, b"second fixture").expect("second fixture");
+        let database = Database::open(&directory.path().join("library.sqlite3")).expect("database");
+        let first = catalog_fixture(&database, &first_path);
+        let second = catalog_fixture(&database, &second_path);
+        let manager = LibraryManager::new(database).expect("library manager");
+        let plan = manager
+            .preview_bulk_move(PreviewLibraryBulkMoveRequest {
+                item_ids: vec![first.id, second.id],
+                destination_directory: destination_directory.to_string_lossy().into_owned(),
+            })
+            .expect("bulk move preview");
+        fs::write(destination_directory.join("second.mp4"), b"conflict")
+            .expect("destination conflict");
+
+        let error = manager
+            .execute_bulk_move(
+                plan.operations
+                    .iter()
+                    .map(|plan| plan.operation.id.clone())
+                    .collect(),
+            )
+            .await
+            .expect_err("preflight conflict");
+        assert_eq!(error.code, "library_operation_conflict");
+        assert!(first_path.exists());
+        assert!(second_path.exists());
+        assert!(!destination_directory.join("first.mp4").exists());
+    }
+
+    #[test]
+    fn bulk_move_rejects_duplicate_destination_filenames() {
+        let directory = tempdir().expect("temporary directory");
+        let first_directory = directory.path().join("one");
+        let second_directory = directory.path().join("two");
+        let destination_directory = directory.path().join("destination");
+        fs::create_dir(&first_directory).expect("first directory");
+        fs::create_dir(&second_directory).expect("second directory");
+        fs::create_dir(&destination_directory).expect("destination directory");
+        let first_path = first_directory.join("clip.mp4");
+        let second_path = second_directory.join("clip.mp4");
+        fs::write(&first_path, b"first").expect("first fixture");
+        fs::write(&second_path, b"second").expect("second fixture");
+        let database = Database::open(&directory.path().join("library.sqlite3")).expect("database");
+        let first = catalog_fixture(&database, &first_path);
+        let second = catalog_fixture(&database, &second_path);
+        let manager = LibraryManager::new(database).expect("library manager");
+
+        let error = manager
+            .preview_bulk_move(PreviewLibraryBulkMoveRequest {
+                item_ids: vec![first.id, second.id],
+                destination_directory: destination_directory.to_string_lossy().into_owned(),
+            })
+            .expect_err("duplicate destination");
+        assert_eq!(error.code, "library_bulk_move_name_conflict");
     }
 }

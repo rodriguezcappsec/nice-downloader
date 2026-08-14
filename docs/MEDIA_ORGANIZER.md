@@ -115,6 +115,7 @@ Status: implemented on `feat/media-organizer`.
 - Publication is no-clobber: Copy uses a hidden staging file and atomic hard-link publication; Move/Rename uses a no-clobber hard-link transition on the same filesystem. Existing destinations are never overwritten.
 - Migration `0014_library_file_operations.sql` journals plans and the executing, completed, failed, or undone outcome. Library management shows the latest 100 confirmed operations.
 - Completed Move/Rename operations can be undone when the original path is free and the operated file fingerprint still matches. Copy undo moves the verified copy to system Trash.
+- Selection mode can preview and move up to 500 media files into one chosen subfolder. Rust validates the entire batch before moving the first file, rejects duplicate destination filenames, and leaves failed items selected if a race causes a partial result.
 - Concurrent execution is rejected through an atomic SQLite state transition. Catalog changes happen only after filesystem success; partial catalog failures direct the user to Verify files.
 - On startup, an interrupted executing journal entry becomes Failed with Verify files guidance; abandoned preview plans expire after 24 hours.
 

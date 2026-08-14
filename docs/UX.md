@@ -20,6 +20,8 @@ Accessibility preferences are durable desktop settings, not browser-only decorat
 
 Library result limits must never make media unreachable. Search, filters, and selection mode paginate in 60-item pages, show the exact visible range, reset safely when filter intent changes, and expose numbered plus Previous/Next navigation. Page changes retain cross-page bulk selections and announce the new page politely.
 
+Bulk organization is deliberate: selection mode exposes Move, the native folder picker chooses one destination, and a modal lists every preserved filename before confirmation. Existing files are never overwritten. Successful items leave the selection while any race-time failures remain selected for recovery.
+
 Queue authority remains in Rust. The frontend displays queue position, state, progress, speed, ETA, operation, attempt number, and sanitized engine logs. Queue pause means “do not start additional jobs”; per-job pause controls a running or waiting job. Cancelling preserves resumable partial data by default. Drag reordering supplements, but does not replace, keyboard-accessible arrow controls.
 
 Errors lead with a user explanation and route to the relevant recovery surface. Authentication and engine failures link to Settings, duplicate downloads link to History, and retry/rate-limit failures link to Queue. Technical diagnostics remain expandable.

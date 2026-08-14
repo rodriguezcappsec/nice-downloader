@@ -539,6 +539,31 @@ export interface LibraryFileOperationResult {
   items: LibraryItem[];
 }
 
+export interface PreviewLibraryBulkMoveRequest {
+  itemIds: string[];
+  destinationDirectory: string;
+}
+
+export interface LibraryBulkMovePlan {
+  operations: LibraryFileOperationPlan[];
+  destinationDirectory: string;
+  totalSizeBytes: number;
+  warnings: string[];
+}
+
+export interface LibraryBulkMoveFailure {
+  operationId: string;
+  itemId: string;
+  code: string;
+  message: string;
+  details?: string | null;
+}
+
+export interface LibraryBulkMoveResult {
+  results: LibraryFileOperationResult[];
+  failures: LibraryBulkMoveFailure[];
+}
+
 export interface SaveLibraryCollectionRequest {
   id?: string | null;
   name: string;

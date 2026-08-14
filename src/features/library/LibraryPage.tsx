@@ -46,6 +46,8 @@ import { useAppStore } from "../../stores/app-store";
 import type {
   LibraryItem,
   LibraryBulkAction,
+  LibraryBulkMovePlan,
+  LibraryBulkMoveResult,
   LibraryChange,
   LibraryDuplicateAnalysisJob,
   LibraryDuplicateGroup,
@@ -94,6 +96,7 @@ export function LibraryPage() {
   const [favoriteOnly, setFavoriteOnly] = useState(false);
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
+  const [bulkMoveOpen, setBulkMoveOpen] = useState(false);
   const [viewMode, setViewMode] = useState<"grid" | "list">(() => window.localStorage.getItem("nice-downloader.library-view") === "list" ? "list" : "grid");
   const [selectedItem, setSelectedItem] = useState<LibraryItem | null>(null);
   const [manageOpen, setManageOpen] = useState(false);
@@ -276,6 +279,30 @@ export function LibraryPage() {
     void api.listLibrarySources().then(setSources).catch((error) => setError(normalizeError(error)));
   }
 
+  function applyBulkMoveResult(result: LibraryBulkMoveResult) {
+    const movedItemIds = new Set(result.results.map((entry) => entry.operation.itemId));
+    const changedItems = result.results.flatMap((entry) => entry.items);
+    const changedById = new Map(changedItems.map((item) => [item.id, item]));
+    setItems((current) => current.map((item) => changedById.get(item.id) || item));
+    setSelectedItem((current) => current ? changedById.get(current.id) || current : null);
+    setSelectedIds((current) => new Set(Array.from(current).filter((id) => !movedItemIds.has(id))));
+    void Promise.all([api.listLibrarySources(), api.listLibraryFileOperations()])
+      .then(([nextSources, nextOperations]) => {
+        setSources(nextSources);
+        setFileOperations(nextOperations);
+      })
+      .catch((error) => setError(normalizeError(error)));
+    const moved = result.results.length;
+    const failed = result.failures.length;
+    if (failed === 0) setSelectionMode(false);
+    setNotice({
+      message: failed > 0
+        ? `Moved ${moved} item${moved === 1 ? "" : "s"}; ${failed} could not be moved and remain selected.`
+        : `Moved ${moved} item${moved === 1 ? "" : "s"} to the selected folder.`,
+      view: "library",
+    });
+  }
+
   function toggleSelection(id: string) {
     if (!selectedIds.has(id) && selectedIds.size >= 500) {
       setNotice({ message: "Bulk actions are limited to 500 items at a time.", view: "library" });
@@ -290,6 +317,7 @@ export function LibraryPage() {
   }
 
   function closeSelectionMode() {
+    setBulkMoveOpen(false);
     setSelectionMode(false);
     setSelectedIds(new Set());
   }
@@ -495,7 +523,8 @@ export function LibraryPage() {
       )}
 
       {selectedItem ? <MediaDetails item={selectedItem} sourceName={sourceLabel(selectedItem, sourceNames)} onClose={() => setSelectedItem(null)} onChanged={updateItem} onRemoved={() => removeItem(selectedItem.id)} onOperation={applyFileOperationResult} /> : null}
-      {selectionMode ? <BulkActionBar selectedIds={selectedIds} collections={collections} busy={busy} onApply={applyBulkAction} onClose={closeSelectionMode} /> : null}
+      {selectionMode ? <BulkActionBar selectedIds={selectedIds} collections={collections} busy={busy} onMove={() => setBulkMoveOpen(true)} onApply={applyBulkAction} onClose={closeSelectionMode} /> : null}
+      {bulkMoveOpen ? <BulkMoveDialog selectedIds={selectedIds} items={items} onClose={() => setBulkMoveOpen(false)} onComplete={(result) => { applyBulkMoveResult(result); setBulkMoveOpen(false); }} /> : null}
     </div>
   );
 }
@@ -789,10 +818,80 @@ function sourceLabel(item: LibraryItem, sourceNames: Map<string, string>): strin
   return item.sourceId ? sourceNames.get(item.sourceId) || item.site || "Local media" : item.site || "Local media";
 }
 
-function BulkActionBar({ selectedIds, collections, busy, onApply, onClose }: { selectedIds: Set<string>; collections: LibraryCollection[]; busy: boolean; onApply: (action: LibraryBulkAction, message: string) => Promise<void>; onClose: () => void }) {
+function BulkActionBar({ selectedIds, collections, busy, onMove, onApply, onClose }: { selectedIds: Set<string>; collections: LibraryCollection[]; busy: boolean; onMove: () => void; onApply: (action: LibraryBulkAction, message: string) => Promise<void>; onClose: () => void }) {
   const [tag, setTag] = useState("");
   const disabled = busy || selectedIds.size === 0;
-  return <aside className="panel-shadow fixed bottom-6 left-1/2 z-40 flex w-[min(1080px,calc(100vw-320px))] -translate-x-1/2 flex-wrap items-center gap-2 border border-line/80 bg-panel/95 p-3 backdrop-blur-xl" aria-label="Bulk library actions"><div className="mr-2 min-w-24"><p className="number-font text-sm font-semibold">{selectedIds.size} selected</p><button className="mt-0.5 text-[10px] font-medium text-muted hover:text-ink" onClick={onClose}>Clear selection</button></div><Button variant="secondary" className="h-9 px-3 text-xs" disabled={disabled} onClick={() => void onApply({ type: "setFavorite", favorite: true }, `Marked ${selectedIds.size} item${selectedIds.size === 1 ? "" : "s"} as favorites.`)}><Heart size={14} /> Favorite</Button><Button variant="secondary" className="h-9 px-3 text-xs" disabled={disabled} onClick={() => void onApply({ type: "setFavorite", favorite: false }, `Removed ${selectedIds.size} item${selectedIds.size === 1 ? "" : "s"} from favorites.`)}><Heart size={14} fill="none" /> Unfavorite</Button><label><span className="sr-only">Set rating</span><Select className="h-9 w-32 text-xs" disabled={disabled} defaultValue="" onChange={(event) => { const value = event.target.value; if (value !== "") void onApply({ type: "setRating", rating: value === "clear" ? null : Number(value) }, value === "clear" ? "Cleared selected ratings." : `Rated selected media ${value} stars.`); event.currentTarget.value = ""; }}><option value="" disabled>Set rating</option>{[5, 4, 3, 2, 1].map((rating) => <option key={rating} value={rating}>{rating} star{rating === 1 ? "" : "s"}</option>)}<option value="clear">Clear rating</option></Select></label><label><span className="sr-only">Add to collection</span><Select className="h-9 w-44 text-xs" disabled={disabled || collections.length === 0} defaultValue="" onChange={(event) => { if (event.target.value) void onApply({ type: "addToCollection", collectionId: event.target.value }, "Added selected media to the collection."); event.currentTarget.value = ""; }}><option value="" disabled>{collections.length ? "Add to collection" : "No collections"}</option>{collections.map((collection) => <option key={collection.id} value={collection.id}>{collection.name}</option>)}</Select></label><label><span className="sr-only">Remove from collection</span><Select className="h-9 w-48 text-xs" disabled={disabled || collections.length === 0} defaultValue="" onChange={(event) => { if (event.target.value) void onApply({ type: "removeFromCollection", collectionId: event.target.value }, "Removed selected media from the collection."); event.currentTarget.value = ""; }}><option value="" disabled>{collections.length ? "Remove from collection" : "No collections"}</option>{collections.map((collection) => <option key={collection.id} value={collection.id}>{collection.name}</option>)}</Select></label><div className="flex min-w-48 flex-1"><Input className="h-9 rounded-r-none text-xs" value={tag} onChange={(event) => setTag(event.target.value)} placeholder="Add a tag" /><Button variant="secondary" className="h-9 rounded-l-none px-3 text-xs" disabled={disabled || !tag.trim()} onClick={() => { const value = tag.trim(); if (!value) return; void onApply({ type: "addTags", tags: [value] }, `Added #${value} to selected media.`); setTag(""); }}><Tags size={14} /> Add</Button></div></aside>;
+  return <aside className="panel-shadow fixed bottom-6 left-1/2 z-40 flex w-[min(1080px,calc(100vw-320px))] -translate-x-1/2 flex-wrap items-center gap-2 border border-line/80 bg-panel/95 p-3 backdrop-blur-xl" aria-label="Bulk library actions"><div className="mr-2 min-w-24"><p className="number-font text-sm font-semibold">{selectedIds.size} selected</p><button className="mt-0.5 text-[10px] font-medium text-muted hover:text-ink" onClick={onClose}>Clear selection</button></div><Button className="h-9 px-3 text-xs" disabled={disabled} onClick={onMove}><FolderInput size={14} /> Move</Button><Button variant="secondary" className="h-9 px-3 text-xs" disabled={disabled} onClick={() => void onApply({ type: "setFavorite", favorite: true }, `Marked ${selectedIds.size} item${selectedIds.size === 1 ? "" : "s"} as favorites.`)}><Heart size={14} /> Favorite</Button><Button variant="secondary" className="h-9 px-3 text-xs" disabled={disabled} onClick={() => void onApply({ type: "setFavorite", favorite: false }, `Removed ${selectedIds.size} item${selectedIds.size === 1 ? "" : "s"} from favorites.`)}><Heart size={14} fill="none" /> Unfavorite</Button><label><span className="sr-only">Set rating</span><Select className="h-9 w-32 text-xs" disabled={disabled} defaultValue="" onChange={(event) => { const value = event.target.value; if (value !== "") void onApply({ type: "setRating", rating: value === "clear" ? null : Number(value) }, value === "clear" ? "Cleared selected ratings." : `Rated selected media ${value} stars.`); event.currentTarget.value = ""; }}><option value="" disabled>Set rating</option>{[5, 4, 3, 2, 1].map((rating) => <option key={rating} value={rating}>{rating} star{rating === 1 ? "" : "s"}</option>)}<option value="clear">Clear rating</option></Select></label><label><span className="sr-only">Add to collection</span><Select className="h-9 w-44 text-xs" disabled={disabled || collections.length === 0} defaultValue="" onChange={(event) => { if (event.target.value) void onApply({ type: "addToCollection", collectionId: event.target.value }, "Added selected media to the collection."); event.currentTarget.value = ""; }}><option value="" disabled>{collections.length ? "Add to collection" : "No collections"}</option>{collections.map((collection) => <option key={collection.id} value={collection.id}>{collection.name}</option>)}</Select></label><label><span className="sr-only">Remove from collection</span><Select className="h-9 w-48 text-xs" disabled={disabled || collections.length === 0} defaultValue="" onChange={(event) => { if (event.target.value) void onApply({ type: "removeFromCollection", collectionId: event.target.value }, "Removed selected media from the collection."); event.currentTarget.value = ""; }}><option value="" disabled>{collections.length ? "Remove from collection" : "No collections"}</option>{collections.map((collection) => <option key={collection.id} value={collection.id}>{collection.name}</option>)}</Select></label><div className="flex min-w-48 flex-1"><Input className="h-9 rounded-r-none text-xs" value={tag} onChange={(event) => setTag(event.target.value)} placeholder="Add a tag" /><Button variant="secondary" className="h-9 rounded-l-none px-3 text-xs" disabled={disabled || !tag.trim()} onClick={() => { const value = tag.trim(); if (!value) return; void onApply({ type: "addTags", tags: [value] }, `Added #${value} to selected media.`); setTag(""); }}><Tags size={14} /> Add</Button></div></aside>;
+}
+
+function BulkMoveDialog({ selectedIds, items, onClose, onComplete }: { selectedIds: Set<string>; items: LibraryItem[]; onClose: () => void; onComplete: (result: LibraryBulkMoveResult) => void }) {
+  const selectedItems = useMemo(() => items.filter((item) => selectedIds.has(item.id)), [items, selectedIds]);
+  const [destination, setDestination] = useState("");
+  const [plan, setPlan] = useState<LibraryBulkMovePlan | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !busy) onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [busy, onClose]);
+
+  async function chooseDestination() {
+    const path = await open({ directory: true, multiple: false, title: "Move selected media to folder" });
+    if (!path) return;
+    setDestination(path);
+    setPlan(null);
+    setError(null);
+  }
+
+  async function previewMove() {
+    if (!destination || selectedIds.size === 0) return;
+    setBusy(true);
+    setError(null);
+    try {
+      setPlan(await api.previewLibraryBulkMove({ itemIds: Array.from(selectedIds), destinationDirectory: destination }));
+    } catch (cause) {
+      setPlan(null);
+      setError(normalizeError(cause).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function executeMove() {
+    if (!plan) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await api.executeLibraryBulkMove(plan.operations.map((entry) => entry.operation.id));
+      onComplete(result);
+    } catch (cause) {
+      setError(normalizeError(cause).message);
+      setPlan(null);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function trapFocus(event: React.KeyboardEvent<HTMLElement>) {
+    if (event.key !== "Tab") return;
+    const controls = Array.from(event.currentTarget.querySelectorAll<HTMLElement>("button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [href], [tabindex]:not([tabindex='-1'])"));
+    const first = controls[0];
+    const last = controls.at(-1);
+    if (!first || !last) return;
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+
+  return <div className="fixed inset-0 z-[70] grid place-items-center bg-black/70 p-5 backdrop-blur-sm" onMouseDown={() => { if (!busy) onClose(); }}><section className="panel-shadow flex max-h-[min(760px,calc(100vh-40px))] w-full max-w-2xl flex-col overflow-hidden rounded-[14px] border border-line bg-panel" role="dialog" aria-modal="true" aria-labelledby="bulk-move-title" aria-busy={busy} onKeyDown={trapFocus} onMouseDown={(event) => event.stopPropagation()}><header className="flex items-start justify-between gap-4 border-b border-line/70 px-5 py-4"><div><p className="text-[10px] font-semibold uppercase tracking-[0.1em] text-accent">Organize library</p><h2 id="bulk-move-title" className="mt-1 text-xl font-semibold tracking-[-0.03em]">Move {selectedIds.size} selected item{selectedIds.size === 1 ? "" : "s"}</h2><p className="mt-1.5 text-xs leading-5 text-muted">Choose a subfolder, review every destination, then confirm the move.</p></div><button autoFocus className="grid size-8 shrink-0 place-items-center rounded-[7px] text-muted hover:bg-elevated hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70 disabled:opacity-40" disabled={busy} onClick={onClose} aria-label="Close bulk move"><X size={17} /></button></header><div className="overflow-y-auto p-5"><Field label="Destination folder" hint="Select an existing subfolder on the same filesystem as all selected files."><div className="flex gap-2"><Input value={destination} readOnly placeholder="Choose a destination folder" /><Button variant="secondary" className="shrink-0" disabled={busy} onClick={() => void chooseDestination()}><FolderOpen size={15} /> Browse</Button></div></Field>{error ? <p className="mt-4 border-l-2 border-red-400/60 bg-red-400/5 px-3 py-2 text-xs leading-5 text-red-300" role="alert">{error}</p> : null}{plan ? <div className="mt-5 space-y-4"><div className="flex flex-wrap items-center justify-between gap-3 border-y border-line/60 py-3 text-xs"><span><strong className="number-font text-ink">{plan.operations.length}</strong> files ready</span><span className="number-font text-muted">{formatBytes(plan.totalSizeBytes)}</span></div><div><p className="text-[10px] font-semibold uppercase tracking-[0.1em] text-muted">Move preview</p><div className="mt-2 max-h-56 divide-y divide-line/60 overflow-y-auto border-y border-line/60">{plan.operations.map((entry) => <div key={entry.operation.id} className="grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-3 py-2.5 text-[11px]"><span className="truncate text-muted" title={entry.operation.sourcePath}>{entry.sourceDisplayName}</span><ArrowRight className="shrink-0 text-accent" size={14} /><span className="truncate text-ink" title={entry.operation.destinationPath}>{entry.destinationDisplayName}</span></div>)}</div></div><ul className="space-y-1.5 bg-elevated/45 p-3 text-[11px] leading-4 text-muted">{plan.warnings.map((warning) => <li key={warning}>• {warning}</li>)}</ul></div> : <div className="mt-5 border border-dashed border-line/70 bg-elevated/25 px-4 py-5"><p className="text-xs font-medium text-ink">Selected files</p><p className="mt-1 text-[11px] text-muted">{selectedItems.length} available in this move. Filenames are preserved.</p></div>}</div><footer className="flex items-center justify-end gap-2 border-t border-line/70 bg-elevated/25 px-5 py-4"><Button variant="ghost" disabled={busy} onClick={onClose}>Cancel</Button>{plan ? <Button variant="secondary" disabled={busy} onClick={() => setPlan(null)}>Change destination</Button> : null}{plan ? <Button disabled={busy} onClick={() => void executeMove()}>{busy ? <LoaderCircle className="animate-spin" size={15} /> : <FolderInput size={15} />} Confirm move</Button> : <Button disabled={busy || !destination || selectedIds.size === 0} onClick={() => void previewMove()}>{busy ? <LoaderCircle className="animate-spin" size={15} /> : <ArrowRight size={15} />} Preview move</Button>}</footer></section></div>;
 }
 
 function ReviewSection({ changes, items, sourceNames, onChanged }: { changes: LibraryChange[]; items: LibraryItem[]; sourceNames: Map<string, string>; onChanged: (changes: LibraryChange[]) => void }) {

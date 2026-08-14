@@ -170,6 +170,8 @@ pub fn run() {
             commands::trash_library_duplicate_item,
             commands::preview_library_file_operation,
             commands::execute_library_file_operation,
+            commands::preview_library_bulk_move,
+            commands::execute_library_bulk_move,
             commands::undo_library_file_operation,
             commands::list_library_file_operations,
             commands::remove_library_item,

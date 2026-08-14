@@ -15,15 +15,16 @@ use crate::{
         AuthenticationProfile, BatchAnalysisItem, BatchAnalysisResponse, BatchDownloadFailure,
         BatchDownloadResult, BrowserProfileInfo, DesktopPreferences, DesktopRuntimeStatus,
         DiskSpaceInfo, DownloadArchiveMatch, DownloadJob, EngineId, EngineInfo, EnginePreferences,
-        GalleryItemList, LibraryBulkAction, LibraryCacheResult, LibraryChange, LibraryCollection,
-        LibraryDuplicateAnalysisJob, LibraryDuplicateGroup, LibraryDuplicateTrashResult,
-        LibraryFileOperation, LibraryFileOperationPlan, LibraryFileOperationResult, LibraryItem,
-        LibraryScanJob, LibraryScanResult, LibrarySource, MediaAnalysis, OnboardingStatus, Preset,
-        PreviewLibraryFileOperationRequest, QueueSettings, QueueSnapshot,
-        SaveAuthenticationProfileRequest, SaveLibraryCollectionRequest, SaveLibrarySourceRequest,
-        SavePresetRequest, SaveSitePresetRuleRequest, SaveSubscriptionRequest, SitePresetRule,
-        StartDownloadRequest, StartTransformationRequest, Subscription, SubscriptionCheckResult,
-        TransformationTask, UpdateLibraryItemRequest,
+        GalleryItemList, LibraryBulkAction, LibraryBulkMovePlan, LibraryBulkMoveResult,
+        LibraryCacheResult, LibraryChange, LibraryCollection, LibraryDuplicateAnalysisJob,
+        LibraryDuplicateGroup, LibraryDuplicateTrashResult, LibraryFileOperation,
+        LibraryFileOperationPlan, LibraryFileOperationResult, LibraryItem, LibraryScanJob,
+        LibraryScanResult, LibrarySource, MediaAnalysis, OnboardingStatus, Preset,
+        PreviewLibraryBulkMoveRequest, PreviewLibraryFileOperationRequest, QueueSettings,
+        QueueSnapshot, SaveAuthenticationProfileRequest, SaveLibraryCollectionRequest,
+        SaveLibrarySourceRequest, SavePresetRequest, SaveSitePresetRuleRequest,
+        SaveSubscriptionRequest, SitePresetRule, StartDownloadRequest, StartTransformationRequest,
+        Subscription, SubscriptionCheckResult, TransformationTask, UpdateLibraryItemRequest,
     },
     queue::{disk_space, QueueManager},
     subscriptions,
@@ -188,6 +189,22 @@ pub async fn execute_library_file_operation(
     operation_id: String,
 ) -> Result<LibraryFileOperationResult, AppError> {
     library.execute_file_operation(&operation_id).await
+}
+
+#[tauri::command]
+pub fn preview_library_bulk_move(
+    library: State<'_, library::LibraryManager>,
+    request: PreviewLibraryBulkMoveRequest,
+) -> Result<LibraryBulkMovePlan, AppError> {
+    library.preview_bulk_move(request)
+}
+
+#[tauri::command]
+pub async fn execute_library_bulk_move(
+    library: State<'_, library::LibraryManager>,
+    operation_ids: Vec<String>,
+) -> Result<LibraryBulkMoveResult, AppError> {
+    library.execute_bulk_move(operation_ids).await
 }
 
 #[tauri::command]
