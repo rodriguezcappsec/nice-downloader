@@ -15,11 +15,11 @@ use crate::{
         AuthenticationProfile, BatchAnalysisItem, BatchAnalysisResponse, BatchDownloadFailure,
         BatchDownloadResult, BrowserProfileInfo, DesktopPreferences, DesktopRuntimeStatus,
         DiskSpaceInfo, DownloadArchiveMatch, DownloadJob, EngineId, EngineInfo, EnginePreferences,
-        GalleryItemList, LibraryBulkAction, LibraryBulkMovePlan, LibraryBulkMoveResult,
-        LibraryCacheResult, LibraryChange, LibraryCollection, LibraryDuplicateAnalysisJob,
-        LibraryDuplicateGroup, LibraryDuplicateTrashResult, LibraryFileOperation,
-        LibraryFileOperationPlan, LibraryFileOperationResult, LibraryItem, LibraryScanJob,
-        LibraryScanResult, LibrarySource, MediaAnalysis, OnboardingStatus, Preset,
+        GalleryItemList, LibraryArtworkCacheStatus, LibraryBulkAction, LibraryBulkMovePlan,
+        LibraryBulkMoveResult, LibraryCacheResult, LibraryChange, LibraryCollection,
+        LibraryDuplicateAnalysisJob, LibraryDuplicateGroup, LibraryDuplicateTrashResult,
+        LibraryFileOperation, LibraryFileOperationPlan, LibraryFileOperationResult, LibraryItem,
+        LibraryScanJob, LibraryScanResult, LibrarySource, MediaAnalysis, OnboardingStatus, Preset,
         PreviewLibraryBulkMoveRequest, PreviewLibraryFileOperationRequest, QueueSettings,
         QueueSnapshot, SaveAuthenticationProfileRequest, SaveLibraryCollectionRequest,
         SaveLibrarySourceRequest, SavePresetRequest, SaveSitePresetRuleRequest,
@@ -245,10 +245,26 @@ pub async fn clear_library_artwork_cache(
 }
 
 #[tauri::command]
-pub fn open_library_item(database: State<'_, Database>, id: String) -> Result<(), AppError> {
+pub async fn get_library_artwork_cache_status(
+    app: AppHandle,
+    library: State<'_, library::LibraryManager>,
+) -> Result<LibraryArtworkCacheStatus, AppError> {
+    library.artwork_cache_status(&app).await
+}
+
+#[tauri::command]
+pub fn open_library_item(
+    app: AppHandle,
+    database: State<'_, Database>,
+    library: State<'_, library::LibraryManager>,
+    id: String,
+) -> Result<(), AppError> {
     let item = database.get_library_item(&id)?;
     let path = std::path::PathBuf::from(item.path);
     if !path.is_absolute() || !path.is_file() {
+        if let Err(error) = library.mark_item_missing(&app, &id) {
+            tracing::warn!(%error, item_id = %id, "could not mark unavailable media as missing");
+        }
         return Err(AppError::new(
             "library_file_not_found",
             "This media file is no longer available at its saved location.",

@@ -177,6 +177,7 @@ pub fn run() {
             commands::remove_library_item,
             commands::get_library_artwork,
             commands::clear_library_artwork_cache,
+            commands::get_library_artwork_cache_status,
             commands::open_library_item,
             commands::reconcile_library,
             commands::export_library,

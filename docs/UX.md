@@ -22,6 +22,12 @@ Library result limits must never make media unreachable. Search, filters, and se
 
 Bulk organization is deliberate: selection mode exposes Move, the native folder picker chooses one destination, and a modal lists every preserved filename before confirmation. Existing files are never overwritten. Successful items leave the selection while any race-time failures remain selected for recovery.
 
+Folder filtering distinguishes location from depth. Users can select a source root or any indexed subfolder, then choose whether to include its nested folders or show only files directly inside that folder. Selecting a source root defaults to the direct-files-only scope.
+
+Unavailable media does not remain mixed into Home, video, image, or search results. The Library count separates available media from missing recovery records; the availability filter can reveal those records for restoration or explicit removal. Discovering a missing file while opening or loading artwork updates the catalog immediately instead of repeatedly presenting a broken card.
+
+Library management shows artwork-cache usage as preview count and bytes against both automatic limits. Clearing remains explicit, while normal browsing quietly evicts least-recently-used previews so large catalogs cannot consume unbounded disk space.
+
 Queue authority remains in Rust. The frontend displays queue position, state, progress, speed, ETA, operation, attempt number, and sanitized engine logs. Queue pause means “do not start additional jobs”; per-job pause controls a running or waiting job. Cancelling preserves resumable partial data by default. Drag reordering supplements, but does not replace, keyboard-accessible arrow controls.
 
 Errors lead with a user explanation and route to the relevant recovery surface. Authentication and engine failures link to Settings, duplicate downloads link to History, and retry/rate-limit failures link to Queue. Technical diagnostics remain expandable.

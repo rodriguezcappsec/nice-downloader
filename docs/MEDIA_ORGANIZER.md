@@ -71,7 +71,8 @@ Status: implemented on `feat/media-organizer`.
 
 - Responsive persisted grid/list views with lazy artwork and useful empty/loading states.
 - Desktop video/image opening, a focused details panel, and left/right/Escape keyboard navigation.
-- Filters for source, hierarchical source subfolder, collection, media type, duration, resolution, container, date, missing status, tags, favorites, and rating. Selecting a parent subfolder includes its descendants.
+- Filters for source, hierarchical source folder, collection, media type, duration, resolution, container, date, missing status, tags, favorites, and rating. Each source root and subfolder supports either descendant-inclusive or direct-files-only scope.
+- Normal browsing shows available media only. Missing records remain recoverable through the Missing files filter, where they can be restored by a later scan or explicitly removed without deleting anything from disk.
 - Per-item favorites and ratings plus bounded bulk selection for favorites, tags, ratings, and collection membership.
 - User collections that organize catalog records without moving or modifying source files.
 
@@ -123,19 +124,20 @@ Cross-filesystem Move is intentionally rejected for now. Use Copy, verify the de
 
 ## Milestone 7 - Maturity and accessibility
 
-Status: accessibility foundation implemented; large-library and recovery work remains.
+Status: accessibility and backup/recovery foundations implemented; large-library work remains.
 
 - `Ctrl+K` opens a keyboard-first workspace palette; `?` opens a discoverable shortcut guide. Both dialogs trap focus, restore it when dismissed, and support Escape.
 - Persisted Desktop preferences provide 90%, 100%, 110%, and 125% native webview scaling, reduced motion, and a stronger high-contrast palette.
 - CSS also honors operating-system reduced-motion and increased-contrast preferences without requiring an app override.
 - Global error and success surfaces use assertive/polite live regions, and the existing skip link provides direct keyboard access to main content.
 - Filtered, searched, and bulk-selection Library results use reachable 60-item pages with result ranges, numbered navigation, Previous/Next controls, and polite page announcements. SQLite-backed query pagination remains the later large-library optimization.
+- Version 2 Library backups include source definitions, collections and membership, curation, and structured media metadata with explicit catalog/metadata schema versions. Restore accepts legacy version 1 files, validates bounded untrusted input before writes, safely remaps path/ID conflicts, preserves offline source definitions, and invalidates metadata whose on-disk fingerprint changed. Restore merges and never deletes current records.
+- Generated artwork is bounded to 20,000 previews or 1 GiB. Rust updates last-use timestamps, serializes maintenance against FFmpeg generation and manual clearing, and evicts the least-recently-used entries without removing the preview currently being returned. Library management reports live file and byte usage.
 
 Remaining:
 
-- Library backup/restore includes sources, collections, and metadata schema versions.
 - Accessible status/progress announcements with keyboard-only and Orca verification.
-- Large-library profiling, paginated queries, thumbnail cache limits, and migration recovery tests.
+- Large-library profiling, SQLite-backed paginated queries, and migration recovery tests.
 
 ## Explicitly deferred
 

@@ -648,6 +648,15 @@ pub struct LibraryCacheResult {
     pub freed_bytes: u64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryArtworkCacheStatus {
+    pub file_count: usize,
+    pub total_bytes: u64,
+    pub max_files: usize,
+    pub max_bytes: u64,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateLibraryItemRequest {

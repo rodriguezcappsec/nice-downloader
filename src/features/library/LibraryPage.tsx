@@ -44,6 +44,7 @@ import { formatBytes, formatDuration } from "../../lib/format";
 import { api, normalizeError } from "../../lib/tauri";
 import { useAppStore } from "../../stores/app-store";
 import type {
+  LibraryArtworkCacheStatus,
   LibraryItem,
   LibraryBulkAction,
   LibraryBulkMovePlan,
@@ -66,8 +67,9 @@ type ResolutionFilter = "all" | "2160" | "1440" | "1080" | "720" | "sd" | "unkno
 type DurationFilter = "all" | "short" | "medium" | "long" | "unknown";
 type DateFilter = "all" | "week" | "month" | "year";
 type AvailabilityFilter = "all" | "available" | "missing";
+type FolderScope = "tree" | "direct";
 type FolderSelection = { sourceId: string; path: string };
-type FolderOption = FolderSelection & { value: string; label: string; count: number };
+type FolderOption = FolderSelection & { value: string; label: string; directCount: number; treeCount: number };
 const LIBRARY_PAGE_SIZE = 60;
 
 export function LibraryPage() {
@@ -84,12 +86,13 @@ export function LibraryPage() {
   const [search, setSearch] = useState("");
   const [sourceFilter, setSourceFilter] = useState("all");
   const [folderFilter, setFolderFilter] = useState("all");
+  const [folderScope, setFolderScope] = useState<FolderScope>("tree");
   const [mediaFilter, setMediaFilter] = useState<MediaFilter>("all");
   const [resolutionFilter, setResolutionFilter] = useState<ResolutionFilter>("all");
   const [containerFilter, setContainerFilter] = useState("all");
   const [durationFilter, setDurationFilter] = useState<DurationFilter>("all");
   const [dateFilter, setDateFilter] = useState<DateFilter>("all");
-  const [availabilityFilter, setAvailabilityFilter] = useState<AvailabilityFilter>("all");
+  const [availabilityFilter, setAvailabilityFilter] = useState<AvailabilityFilter>("available");
   const [tagFilter, setTagFilter] = useState("all");
   const [ratingFilter, setRatingFilter] = useState("all");
   const [collectionFilter, setCollectionFilter] = useState("all");
@@ -104,6 +107,7 @@ export function LibraryPage() {
   const [importTags, setImportTags] = useState("");
   const [busy, setBusy] = useState(false);
   const [resultPage, setResultPage] = useState(1);
+  const [artworkCacheStatus, setArtworkCacheStatus] = useState<LibraryArtworkCacheStatus | null>(null);
 
   async function load() {
     try {
@@ -130,8 +134,17 @@ export function LibraryPage() {
     }
   }
 
+  async function refreshArtworkCacheStatus() {
+    try {
+      setArtworkCacheStatus(await api.getLibraryArtworkCacheStatus());
+    } catch (error) {
+      setError(normalizeError(error));
+    }
+  }
+
   useEffect(() => {
     void load();
+    void refreshArtworkCacheStatus();
     let disposed = false;
     const unlisteners: Array<() => void> = [];
     void api.onLibraryScanUpdated((job) => {
@@ -168,16 +181,18 @@ export function LibraryPage() {
   }, []);
 
   const sourceNames = useMemo(() => new Map(sources.map((source) => [source.id, source.name])), [sources]);
+  const missingItemCount = useMemo(() => items.filter((item) => item.missing).length, [items]);
+  const availableItemCount = items.length - missingItemCount;
   const containers = useMemo(() => Array.from(new Set(items.map((item) => item.container).filter((value): value is string => Boolean(value)))).sort(), [items]);
   const tags = useMemo(() => Array.from(new Set(items.flatMap((item) => item.tags))).sort((a, b) => a.localeCompare(b)), [items]);
-  const folderOptions = useMemo(() => buildFolderOptions(items, sources, sourceFilter), [items, sourceFilter, sources]);
+  const folderOptions = useMemo(() => buildFolderOptions(items, sources, sourceFilter, availabilityFilter), [availabilityFilter, items, sourceFilter, sources]);
   const filtered = useMemo(() => {
     const query = search.trim().toLocaleLowerCase();
     const collectionIds = collectionFilter === "all" ? null : new Set(collections.find((collection) => collection.id === collectionFilter)?.itemIds || []);
     const selectedFolder = parseFolderFilter(folderFilter);
     return items.filter((item) => {
       if (sourceFilter !== "all" && item.sourceId !== sourceFilter) return false;
-      if (selectedFolder && !itemMatchesFolder(item, selectedFolder)) return false;
+      if (selectedFolder && !itemMatchesFolder(item, selectedFolder, folderScope)) return false;
       if (mediaFilter !== "all" && item.mediaKind !== mediaFilter) return false;
       if (containerFilter !== "all" && item.container !== containerFilter) return false;
       if (!matchesResolution(item.height, resolutionFilter)) return false;
@@ -191,7 +206,7 @@ export function LibraryPage() {
       if (collectionIds && !collectionIds.has(item.id)) return false;
       return !query || `${item.title} ${item.site || ""} ${item.path} ${item.tags.join(" ")} ${item.container || ""} ${item.videoCodec || ""} ${item.audioCodec || ""}`.toLocaleLowerCase().includes(query);
     });
-  }, [availabilityFilter, collectionFilter, collections, containerFilter, dateFilter, durationFilter, favoriteOnly, folderFilter, items, mediaFilter, ratingFilter, resolutionFilter, search, sourceFilter, tagFilter]);
+  }, [availabilityFilter, collectionFilter, collections, containerFilter, dateFilter, durationFilter, favoriteOnly, folderFilter, folderScope, items, mediaFilter, ratingFilter, resolutionFilter, search, sourceFilter, tagFilter]);
   const featured = filtered.find((item) => !item.missing) || filtered[0];
   const videos = filtered.filter((item) => item.mediaKind !== "image");
   const images = filtered.filter((item) => item.mediaKind === "image");
@@ -200,11 +215,11 @@ export function LibraryPage() {
   const resultStart = (currentResultPage - 1) * LIBRARY_PAGE_SIZE;
   const resultEnd = Math.min(resultStart + LIBRARY_PAGE_SIZE, filtered.length);
   const visibleFiltered = filtered.slice(resultStart, resultEnd);
-  const isFiltered = Boolean(search.trim()) || sourceFilter !== "all" || folderFilter !== "all" || mediaFilter !== "all" || resolutionFilter !== "all" || containerFilter !== "all" || durationFilter !== "all" || dateFilter !== "all" || availabilityFilter !== "all" || tagFilter !== "all" || ratingFilter !== "all" || collectionFilter !== "all" || favoriteOnly;
+  const isFiltered = Boolean(search.trim()) || sourceFilter !== "all" || folderFilter !== "all" || mediaFilter !== "all" || resolutionFilter !== "all" || containerFilter !== "all" || durationFilter !== "all" || dateFilter !== "all" || availabilityFilter !== "available" || tagFilter !== "all" || ratingFilter !== "all" || collectionFilter !== "all" || favoriteOnly;
 
   useEffect(() => {
     setResultPage(1);
-  }, [availabilityFilter, collectionFilter, containerFilter, dateFilter, durationFilter, favoriteOnly, folderFilter, mediaFilter, ratingFilter, resolutionFilter, search, selectionMode, sourceFilter, tagFilter]);
+  }, [availabilityFilter, collectionFilter, containerFilter, dateFilter, durationFilter, favoriteOnly, folderFilter, folderScope, mediaFilter, ratingFilter, resolutionFilter, search, selectionMode, sourceFilter, tagFilter]);
 
   useEffect(() => {
     if (resultPage > resultPageCount) setResultPage(resultPageCount);
@@ -215,8 +230,15 @@ export function LibraryPage() {
     const selected = parseFolderFilter(folderFilter);
     if (!selected || !folderOptions.some((option) => option.value === folderFilter) || (sourceFilter !== "all" && selected.sourceId !== sourceFilter)) {
       setFolderFilter("all");
+      setFolderScope("tree");
     }
   }, [folderFilter, folderOptions, sourceFilter]);
+
+  useEffect(() => {
+    if (selectedItem && !filtered.some((item) => item.id === selectedItem.id)) {
+      setSelectedItem(null);
+    }
+  }, [filtered, selectedItem]);
 
   useEffect(() => {
     if (!selectedItem) return;
@@ -323,8 +345,8 @@ export function LibraryPage() {
   }
 
   function resetFilters() {
-    setMediaFilter("all"); setSourceFilter("all"); setFolderFilter("all"); setResolutionFilter("all"); setContainerFilter("all");
-    setDurationFilter("all"); setDateFilter("all"); setAvailabilityFilter("all"); setTagFilter("all");
+    setMediaFilter("all"); setSourceFilter("all"); setFolderFilter("all"); setFolderScope("tree"); setResolutionFilter("all"); setContainerFilter("all");
+    setDurationFilter("all"); setDateFilter("all"); setAvailabilityFilter("available"); setTagFilter("all");
     setRatingFilter("all"); setCollectionFilter("all"); setFavoriteOnly(false);
   }
 
@@ -394,7 +416,7 @@ export function LibraryPage() {
     if (!path) return;
     try {
       await api.exportLibrary(path);
-      setNotice({ message: "Library metadata exported." });
+      setNotice({ message: "Library backup exported with sources, collections, curation, and media metadata." });
     } catch (error) {
       setError(normalizeError(error));
     }
@@ -406,7 +428,7 @@ export function LibraryPage() {
     try {
       await api.restoreLibrary(path);
       await load();
-      setNotice({ message: "Library metadata restored.", view: "library" });
+      setNotice({ message: "Library backup merged safely. Existing records were not deleted.", view: "library" });
     } catch (error) {
       setError(normalizeError(error));
     }
@@ -416,6 +438,7 @@ export function LibraryPage() {
     setBusy(true);
     try {
       const result = await api.clearLibraryArtworkCache();
+      await refreshArtworkCacheStatus();
       setNotice({ message: result.removedFiles > 0 ? `Cleared ${result.removedFiles} cached image${result.removedFiles === 1 ? "" : "s"} (${formatBytes(result.freedBytes)}).` : "The artwork cache is already empty.", view: "library" });
     } catch (error) {
       setError(normalizeError(error));
@@ -470,12 +493,12 @@ export function LibraryPage() {
             <Button className="mt-4" variant="secondary" onClick={() => void importFiles()}>{busy ? <LoaderCircle className="animate-spin" size={15} /> : <Library size={15} />} Choose files</Button>
           </div>
           <div className="bg-panel/55 p-5">
-            <div className="flex items-start gap-3"><div className="grid size-10 place-items-center bg-elevated text-accent"><Save size={18} /></div><div><h2 className="text-sm font-semibold">Catalog backup</h2><p className="mt-1 text-xs leading-5 text-muted">Export titles and tags or restore an existing Nice Downloader catalog.</p></div></div>
-            <div className="mt-5 flex flex-wrap gap-2"><Button variant="secondary" onClick={() => void exportBackup()}><Save size={15} /> Export metadata</Button><Button variant="secondary" onClick={() => void restoreBackup()}><ArchiveRestore size={15} /> Restore backup</Button></div>
+            <div className="flex items-start gap-3"><div className="grid size-10 place-items-center bg-elevated text-accent"><Save size={18} /></div><div><h2 className="text-sm font-semibold">Library backup</h2><p className="mt-1 text-xs leading-5 text-muted">Export sources, collections, curation, and inspected metadata. Restore merges records without deleting your current catalog.</p></div></div>
+            <div className="mt-5 flex flex-wrap gap-2"><Button variant="secondary" onClick={() => void exportBackup()}><Save size={15} /> Export backup</Button><Button variant="secondary" onClick={() => void restoreBackup()}><ArchiveRestore size={15} /> Restore backup</Button></div>
           </div>
           <div className="bg-panel/55 p-5">
-            <div className="flex items-start gap-3"><div className="grid size-10 place-items-center bg-elevated text-accent"><Database size={18} strokeWidth={1.8} /></div><div><h2 className="text-sm font-semibold">Artwork cache</h2><p className="mt-1 text-xs leading-5 text-muted">Previews are versioned and stored in the app cache, never beside your media.</p></div></div>
-            <Button className="mt-5" variant="secondary" disabled={busy} onClick={() => void clearArtworkCache()}>{busy ? <LoaderCircle className="animate-spin" size={15} /> : <Eraser size={15} strokeWidth={1.8} />} Clear cached artwork</Button>
+            <div className="flex items-start gap-3"><div className="grid size-10 place-items-center bg-elevated text-accent"><Database size={18} strokeWidth={1.8} /></div><div><h2 className="text-sm font-semibold">Artwork cache</h2><p className="mt-1 text-xs leading-5 text-muted">Previews stay in the app cache and the oldest are removed automatically before it exceeds its limits.</p>{artworkCacheStatus ? <p className="number-font mt-2 text-[10px] text-muted">{artworkCacheStatus.fileCount.toLocaleString()} preview{artworkCacheStatus.fileCount === 1 ? "" : "s"} · {formatBytes(artworkCacheStatus.totalBytes)} of {formatBytes(artworkCacheStatus.maxBytes)} · {artworkCacheStatus.maxFiles.toLocaleString()} file limit</p> : null}</div></div>
+            <Button className="mt-5" variant="secondary" disabled={busy || artworkCacheStatus?.fileCount === 0} onClick={() => void clearArtworkCache()}>{busy ? <LoaderCircle className="animate-spin" size={15} /> : <Eraser size={15} strokeWidth={1.8} />} Clear cached artwork</Button>
           </div>
         </section>
       </div>
@@ -485,7 +508,7 @@ export function LibraryPage() {
   return (
     <div className="mx-auto w-full max-w-[1520px] px-7 pb-16 pt-6 xl:px-9">
       <header className="sticky top-0 z-10 -mx-2 flex items-center gap-5 bg-canvas/90 px-2 py-3 backdrop-blur-xl">
-        <div className="min-w-fit"><h1 className="text-[25px] font-semibold tracking-[-0.04em]">Your library</h1><p className="text-[11px] text-muted">{items.length} item{items.length === 1 ? "" : "s"} across {sources.length} source{sources.length === 1 ? "" : "s"}</p></div>
+        <div className="min-w-fit"><h1 className="text-[25px] font-semibold tracking-[-0.04em]">Your library</h1><p className="text-[11px] text-muted">{availableItemCount} available item{availableItemCount === 1 ? "" : "s"} across {sources.length} source{sources.length === 1 ? "" : "s"}{missingItemCount > 0 ? <button className="ml-1 font-medium text-amber-300/85 hover:text-amber-200" onClick={() => { resetFilters(); setAvailabilityFilter("missing"); }}>· {missingItemCount} missing</button> : null}</p></div>
         <label className="relative mx-auto w-full max-w-2xl"><span className="sr-only">Search library</span><Search className="absolute left-4 top-3.5 text-muted" size={17} /><Input className="h-12 rounded-[12px] bg-panel/85 pl-11 pr-4 text-sm shadow-control" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search your videos, images, tags, and folders" /></label>
         <div className="flex shrink-0 items-center gap-1"><div className="flex rounded-[8px] bg-elevated/70 p-0.5" role="group" aria-label="Library view"><button className={`grid size-8 place-items-center rounded-[6px] transition ${viewMode === "grid" ? "bg-panel text-ink shadow-control" : "text-muted hover:text-ink"}`} onClick={() => changeViewMode("grid")} aria-pressed={viewMode === "grid"} aria-label="Grid view"><LayoutGrid size={15} /></button><button className={`grid size-8 place-items-center rounded-[6px] transition ${viewMode === "list" ? "bg-panel text-ink shadow-control" : "text-muted hover:text-ink"}`} onClick={() => changeViewMode("list")} aria-pressed={viewMode === "list"} aria-label="List view"><List size={15} /></button></div><Button variant={selectionMode ? "secondary" : "ghost"} onClick={() => selectionMode ? closeSelectionMode() : setSelectionMode(true)}>{selectionMode ? <X size={16} /> : <CheckSquare2 size={16} />} {selectionMode ? "Done" : "Select"}</Button><Button variant={changes.length > 0 ? "secondary" : "ghost"} onClick={() => { setManageOpen(true); void api.listLibraryFileOperations().then(setFileOperations).catch((error) => setError(normalizeError(error))); }}><Settings2 size={16} /> Manage{changes.length > 0 ? <span className="number-font rounded bg-accent/15 px-1.5 py-0.5 text-[10px] text-accent">{changes.length}</span> : null}</Button></div>
       </header>
@@ -496,15 +519,16 @@ export function LibraryPage() {
         <FilterChip active={mediaFilter === "image"} onClick={() => setMediaFilter("image")}><ImageIcon size={14} /> Images</FilterChip>
         <FilterChip active={favoriteOnly} onClick={() => setFavoriteOnly((value) => !value)}><Heart size={14} fill={favoriteOnly ? "currentColor" : "none"} /> Favorites</FilterChip>
         <span className="mx-1 h-6 w-px shrink-0 bg-line/70" />
-        {sources.map((source) => <FilterChip key={source.id} active={sourceFilter === source.id} onClick={() => { const next = sourceFilter === source.id ? "all" : source.id; setSourceFilter(next); const selectedFolder = parseFolderFilter(folderFilter); if (next === "all" || selectedFolder?.sourceId !== next) setFolderFilter("all"); }}><span className="grid size-5 place-items-center rounded-[5px] bg-accent/12 text-[10px] font-bold text-accent">{source.name.charAt(0).toLocaleUpperCase()}</span>{source.name}</FilterChip>)}
+        {sources.map((source) => <FilterChip key={source.id} active={sourceFilter === source.id} onClick={() => { const next = sourceFilter === source.id ? "all" : source.id; setSourceFilter(next); const selectedFolder = parseFolderFilter(folderFilter); if (next === "all" || selectedFolder?.sourceId !== next) { setFolderFilter("all"); setFolderScope("tree"); } }}><span className="grid size-5 place-items-center rounded-[5px] bg-accent/12 text-[10px] font-bold text-accent">{source.name.charAt(0).toLocaleUpperCase()}</span>{source.name}</FilterChip>)}
         {collections.map((collection) => <FilterChip key={collection.id} active={collectionFilter === collection.id} onClick={() => setCollectionFilter(collectionFilter === collection.id ? "all" : collection.id)}><ListPlus size={14} />{collection.name}</FilterChip>)}
         <span className="mx-1 h-6 w-px shrink-0 bg-line/70" />
-        <label className="relative shrink-0"><span className="sr-only">Filter by source subfolder</span><FolderOpen className="pointer-events-none absolute left-3 top-2.5 text-muted" size={14} strokeWidth={1.8} /><Select className="h-9 w-[220px] bg-elevated/70 pl-9 text-xs" value={folderFilter} onChange={(event) => setFolderFilter(event.target.value)} disabled={folderOptions.length === 0}><option value="all">{folderOptions.length === 0 ? "No indexed subfolders" : "Any subfolder"}</option>{folderOptions.map((option) => <option key={option.value} value={option.value}>{option.label} ({option.count})</option>)}</Select></label>
+        <label className="relative shrink-0"><span className="sr-only">Filter by source folder</span><FolderOpen className="pointer-events-none absolute left-3 top-2.5 text-muted" size={14} strokeWidth={1.8} /><Select className="h-9 w-[220px] bg-elevated/70 pl-9 text-xs" value={folderFilter} onChange={(event) => { const value = event.target.value; setFolderFilter(value); const folder = parseFolderFilter(value); if (!folder) setFolderScope("tree"); else if (folder.path === "") setFolderScope("direct"); }} disabled={folderOptions.length === 0}><option value="all">{folderOptions.length === 0 ? "No indexed folders" : "All folders"}</option>{folderOptions.map((option) => <option key={option.value} value={option.value}>{option.label} ({folderScope === "direct" ? option.directCount : option.treeCount})</option>)}</Select></label>
+        <label className="shrink-0"><span className="sr-only">Choose whether nested folders are included</span><Select className="h-9 w-[145px] bg-elevated/70 text-xs" value={folderScope} onChange={(event) => setFolderScope(event.target.value as FolderScope)} disabled={folderFilter === "all"}><option value="tree">Include nested</option><option value="direct">This folder only</option></Select></label>
         <label className="relative shrink-0"><span className="sr-only">Filter by resolution</span><MonitorPlay className="pointer-events-none absolute left-3 top-2.5 text-muted" size={14} strokeWidth={1.8} /><Select className="h-9 w-[148px] bg-elevated/70 pl-9 text-xs" value={resolutionFilter} onChange={(event) => setResolutionFilter(event.target.value as ResolutionFilter)}><option value="all">Any resolution</option><option value="2160">4K and higher</option><option value="1440">1440p</option><option value="1080">1080p</option><option value="720">720p</option><option value="sd">Below 720p</option><option value="unknown">Not inspected</option></Select></label>
         <label className="shrink-0"><span className="sr-only">Filter by container</span><Select className="h-9 w-[130px] bg-elevated/70 text-xs" value={containerFilter} onChange={(event) => setContainerFilter(event.target.value)}><option value="all">Any format</option>{containers.map((container) => <option key={container} value={container}>{container.toLocaleUpperCase()}</option>)}</Select></label>
         <label className="shrink-0"><span className="sr-only">Filter by duration</span><Select className="h-9 w-[130px] bg-elevated/70 text-xs" value={durationFilter} onChange={(event) => setDurationFilter(event.target.value as DurationFilter)}><option value="all">Any duration</option><option value="short">Under 5 min</option><option value="medium">5–30 min</option><option value="long">Over 30 min</option><option value="unknown">Unknown time</option></Select></label>
         <label className="shrink-0"><span className="sr-only">Filter by date added</span><Select className="h-9 w-[120px] bg-elevated/70 text-xs" value={dateFilter} onChange={(event) => setDateFilter(event.target.value as DateFilter)}><option value="all">Any date</option><option value="week">This week</option><option value="month">This month</option><option value="year">This year</option></Select></label>
-        <label className="shrink-0"><span className="sr-only">Filter by availability</span><Select className="h-9 w-[125px] bg-elevated/70 text-xs" value={availabilityFilter} onChange={(event) => setAvailabilityFilter(event.target.value as AvailabilityFilter)}><option value="all">Any status</option><option value="available">Available</option><option value="missing">Missing files</option></Select></label>
+        <label className="shrink-0"><span className="sr-only">Filter by availability</span><Select className="h-9 w-[130px] bg-elevated/70 text-xs" value={availabilityFilter} onChange={(event) => setAvailabilityFilter(event.target.value as AvailabilityFilter)}><option value="available">Available</option><option value="missing">Missing files</option><option value="all">All records</option></Select></label>
         <label className="shrink-0"><span className="sr-only">Filter by tag</span><Select className="h-9 w-[120px] bg-elevated/70 text-xs" value={tagFilter} onChange={(event) => setTagFilter(event.target.value)}><option value="all">Any tag</option>{tags.map((tag) => <option key={tag} value={tag}>#{tag}</option>)}</Select></label>
         <label className="shrink-0"><span className="sr-only">Filter by rating</span><Select className="h-9 w-[120px] bg-elevated/70 text-xs" value={ratingFilter} onChange={(event) => setRatingFilter(event.target.value)}><option value="all">Any rating</option><option value="rated">Rated</option><option value="5">5 stars</option><option value="4">4 stars</option><option value="3">3 stars</option><option value="unrated">Unrated</option></Select></label>
       </nav>
@@ -630,7 +654,17 @@ function MediaDetails({ item, sourceName, onClose, onChanged, onRemoved, onOpera
   }, [item.id, item.path]);
 
   async function openItem() {
-    try { await api.openLibraryItem(item.id); } catch (error) { setError(normalizeError(error)); }
+    try {
+      await api.openLibraryItem(item.id);
+    } catch (error) {
+      const normalized = normalizeError(error);
+      if (normalized.code === "library_file_not_found") {
+        onChanged({ ...item, missing: true });
+        setNotice({ message: "The missing file was removed from normal Library results. Choose Missing files to restore or remove its record.", view: "library" });
+      } else {
+        setError(normalized);
+      }
+    }
   }
   async function update() {
     try {
@@ -716,28 +750,41 @@ function matchesResolution(height: number | null | undefined, filter: Resolution
   return height < 720;
 }
 
-function buildFolderOptions(items: LibraryItem[], sources: LibrarySource[], sourceFilter: string): FolderOption[] {
+function buildFolderOptions(items: LibraryItem[], sources: LibrarySource[], sourceFilter: string, availabilityFilter: AvailabilityFilter): FolderOption[] {
   const sourceNames = new Map(sources.map((source) => [source.id, source.name]));
   const counts = new Map<string, FolderOption>();
   for (const item of items) {
+    if (availabilityFilter === "available" && item.missing) continue;
+    if (availabilityFilter === "missing" && !item.missing) continue;
     if (!item.sourceId || !item.relativePath || (sourceFilter !== "all" && item.sourceId !== sourceFilter)) continue;
     const segments = item.relativePath.replace(/\\/g, "/").split("/").filter(Boolean);
-    if (segments.length < 2) continue;
-    for (let depth = 1; depth < segments.length; depth += 1) {
+    if (segments.length === 0) continue;
+    const itemDirectoryDepth = segments.length - 1;
+    for (let depth = 0; depth <= itemDirectoryDepth; depth += 1) {
       const path = segments.slice(0, depth).join("/");
       const value = folderFilterValue(item.sourceId, path);
       const existing = counts.get(value);
-      if (existing) existing.count += 1;
+      if (existing) {
+        existing.treeCount += 1;
+        if (depth === itemDirectoryDepth) existing.directCount += 1;
+      }
       else counts.set(value, {
         sourceId: item.sourceId,
         path,
         value,
-        label: sourceFilter === "all" ? `${sourceNames.get(item.sourceId) || "Source"} / ${path}` : path,
-        count: 1,
+        label: path
+          ? sourceFilter === "all" ? `${sourceNames.get(item.sourceId) || "Source"} / ${path}` : path
+          : sourceFilter === "all" ? `${sourceNames.get(item.sourceId) || "Source"} / Source root` : "Source root",
+        directCount: depth === itemDirectoryDepth ? 1 : 0,
+        treeCount: 1,
       });
     }
   }
-  return Array.from(counts.values()).sort((left, right) => left.label.localeCompare(right.label, undefined, { numeric: true }));
+  return Array.from(counts.values()).sort((left, right) => {
+    if (left.sourceId === right.sourceId && left.path === "") return -1;
+    if (left.sourceId === right.sourceId && right.path === "") return 1;
+    return left.label.localeCompare(right.label, undefined, { numeric: true });
+  });
 }
 
 function folderFilterValue(sourceId: string, path: string): string {
@@ -759,12 +806,13 @@ function parseFolderFilter(value: string): FolderSelection | null {
   }
 }
 
-function itemMatchesFolder(item: LibraryItem, folder: FolderSelection): boolean {
+function itemMatchesFolder(item: LibraryItem, folder: FolderSelection, scope: FolderScope): boolean {
   if (item.sourceId !== folder.sourceId || !item.relativePath) return false;
   const normalized = item.relativePath.replace(/\\/g, "/");
   const separator = normalized.lastIndexOf("/");
-  if (separator < 0) return false;
-  const directory = normalized.slice(0, separator);
+  const directory = separator < 0 ? "" : normalized.slice(0, separator);
+  if (scope === "direct") return directory === folder.path;
+  if (folder.path === "") return true;
   return directory === folder.path || directory.startsWith(`${folder.path}/`);
 }
 

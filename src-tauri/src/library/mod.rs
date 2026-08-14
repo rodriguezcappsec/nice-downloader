@@ -5,11 +5,12 @@ use crate::{
     engines::managed,
     errors::AppError,
     models::{
-        LibraryCacheResult, LibraryChangeKind, LibraryDuplicateAnalysisJob,
-        LibraryDuplicateAnalysisState, LibraryDuplicateGroup, LibraryDuplicateTrashResult,
-        LibraryFileIdentity, LibraryItem, LibraryMediaKind, LibraryMetadataState,
-        LibraryProbeResult, LibraryScanJob, LibraryScanResult, LibraryScanState, LibrarySource,
-        LibrarySourceStatus, SaveLibrarySourceRequest,
+        LibraryArtworkCacheStatus, LibraryBulkAction, LibraryCacheResult, LibraryChangeKind,
+        LibraryCollection, LibraryDuplicateAnalysisJob, LibraryDuplicateAnalysisState,
+        LibraryDuplicateGroup, LibraryDuplicateTrashResult, LibraryFileIdentity, LibraryItem,
+        LibraryMediaKind, LibraryMetadataState, LibraryProbeResult, LibraryScanJob,
+        LibraryScanResult, LibraryScanState, LibrarySource, LibrarySourceStatus,
+        SaveLibraryCollectionRequest, SaveLibrarySourceRequest,
     },
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -20,9 +21,11 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    fs::OpenOptions,
     io::{BufReader, Read},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
+    time::{SystemTime, UNIX_EPOCH},
 };
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::{
@@ -42,6 +45,16 @@ const MAX_CONCURRENT_METADATA_PROBES: usize = 3;
 const WATCH_DEBOUNCE: Duration = Duration::from_secs(2);
 const WATCH_SCAN_RETRY: Duration = Duration::from_secs(1);
 const SOURCE_HEALTH_INTERVAL: Duration = Duration::from_secs(10);
+const LIBRARY_BACKUP_VERSION: u32 = 2;
+const LIBRARY_CATALOG_SCHEMA_VERSION: u32 = 1;
+const LIBRARY_METADATA_SCHEMA_VERSION: u32 = 1;
+const MAX_LIBRARY_BACKUP_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_LIBRARY_BACKUP_ITEMS: usize = 100_000;
+const MAX_LIBRARY_BACKUP_SOURCES: usize = 1_000;
+const MAX_LIBRARY_BACKUP_COLLECTIONS: usize = 2_000;
+const MAX_LIBRARY_BACKUP_MEMBERSHIPS: usize = 500_000;
+const MAX_ARTWORK_CACHE_FILES: usize = 20_000;
+const MAX_ARTWORK_CACHE_BYTES: u64 = 1024 * 1024 * 1024;
 const SCAN_EVENT: &str = "library-scan-updated";
 const ITEM_EVENT: &str = "library-item-indexed";
 const SOURCE_EVENT: &str = "library-source-updated";
@@ -60,9 +73,26 @@ pub struct LibraryManager {
     artwork_slots: Arc<Semaphore>,
     metadata_slots: Arc<Semaphore>,
     artwork_locks: Arc<AsyncMutex<HashMap<String, Arc<AsyncMutex<()>>>>>,
+    artwork_cache_maintenance: Arc<AsyncMutex<()>>,
 }
 
 impl LibraryManager {
+    pub fn mark_item_missing(
+        &self,
+        app: &AppHandle,
+        item_id: &str,
+    ) -> Result<LibraryItem, AppError> {
+        let item = self.database.get_library_item(item_id)?;
+        if item.missing {
+            return Ok(item);
+        }
+        self.database.set_library_missing(item_id, true)?;
+        let updated = self.database.get_library_item(item_id)?;
+        self.record_change(app, &updated, LibraryChangeKind::Missing, None);
+        let _ = app.emit(ITEM_EVENT, &updated);
+        Ok(updated)
+    }
+
     pub fn new(database: Database) -> Result<Self, AppError> {
         let interrupted_operations = database.reconcile_library_file_operations()?;
         if interrupted_operations > 0 {
@@ -104,6 +134,7 @@ impl LibraryManager {
             artwork_slots: Arc::new(Semaphore::new(2)),
             metadata_slots: Arc::new(Semaphore::new(3)),
             artwork_locks: Arc::new(AsyncMutex::new(HashMap::new())),
+            artwork_cache_maintenance: Arc::new(AsyncMutex::new(())),
         })
     }
 
@@ -943,6 +974,10 @@ impl LibraryManager {
             return Ok(None);
         }
         let media_path = PathBuf::from(&item.path);
+        if !media_path.is_file() {
+            self.mark_item_missing(app, item_id)?;
+            return Ok(None);
+        }
         let input = item
             .thumbnail
             .as_deref()
@@ -960,6 +995,7 @@ impl LibraryManager {
         };
         let output =
             cache_directory.join(format!("{item_id}-v1-{input_size}-{input_modified_at}.jpg"));
+        let mut generated = false;
         if !cache_is_current(&input, &output) {
             let item_lock = {
                 let mut locks = self.artwork_locks.lock().await;
@@ -983,8 +1019,14 @@ impl LibraryManager {
                 let seek_video = input == media_path
                     && media_kind_for_path(&media_path) == Some(LibraryMediaKind::Video);
                 generate_artwork(&ffmpeg, &input, &output, seek_video).await?;
+                generated = true;
             }
         }
+        if generated {
+            self.enforce_artwork_cache(&cache_directory, Some(output.clone()))
+                .await?;
+        }
+        touch_cache_entry(&output);
         let bytes = std::fs::read(&output)
             .map_err(|error| AppError::internal("could not read cached artwork", error))?;
         if bytes.len() > 2 * 1024 * 1024 {
@@ -1003,6 +1045,7 @@ impl LibraryManager {
         &self,
         app: &AppHandle,
     ) -> Result<LibraryCacheResult, AppError> {
+        let _maintenance = self.artwork_cache_maintenance.lock().await;
         let _permits = self
             .artwork_slots
             .clone()
@@ -1010,29 +1053,44 @@ impl LibraryManager {
             .await
             .map_err(|_| library_unavailable())?;
         let directory = artwork_cache_directory(app)?;
-        let Ok(entries) = std::fs::read_dir(&directory) else {
-            return Ok(LibraryCacheResult {
-                removed_files: 0,
-                freed_bytes: 0,
-            });
-        };
-        let mut removed_files = 0usize;
-        let mut freed_bytes = 0u64;
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
-                continue;
-            }
-            let size = entry.metadata().map(|metadata| metadata.len()).unwrap_or(0);
-            if std::fs::remove_file(&path).is_ok() {
-                removed_files += 1;
-                freed_bytes = freed_bytes.saturating_add(size);
-            }
-        }
-        Ok(LibraryCacheResult {
-            removed_files,
-            freed_bytes,
+        tokio::task::spawn_blocking(move || clear_artwork_cache_directory(&directory))
+            .await
+            .map_err(|error| AppError::internal("artwork cache cleanup stopped", error))
+    }
+
+    pub async fn artwork_cache_status(
+        &self,
+        app: &AppHandle,
+    ) -> Result<LibraryArtworkCacheStatus, AppError> {
+        let directory = artwork_cache_directory(app)?;
+        std::fs::create_dir_all(&directory)
+            .map_err(|error| AppError::internal("could not create the artwork cache", error))?;
+        self.enforce_artwork_cache(&directory, None).await
+    }
+
+    async fn enforce_artwork_cache(
+        &self,
+        directory: &Path,
+        preserve: Option<PathBuf>,
+    ) -> Result<LibraryArtworkCacheStatus, AppError> {
+        let _maintenance = self.artwork_cache_maintenance.lock().await;
+        let _permits = self
+            .artwork_slots
+            .clone()
+            .acquire_many_owned(2)
+            .await
+            .map_err(|_| library_unavailable())?;
+        let directory = directory.to_owned();
+        tokio::task::spawn_blocking(move || {
+            enforce_artwork_cache_limits(
+                &directory,
+                preserve.as_deref(),
+                MAX_ARTWORK_CACHE_FILES,
+                MAX_ARTWORK_CACHE_BYTES,
+            )
         })
+        .await
+        .map_err(|error| AppError::internal("artwork cache maintenance stopped", error))?
     }
 
     fn run_scan(
@@ -1811,6 +1869,104 @@ fn artwork_cache_directory(app: &AppHandle) -> Result<PathBuf, AppError> {
         .map_err(|error| AppError::internal("could not resolve the artwork cache", error))
 }
 
+#[derive(Debug)]
+struct ArtworkCacheEntry {
+    path: PathBuf,
+    size: u64,
+    last_used: SystemTime,
+}
+
+fn enforce_artwork_cache_limits(
+    directory: &Path,
+    preserve: Option<&Path>,
+    max_files: usize,
+    max_bytes: u64,
+) -> Result<LibraryArtworkCacheStatus, AppError> {
+    let entries = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(LibraryArtworkCacheStatus {
+                file_count: 0,
+                total_bytes: 0,
+                max_files,
+                max_bytes,
+            });
+        }
+        Err(error) => {
+            return Err(AppError::internal(
+                "could not inspect the artwork cache",
+                error,
+            ));
+        }
+    };
+    let mut cached = entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+        .filter_map(|entry| {
+            let metadata = entry.metadata().ok()?;
+            Some(ArtworkCacheEntry {
+                path: entry.path(),
+                size: metadata.len(),
+                last_used: metadata.modified().unwrap_or(UNIX_EPOCH),
+            })
+        })
+        .collect::<Vec<_>>();
+    cached.sort_by_key(|entry| entry.last_used);
+    let mut file_count = cached.len();
+    let mut total_bytes = cached
+        .iter()
+        .fold(0u64, |total, entry| total.saturating_add(entry.size));
+    for entry in cached {
+        if file_count <= max_files && total_bytes <= max_bytes {
+            break;
+        }
+        if preserve.is_some_and(|preserve| preserve == entry.path) {
+            continue;
+        }
+        if std::fs::remove_file(&entry.path).is_ok() {
+            file_count = file_count.saturating_sub(1);
+            total_bytes = total_bytes.saturating_sub(entry.size);
+        }
+    }
+    Ok(LibraryArtworkCacheStatus {
+        file_count,
+        total_bytes,
+        max_files,
+        max_bytes,
+    })
+}
+
+fn clear_artwork_cache_directory(directory: &Path) -> LibraryCacheResult {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return LibraryCacheResult {
+            removed_files: 0,
+            freed_bytes: 0,
+        };
+    };
+    let mut removed_files = 0usize;
+    let mut freed_bytes = 0u64;
+    for entry in entries.flatten() {
+        if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            continue;
+        }
+        let size = entry.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+        if std::fs::remove_file(entry.path()).is_ok() {
+            removed_files += 1;
+            freed_bytes = freed_bytes.saturating_add(size);
+        }
+    }
+    LibraryCacheResult {
+        removed_files,
+        freed_bytes,
+    }
+}
+
+fn touch_cache_entry(path: &Path) {
+    if let Ok(file) = OpenOptions::new().write(true).open(path) {
+        let _ = file.set_modified(SystemTime::now());
+    }
+}
+
 fn remove_stale_artwork(directory: &Path, item_id: &str, current: &Path) {
     let prefix = format!("{item_id}-");
     let Ok(entries) = std::fs::read_dir(directory) else {
@@ -2253,20 +2409,39 @@ pub fn reconcile(database: &Database) -> Result<LibraryScanResult, AppError> {
 #[serde(rename_all = "camelCase")]
 struct LibraryBackup {
     version: u32,
+    #[serde(default)]
+    catalog_schema_version: u32,
+    #[serde(default)]
+    metadata_schema_version: u32,
     exported_at: chrono::DateTime<Utc>,
+    #[serde(default)]
+    sources: Vec<LibrarySource>,
     items: Vec<LibraryItem>,
+    #[serde(default)]
+    collections: Vec<LibraryCollection>,
 }
 
 pub fn export_backup(database: &Database, path: &str) -> Result<(), AppError> {
     let path = validate_json_output(path)?;
     let backup = LibraryBackup {
-        version: 1,
+        version: LIBRARY_BACKUP_VERSION,
+        catalog_schema_version: LIBRARY_CATALOG_SCHEMA_VERSION,
+        metadata_schema_version: LIBRARY_METADATA_SCHEMA_VERSION,
         exported_at: Utc::now(),
-        items: database.list_library_items()?,
+        sources: database.list_library_sources()?,
+        items: database.list_library_items_for_backup(MAX_LIBRARY_BACKUP_ITEMS + 1)?,
+        collections: database.list_library_collections()?,
     };
+    validate_backup_shape(&backup)?;
     let bytes = serde_json::to_vec_pretty(&backup).map_err(|error| {
         AppError::internal("could not serialize the media library backup", error)
     })?;
+    if bytes.len() as u64 > MAX_LIBRARY_BACKUP_BYTES {
+        return Err(AppError::new(
+            "library_backup_too_large",
+            "This library is too large for a single backup file.",
+        ));
+    }
     std::fs::write(path, bytes)
         .map_err(|error| AppError::internal("could not write the media library backup", error))
 }
@@ -2279,30 +2454,328 @@ pub fn restore_backup(database: &Database, path: &str) -> Result<Vec<LibraryItem
             "Choose an absolute .json library backup file.",
         ));
     }
-    let bytes = std::fs::read(path)
-        .map_err(|error| AppError::internal("could not read the media library backup", error))?;
-    let mut backup: LibraryBackup = serde_json::from_slice(&bytes)
-        .map_err(|error| AppError::internal("could not parse the media library backup", error))?;
-    if backup.version != 1 || backup.items.len() > 5000 {
+    let backup_size = std::fs::metadata(path)
+        .map_err(|error| AppError::internal("could not inspect the media library backup", error))?
+        .len();
+    if backup_size > MAX_LIBRARY_BACKUP_BYTES {
         return Err(AppError::new(
-            "unsupported_library_backup",
-            "This library backup is unsupported or too large.",
+            "library_backup_too_large",
+            "Choose a library backup smaller than 128 MB.",
         ));
     }
-    for item in &mut backup.items {
-        if Uuid::parse_str(&item.id).is_err() {
-            item.id = Uuid::new_v4().to_string();
-        }
-        item.tags = normalize_tags(std::mem::take(&mut item.tags))?;
-        // Version 1 backups contain catalog records but not source definitions. Dropping the
-        // relationship keeps restores portable and avoids dangling foreign keys on a new device.
-        item.source_id = None;
-        item.relative_path = None;
-        item.missing = !Path::new(&item.path).is_file();
-        item.updated_at = Utc::now();
-        let _ = database.upsert_library_item(item)?;
+    let bytes = std::fs::read(path)
+        .map_err(|error| AppError::internal("could not read the media library backup", error))?;
+    let backup: LibraryBackup = serde_json::from_slice(&bytes).map_err(|error| {
+        AppError::with_details(
+            "invalid_library_backup",
+            "This file is not a valid Nice Downloader library backup.",
+            error.to_string(),
+        )
+    })?;
+    validate_backup_shape(&backup)?;
+
+    let (source_requests, source_id_map) = prepare_backup_sources(database, &backup)?;
+    let mut prepared_items =
+        prepare_backup_items(database, backup.items, &source_id_map, backup.version)?;
+    let prepared_collections = prepare_backup_collections(backup.collections)?;
+
+    for request in source_requests {
+        database.save_library_source(request)?;
     }
-    Ok(backup.items)
+
+    let mut restored_items = Vec::with_capacity(prepared_items.len());
+    let mut item_id_map = HashMap::with_capacity(prepared_items.len());
+    for (backup_id, item) in &mut prepared_items {
+        let stored = database.upsert_library_item(item)?;
+        item_id_map.insert(backup_id.clone(), stored.id.clone());
+        restored_items.push(stored);
+    }
+
+    for collection in prepared_collections {
+        let stored = database.save_library_collection(SaveLibraryCollectionRequest {
+            id: Some(collection.id),
+            name: collection.name,
+        })?;
+        let item_ids = collection
+            .item_ids
+            .into_iter()
+            .filter_map(|id| item_id_map.get(&id).cloned())
+            .collect::<Vec<_>>();
+        for item_ids in item_ids.chunks(500) {
+            database.apply_library_bulk_action(
+                item_ids.to_vec(),
+                LibraryBulkAction::AddToCollection {
+                    collection_id: stored.id.clone(),
+                },
+            )?;
+        }
+    }
+    Ok(restored_items)
+}
+
+fn validate_backup_shape(backup: &LibraryBackup) -> Result<(), AppError> {
+    let supported_version = backup.version == 1
+        || (backup.version == LIBRARY_BACKUP_VERSION
+            && backup.catalog_schema_version == LIBRARY_CATALOG_SCHEMA_VERSION
+            && backup.metadata_schema_version == LIBRARY_METADATA_SCHEMA_VERSION);
+    let membership_count = backup
+        .collections
+        .iter()
+        .try_fold(0usize, |count, collection| {
+            count.checked_add(collection.item_ids.len())
+        });
+    if !supported_version
+        || backup.items.len() > MAX_LIBRARY_BACKUP_ITEMS
+        || backup.sources.len() > MAX_LIBRARY_BACKUP_SOURCES
+        || backup.collections.len() > MAX_LIBRARY_BACKUP_COLLECTIONS
+        || membership_count.is_none_or(|count| count > MAX_LIBRARY_BACKUP_MEMBERSHIPS)
+    {
+        return Err(AppError::new(
+            "unsupported_library_backup",
+            "This library backup uses an unsupported version or exceeds the safe restore limits.",
+        ));
+    }
+    Ok(())
+}
+
+fn prepare_backup_sources(
+    database: &Database,
+    backup: &LibraryBackup,
+) -> Result<(Vec<SaveLibrarySourceRequest>, HashMap<String, String>), AppError> {
+    if backup.version == 1 {
+        return Ok((Vec::new(), HashMap::new()));
+    }
+    let existing = database.list_library_sources()?;
+    let mut occupied_paths = existing
+        .iter()
+        .map(|source| (PathBuf::from(&source.path), source.id.clone()))
+        .collect::<Vec<_>>();
+    let existing_ids = existing
+        .iter()
+        .map(|source| source.id.as_str())
+        .collect::<HashSet<_>>();
+    let mut backup_ids = HashSet::new();
+    let mut backup_paths = HashSet::new();
+    let mut requests = Vec::with_capacity(backup.sources.len());
+    let mut id_map = HashMap::with_capacity(backup.sources.len());
+    for source in &backup.sources {
+        if !backup_ids.insert(source.id.as_str()) {
+            return Err(invalid_backup("Source identifiers must be unique."));
+        }
+        let path = normalize_backup_source_path(&source.path)?;
+        if !backup_paths.insert(path.clone()) {
+            return Err(invalid_backup("Source paths must be unique."));
+        }
+        let exact_existing = occupied_paths
+            .iter()
+            .find(|(occupied, _)| occupied == &path)
+            .map(|(_, id)| id.clone());
+        if exact_existing.is_none()
+            && occupied_paths
+                .iter()
+                .any(|(occupied, _)| path.starts_with(occupied) || occupied.starts_with(&path))
+        {
+            return Err(AppError::new(
+                "library_source_overlaps",
+                "A backed-up folder overlaps an existing library source.",
+            ));
+        }
+        let id = exact_existing.unwrap_or_else(|| {
+            if Uuid::parse_str(&source.id).is_ok() && !existing_ids.contains(source.id.as_str()) {
+                source.id.clone()
+            } else {
+                Uuid::new_v4().to_string()
+            }
+        });
+        let name = validate_source_name(&source.name)?;
+        let include_patterns = normalize_patterns(source.include_patterns.clone())?;
+        let exclude_patterns = normalize_patterns(source.exclude_patterns.clone())?;
+        occupied_paths.push((path.clone(), id.clone()));
+        id_map.insert(source.id.clone(), id.clone());
+        requests.push(SaveLibrarySourceRequest {
+            id: Some(id),
+            name,
+            path: path.to_string_lossy().into_owned(),
+            media_kind: source.media_kind,
+            recursive: source.recursive,
+            watch_enabled: source.watch_enabled,
+            private: source.private,
+            include_patterns,
+            exclude_patterns,
+        });
+    }
+    Ok((requests, id_map))
+}
+
+fn prepare_backup_items(
+    database: &Database,
+    items: Vec<LibraryItem>,
+    source_id_map: &HashMap<String, String>,
+    backup_version: u32,
+) -> Result<Vec<(String, LibraryItem)>, AppError> {
+    let existing_id_paths = database.list_library_item_id_paths()?;
+    let mut ids = HashSet::new();
+    let mut paths = HashSet::new();
+    let mut prepared = Vec::with_capacity(items.len());
+    for mut item in items {
+        let backup_id = item.id.clone();
+        if !ids.insert(backup_id.clone()) {
+            return Err(invalid_backup("Media identifiers must be unique."));
+        }
+        let path = PathBuf::from(&item.path);
+        if !path.is_absolute() || item.path.chars().count() > 32_768 {
+            return Err(invalid_backup(
+                "Every media item must use an absolute path.",
+            ));
+        }
+        if !paths.insert(item.path.clone()) {
+            return Err(invalid_backup("Media paths must be unique."));
+        }
+        let title = item.title.trim();
+        if title.is_empty() || title.chars().count() > 500 || title.chars().any(char::is_control) {
+            return Err(invalid_backup("Media titles must be valid text."));
+        }
+        item.title = title.to_owned();
+        item.id = if Uuid::parse_str(&item.id).is_ok()
+            && existing_id_paths
+                .get(&item.id)
+                .is_none_or(|existing_path| existing_path == &item.path)
+        {
+            item.id
+        } else {
+            Uuid::new_v4().to_string()
+        };
+        item.tags = normalize_tags(std::mem::take(&mut item.tags))?;
+        if item.rating.is_some_and(|rating| !(1..=5).contains(&rating)) {
+            return Err(invalid_backup(
+                "Media ratings must be between one and five.",
+            ));
+        }
+        item.source_id = if backup_version == 1 {
+            None
+        } else {
+            item.source_id
+                .as_ref()
+                .and_then(|source_id| source_id_map.get(source_id).cloned())
+        };
+        item.relative_path = if item.source_id.is_some() {
+            normalize_backup_relative_path(item.relative_path.take())?
+        } else {
+            None
+        };
+        item.thumbnail = item.thumbnail.filter(|thumbnail| {
+            Path::new(thumbnail).is_absolute() && Path::new(thumbnail).is_file()
+        });
+        match file_fingerprint(&path) {
+            Some((size, modified_at)) => {
+                item.missing = false;
+                if item.file_size_bytes != Some(size) || item.modified_at_ms != Some(modified_at) {
+                    reset_restored_metadata(&mut item, size, modified_at);
+                }
+            }
+            None => item.missing = true,
+        }
+        item.updated_at = Utc::now();
+        prepared.push((backup_id, item));
+    }
+    Ok(prepared)
+}
+
+fn prepare_backup_collections(
+    collections: Vec<LibraryCollection>,
+) -> Result<Vec<LibraryCollection>, AppError> {
+    let mut ids = HashSet::new();
+    collections
+        .into_iter()
+        .map(|mut collection| {
+            if !ids.insert(collection.id.clone()) {
+                return Err(invalid_backup("Collection identifiers must be unique."));
+            }
+            collection.id = if Uuid::parse_str(&collection.id).is_ok() {
+                collection.id
+            } else {
+                Uuid::new_v4().to_string()
+            };
+            let name = collection.name.trim();
+            if name.is_empty() || name.chars().count() > 80 || name.chars().any(char::is_control) {
+                return Err(invalid_backup("Collection names must be valid text."));
+            }
+            collection.name = name.to_owned();
+            collection.item_ids.sort();
+            collection.item_ids.dedup();
+            Ok(collection)
+        })
+        .collect()
+}
+
+fn normalize_backup_source_path(value: &str) -> Result<PathBuf, AppError> {
+    let path = PathBuf::from(value);
+    if !path.is_absolute() || path.parent().is_none() || value.chars().count() > 32_768 {
+        return Err(invalid_backup(
+            "Library sources must use absolute folder paths.",
+        ));
+    }
+    if path.exists() {
+        let canonical = path.canonicalize().map_err(|error| {
+            AppError::with_details(
+                "invalid_library_backup",
+                "A backed-up source path cannot be accessed.",
+                error.to_string(),
+            )
+        })?;
+        if !canonical.is_dir() {
+            return Err(invalid_backup("A backed-up source path is not a folder."));
+        }
+        Ok(canonical)
+    } else {
+        Ok(path)
+    }
+}
+
+fn normalize_backup_relative_path(value: Option<String>) -> Result<Option<String>, AppError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let path = Path::new(&value);
+    if value.chars().count() > 32_768
+        || path.is_absolute()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        return Err(invalid_backup(
+            "A backed-up relative media path is invalid.",
+        ));
+    }
+    Ok(Some(value))
+}
+
+fn reset_restored_metadata(item: &mut LibraryItem, size: u64, modified_at: i64) {
+    item.file_size_bytes = Some(size);
+    item.modified_at_ms = Some(modified_at);
+    item.duration_seconds = None;
+    item.width = None;
+    item.height = None;
+    item.fps = None;
+    item.video_codec = None;
+    item.audio_codec = None;
+    item.container = None;
+    item.dynamic_range = None;
+    item.metadata_state = LibraryMetadataState::Pending;
+    item.metadata_error = None;
+}
+
+fn invalid_backup(details: &str) -> AppError {
+    AppError::with_details(
+        "invalid_library_backup",
+        "This library backup contains invalid data.",
+        details,
+    )
 }
 
 fn normalize_tags(tags: Vec<String>) -> Result<Vec<String>, AppError> {
@@ -2379,6 +2852,238 @@ fn validate_json_output(value: &str) -> Result<PathBuf, AppError> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    fn backup_test_item(path: &Path, source_id: Option<String>) -> LibraryItem {
+        let now = Utc::now();
+        let (size, modified_at) = file_fingerprint(path).unwrap_or((0, 0));
+        LibraryItem {
+            id: Uuid::new_v4().to_string(),
+            path: path.to_string_lossy().into_owned(),
+            source_id,
+            relative_path: Some("clip.mp4".to_owned()),
+            media_kind: Some(LibraryMediaKind::Video),
+            title: "Edited clip".to_owned(),
+            source_url: Some("https://example.invalid/watch/1".to_owned()),
+            thumbnail: None,
+            duration_seconds: Some(12.5),
+            site: Some("Example".to_owned()),
+            tags: vec!["Favorite".to_owned()],
+            metadata: json!({ "safe": true }),
+            file_size_bytes: Some(size),
+            modified_at_ms: Some(modified_at),
+            width: Some(1920),
+            height: Some(1080),
+            fps: Some(30.0),
+            video_codec: Some("h264".to_owned()),
+            audio_codec: Some("aac".to_owned()),
+            container: Some("mp4".to_owned()),
+            dynamic_range: Some("SDR".to_owned()),
+            metadata_state: LibraryMetadataState::Ready,
+            metadata_error: None,
+            favorite: true,
+            rating: Some(5),
+            missing: !path.is_file(),
+            added_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn version_two_backup_restores_sources_collections_and_metadata() {
+        let directory = tempdir().expect("temporary directory");
+        let media_directory = directory.path().join("media");
+        std::fs::create_dir(&media_directory).expect("media directory");
+        let media_path = media_directory.join("clip.mp4");
+        std::fs::write(&media_path, b"stable media fixture").expect("media fixture");
+        let source_database =
+            Database::open(&directory.path().join("source.sqlite3")).expect("source database");
+        let source = source_database
+            .save_library_source(SaveLibrarySourceRequest {
+                id: None,
+                name: "Archive".to_owned(),
+                path: media_directory
+                    .canonicalize()
+                    .expect("canonical media directory")
+                    .to_string_lossy()
+                    .into_owned(),
+                media_kind: LibraryMediaKind::Both,
+                recursive: true,
+                watch_enabled: false,
+                private: true,
+                include_patterns: vec!["*.mp4".to_owned()],
+                exclude_patterns: vec!["private/*".to_owned()],
+            })
+            .expect("source");
+        let item = source_database
+            .upsert_library_item(&backup_test_item(&media_path, Some(source.id.clone())))
+            .expect("item");
+        let collection = source_database
+            .save_library_collection(SaveLibraryCollectionRequest {
+                id: None,
+                name: "Watch later".to_owned(),
+            })
+            .expect("collection");
+        source_database
+            .apply_library_bulk_action(
+                vec![item.id.clone()],
+                LibraryBulkAction::AddToCollection {
+                    collection_id: collection.id,
+                },
+            )
+            .expect("collection membership");
+
+        let backup_path = directory.path().join("library.json");
+        export_backup(&source_database, &backup_path.to_string_lossy()).expect("export");
+        let exported: Value =
+            serde_json::from_slice(&std::fs::read(&backup_path).expect("exported backup"))
+                .expect("backup json");
+        assert_eq!(exported["version"], LIBRARY_BACKUP_VERSION);
+        assert_eq!(
+            exported["metadataSchemaVersion"],
+            LIBRARY_METADATA_SCHEMA_VERSION
+        );
+
+        let restored_database =
+            Database::open(&directory.path().join("restored.sqlite3")).expect("restored database");
+        let restored =
+            restore_backup(&restored_database, &backup_path.to_string_lossy()).expect("restore");
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].source_id.as_deref(), Some(source.id.as_str()));
+        assert_eq!(restored[0].relative_path.as_deref(), Some("clip.mp4"));
+        assert_eq!(restored[0].metadata_state, LibraryMetadataState::Ready);
+        assert_eq!(restored[0].height, Some(1080));
+        assert!(restored[0].favorite);
+        assert_eq!(restored[0].rating, Some(5));
+        let restored_sources = restored_database.list_library_sources().expect("sources");
+        assert_eq!(restored_sources.len(), 1);
+        assert!(restored_sources[0].private);
+        assert_eq!(restored_sources[0].include_patterns, ["*.mp4"]);
+        let restored_collections = restored_database
+            .list_library_collections()
+            .expect("collections");
+        assert_eq!(restored_collections.len(), 1);
+        assert_eq!(restored_collections[0].name, "Watch later");
+        assert_eq!(restored_collections[0].item_ids, [restored[0].id.clone()]);
+    }
+
+    #[test]
+    fn version_one_backup_remains_portable_without_source_definitions() {
+        let directory = tempdir().expect("temporary directory");
+        let media_path = directory.path().join("missing.mp4");
+        let mut item = backup_test_item(&media_path, Some(Uuid::new_v4().to_string()));
+        item.relative_path = Some("nested/missing.mp4".to_owned());
+        let backup_path = directory.path().join("legacy.json");
+        std::fs::write(
+            &backup_path,
+            serde_json::to_vec(&json!({
+                "version": 1,
+                "exportedAt": Utc::now(),
+                "items": [item]
+            }))
+            .expect("legacy backup json"),
+        )
+        .expect("legacy backup");
+        let database = Database::open(&directory.path().join("legacy.sqlite3")).expect("database");
+        let restored =
+            restore_backup(&database, &backup_path.to_string_lossy()).expect("legacy restore");
+        assert_eq!(restored.len(), 1);
+        assert!(restored[0].source_id.is_none());
+        assert!(restored[0].relative_path.is_none());
+        assert!(restored[0].missing);
+    }
+
+    #[test]
+    fn restore_invalidates_metadata_when_the_file_fingerprint_changed() {
+        let directory = tempdir().expect("temporary directory");
+        let media_path = directory.path().join("changed.mp4");
+        std::fs::write(&media_path, b"original fixture").expect("original fixture");
+        let source_database = Database::open(&directory.path().join("metadata-source.sqlite3"))
+            .expect("source database");
+        source_database
+            .upsert_library_item(&backup_test_item(&media_path, None))
+            .expect("item");
+        let backup_path = directory.path().join("metadata.json");
+        export_backup(&source_database, &backup_path.to_string_lossy()).expect("export");
+        std::fs::write(&media_path, b"a different and longer fixture").expect("changed fixture");
+
+        let restored_database = Database::open(&directory.path().join("metadata-restored.sqlite3"))
+            .expect("restored database");
+        let restored =
+            restore_backup(&restored_database, &backup_path.to_string_lossy()).expect("restore");
+        assert_eq!(restored[0].metadata_state, LibraryMetadataState::Pending);
+        assert_eq!(restored[0].duration_seconds, None);
+        assert_eq!(restored[0].height, None);
+        assert_eq!(
+            restored[0].file_size_bytes,
+            Some(b"a different and longer fixture".len() as u64)
+        );
+    }
+
+    #[test]
+    fn future_backup_schema_is_rejected_before_writing_records() {
+        let directory = tempdir().expect("temporary directory");
+        let backup_path = directory.path().join("future.json");
+        let backup = LibraryBackup {
+            version: LIBRARY_BACKUP_VERSION,
+            catalog_schema_version: LIBRARY_CATALOG_SCHEMA_VERSION + 1,
+            metadata_schema_version: LIBRARY_METADATA_SCHEMA_VERSION,
+            exported_at: Utc::now(),
+            sources: Vec::new(),
+            items: Vec::new(),
+            collections: Vec::new(),
+        };
+        std::fs::write(
+            &backup_path,
+            serde_json::to_vec(&backup).expect("future backup json"),
+        )
+        .expect("future backup");
+        let database = Database::open(&directory.path().join("future.sqlite3")).expect("database");
+        let error =
+            restore_backup(&database, &backup_path.to_string_lossy()).expect_err("future schema");
+        assert_eq!(error.code, "unsupported_library_backup");
+        assert!(database.list_library_items().expect("items").is_empty());
+    }
+
+    fn create_cache_fixture(directory: &Path, name: &str, size: u64, age: u64) -> PathBuf {
+        let path = directory.join(name);
+        let file = std::fs::File::create(&path).expect("cache fixture");
+        file.set_len(size).expect("cache fixture size");
+        file.set_modified(UNIX_EPOCH + std::time::Duration::from_secs(age))
+            .expect("cache fixture age");
+        path
+    }
+
+    #[test]
+    fn artwork_cache_evicts_oldest_entries_to_meet_both_limits() {
+        let directory = tempdir().expect("temporary directory");
+        let oldest = create_cache_fixture(directory.path(), "oldest.jpg", 8, 1);
+        let middle = create_cache_fixture(directory.path(), "middle.jpg", 8, 2);
+        let newest = create_cache_fixture(directory.path(), "newest.jpg", 8, 3);
+
+        let status =
+            enforce_artwork_cache_limits(directory.path(), None, 2, 16).expect("cache maintenance");
+
+        assert_eq!(status.file_count, 2);
+        assert_eq!(status.total_bytes, 16);
+        assert!(!oldest.exists());
+        assert!(middle.exists());
+        assert!(newest.exists());
+    }
+
+    #[test]
+    fn artwork_cache_never_evicts_the_entry_being_returned() {
+        let directory = tempdir().expect("temporary directory");
+        let preserved = create_cache_fixture(directory.path(), "preserved.jpg", 8, 1);
+        let removable = create_cache_fixture(directory.path(), "removable.jpg", 8, 2);
+
+        let status = enforce_artwork_cache_limits(directory.path(), Some(&preserved), 1, 8)
+            .expect("cache maintenance");
+
+        assert_eq!(status.file_count, 1);
+        assert_eq!(status.total_bytes, 8);
+        assert!(preserved.exists());
+        assert!(!removable.exists());
+    }
 
     #[test]
     fn tags_are_trimmed_and_deduplicated() {

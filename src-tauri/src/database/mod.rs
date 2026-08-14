@@ -20,7 +20,7 @@ use crate::{
 use chrono::{DateTime, Duration, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::Path,
     sync::{Arc, Mutex},
 };
@@ -1215,6 +1215,43 @@ impl Database {
         )?;
         let rows = statement.query_map([], library_item_from_row)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+    }
+
+    pub fn list_library_items_for_backup(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<LibraryItem>, AppError> {
+        let limit = i64::try_from(limit).map_err(|_| {
+            AppError::new(
+                "invalid_library_backup_limit",
+                "The library backup item limit is invalid.",
+            )
+        })?;
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "The media library is unavailable.")
+        })?;
+        let mut statement = connection.prepare(
+            "SELECT media_library.id, path, title, source_url, thumbnail, duration_seconds, site,
+                    tags_json, metadata_json, missing, added_at, media_library.updated_at, source_id,
+                    relative_path, media_kind, file_size_bytes, modified_at_ms, width, height, fps,
+                    video_codec, audio_codec, container, dynamic_range,
+                    COALESCE(state, 'pending'), error, favorite, rating
+             FROM media_library
+             LEFT JOIN library_media_metadata ON item_id = media_library.id
+             ORDER BY added_at DESC LIMIT ?1",
+        )?;
+        let rows = statement.query_map([limit], library_item_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+    }
+
+    pub fn list_library_item_id_paths(&self) -> Result<HashMap<String, String>, AppError> {
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "The media library is unavailable.")
+        })?;
+        let mut statement = connection.prepare("SELECT id, path FROM media_library")?;
+        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect::<Result<HashMap<_, _>, _>>()
+            .map_err(AppError::from)
     }
 
     pub fn get_library_item(&self, id: &str) -> Result<LibraryItem, AppError> {

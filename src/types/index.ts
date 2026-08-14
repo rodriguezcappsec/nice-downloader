@@ -440,6 +440,13 @@ export interface LibraryCacheResult {
   freedBytes: number;
 }
 
+export interface LibraryArtworkCacheStatus {
+  fileCount: number;
+  totalBytes: number;
+  maxFiles: number;
+  maxBytes: number;
+}
+
 export interface UpdateLibraryItemRequest {
   id: string;
   title: string;
