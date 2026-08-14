@@ -646,6 +646,8 @@ pub enum LibrarySort {
     SizeAsc,
     FileDateDesc,
     FileDateAsc,
+    PublishedDesc,
+    PublishedAsc,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -663,8 +665,16 @@ pub struct LibraryQueryRequest {
     pub container: Option<String>,
     pub duration: Option<String>,
     pub date_added: Option<String>,
+    #[serde(default)]
+    pub date_published: Option<String>,
     pub availability: LibraryAvailabilityFilter,
     pub tag: Option<String>,
+    #[serde(default)]
+    pub creator: Option<String>,
+    #[serde(default)]
+    pub series: Option<String>,
+    #[serde(default)]
+    pub site: Option<String>,
     pub rating: Option<String>,
     pub collection_id: Option<String>,
     pub favorite_only: bool,
@@ -706,7 +716,57 @@ pub struct LibraryFacets {
     pub missing_items: usize,
     pub containers: Vec<String>,
     pub tags: Vec<String>,
+    pub creators: Vec<String>,
+    pub series: Vec<String>,
+    pub sites: Vec<String>,
     pub folders: Vec<LibraryFolderFacet>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryMetadataFields {
+    #[serde(default)]
+    pub creator: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub upload_date: Option<String>,
+    #[serde(default)]
+    pub series: Option<String>,
+    #[serde(default)]
+    pub episode: Option<String>,
+    #[serde(default)]
+    pub original_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryRichMetadata {
+    pub item_id: String,
+    pub extracted: LibraryMetadataFields,
+    pub overrides: LibraryMetadataFields,
+    pub effective: LibraryMetadataFields,
+    pub overridden_fields: Vec<String>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveLibraryRichMetadataRequest {
+    pub item_id: String,
+    pub creator: Option<String>,
+    pub description: Option<String>,
+    pub upload_date: Option<String>,
+    pub series: Option<String>,
+    pub episode: Option<String>,
+    pub original_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetLibraryArtworkRequest {
+    pub item_id: String,
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

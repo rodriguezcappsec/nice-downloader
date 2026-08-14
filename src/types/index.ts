@@ -438,7 +438,7 @@ export interface LibraryItem {
 
 export type LibraryAvailabilityFilter = "all" | "available" | "missing";
 export type LibraryFolderScope = "tree" | "direct";
-export type LibrarySort = "recent" | "oldest" | "titleAsc" | "titleDesc" | "durationDesc" | "durationAsc" | "sizeDesc" | "sizeAsc" | "fileDateDesc" | "fileDateAsc";
+export type LibrarySort = "recent" | "oldest" | "titleAsc" | "titleDesc" | "durationDesc" | "durationAsc" | "sizeDesc" | "sizeAsc" | "fileDateDesc" | "fileDateAsc" | "publishedDesc" | "publishedAsc";
 
 export interface LibraryQueryRequest {
   page: number;
@@ -453,8 +453,12 @@ export interface LibraryQueryRequest {
   container?: string | null;
   duration?: string | null;
   dateAdded?: string | null;
+  datePublished?: string | null;
   availability: LibraryAvailabilityFilter;
   tag?: string | null;
+  creator?: string | null;
+  series?: string | null;
+  site?: string | null;
   rating?: string | null;
   collectionId?: string | null;
   favoriteOnly: boolean;
@@ -487,7 +491,37 @@ export interface LibraryFacets {
   missingItems: number;
   containers: string[];
   tags: string[];
+  creators: string[];
+  series: string[];
+  sites: string[];
   folders: LibraryFolderFacet[];
+}
+
+export interface LibraryMetadataFields {
+  creator?: string | null;
+  description?: string | null;
+  uploadDate?: string | null;
+  series?: string | null;
+  episode?: string | null;
+  originalUrl?: string | null;
+}
+
+export interface LibraryRichMetadata {
+  itemId: string;
+  extracted: LibraryMetadataFields;
+  overrides: LibraryMetadataFields;
+  effective: LibraryMetadataFields;
+  overriddenFields: string[];
+  updatedAt: string;
+}
+
+export interface SaveLibraryRichMetadataRequest extends LibraryMetadataFields {
+  itemId: string;
+}
+
+export interface SetLibraryArtworkRequest {
+  itemId: string;
+  path?: string | null;
 }
 
 export interface LibraryPlaybackState {

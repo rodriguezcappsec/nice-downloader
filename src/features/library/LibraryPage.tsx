@@ -46,7 +46,7 @@ import {
   ZoomOut,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Button, Field, Input, Select } from "../../components/ui";
+import { Button, Field, Input, Select, Textarea } from "../../components/ui";
 import { formatBytes, formatDuration } from "../../lib/format";
 import { api, normalizeError } from "../../lib/tauri";
 import { useAppStore } from "../../stores/app-store";
@@ -72,6 +72,7 @@ import type {
   LibraryPlaybackPreflight,
   LibraryPlaybackSession,
   LibraryPlaylist,
+  LibraryRichMetadata,
   LibraryWatchState,
   LibraryQueryRequest,
   LibraryQueryResult,
@@ -91,7 +92,7 @@ type FolderOption = FolderSelection & { value: string; label: string; directCoun
 const LIBRARY_PAGE_SIZE = 60;
 const WATCH_BROWSE_PAGE_SIZE = 24;
 const EMPTY_LIBRARY_RESULT: LibraryQueryResult = { items: [], totalItems: 0, page: 1, pageSize: LIBRARY_PAGE_SIZE, totalPages: 1 };
-const EMPTY_LIBRARY_FACETS: LibraryFacets = { totalItems: 0, availableItems: 0, missingItems: 0, containers: [], tags: [], folders: [] };
+const EMPTY_LIBRARY_FACETS: LibraryFacets = { totalItems: 0, availableItems: 0, missingItems: 0, containers: [], tags: [], creators: [], series: [], sites: [], folders: [] };
 type LiveAnnouncement = { signature: string; message: string; assertive?: boolean };
 
 export function LibraryPage({ active = true }: { active?: boolean }) {
@@ -131,9 +132,13 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
   const [containerFilter, setContainerFilter] = useState("all");
   const [durationFilter, setDurationFilter] = useState<DurationFilter>("all");
   const [dateFilter, setDateFilter] = useState<DateFilter>("all");
+  const [publishedFilter, setPublishedFilter] = useState<DateFilter>("all");
   const [sort, setSort] = useState<LibrarySort>("recent");
   const [availabilityFilter, setAvailabilityFilter] = useState<AvailabilityFilter>("available");
   const [tagFilter, setTagFilter] = useState("all");
+  const [creatorFilter, setCreatorFilter] = useState("all");
+  const [seriesFilter, setSeriesFilter] = useState("all");
+  const [siteFilter, setSiteFilter] = useState("all");
   const [ratingFilter, setRatingFilter] = useState("all");
   const [collectionFilter, setCollectionFilter] = useState("all");
   const [favoriteOnly, setFavoriteOnly] = useState(false);
@@ -474,14 +479,18 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
       container: containerFilter === "all" ? null : containerFilter,
       duration: durationFilter === "all" ? null : durationFilter,
       dateAdded: dateFilter === "all" ? null : dateFilter,
+      datePublished: publishedFilter === "all" ? null : publishedFilter,
       availability: availabilityFilter,
       tag: tagFilter === "all" ? null : tagFilter,
+      creator: creatorFilter === "all" ? null : creatorFilter,
+      series: seriesFilter === "all" ? null : seriesFilter,
+      site: siteFilter === "all" ? null : siteFilter,
       rating: ratingFilter === "all" ? null : ratingFilter,
       collectionId: collectionFilter === "all" ? null : collectionFilter,
       favoriteOnly,
       sort,
     };
-  }, [availabilityFilter, collectionFilter, containerFilter, dateFilter, debouncedSearch, durationFilter, favoriteOnly, folderFilter, folderScope, mediaFilter, ratingFilter, resolutionFilter, resultPage, sort, sourceFilter, tagFilter]);
+  }, [availabilityFilter, collectionFilter, containerFilter, creatorFilter, dateFilter, debouncedSearch, durationFilter, favoriteOnly, folderFilter, folderScope, mediaFilter, publishedFilter, ratingFilter, resolutionFilter, resultPage, seriesFilter, siteFilter, sort, sourceFilter, tagFilter]);
 
   useEffect(() => {
     let disposed = false;
@@ -578,6 +587,9 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
   const availableItemCount = facets.availableItems;
   const containers = facets.containers;
   const tags = facets.tags;
+  const creators = facets.creators;
+  const seriesOptions = facets.series;
+  const sites = facets.sites;
   const folderOptions = useMemo(() => buildFolderOptions(facets.folders, sources, sourceFilter), [facets.folders, sourceFilter, sources]);
   const featured = recentResult.items[0];
   const videos = videoResult.items;
@@ -586,11 +598,24 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
   const currentResultPage = queryResult.page;
   const resultStart = queryResult.totalItems === 0 ? 0 : (currentResultPage - 1) * queryResult.pageSize;
   const resultEnd = Math.min(resultStart + items.length, queryResult.totalItems);
-  const isFiltered = Boolean(search.trim()) || sourceFilter !== "all" || folderFilter !== "all" || mediaFilter !== "all" || resolutionFilter !== "all" || containerFilter !== "all" || durationFilter !== "all" || dateFilter !== "all" || availabilityFilter !== "available" || tagFilter !== "all" || ratingFilter !== "all" || collectionFilter !== "all" || favoriteOnly || sort !== "recent";
+  const isFiltered = Boolean(search.trim()) || sourceFilter !== "all" || folderFilter !== "all" || mediaFilter !== "all" || resolutionFilter !== "all" || containerFilter !== "all" || durationFilter !== "all" || dateFilter !== "all" || publishedFilter !== "all" || availabilityFilter !== "available" || tagFilter !== "all" || creatorFilter !== "all" || seriesFilter !== "all" || siteFilter !== "all" || ratingFilter !== "all" || collectionFilter !== "all" || favoriteOnly || sort !== "recent";
+  const resultTitle = search.trim()
+    ? `Results for “${search.trim()}”`
+    : creatorFilter !== "all"
+      ? `From ${creatorFilter}`
+      : seriesFilter !== "all"
+        ? seriesFilter
+        : siteFilter !== "all"
+          ? siteFilter
+          : mediaFilter === "video"
+            ? "Videos"
+            : mediaFilter === "image"
+              ? "Images"
+              : sourceNames.get(sourceFilter) || "All media";
 
   useEffect(() => {
     setResultPage(1);
-  }, [availabilityFilter, collectionFilter, containerFilter, dateFilter, durationFilter, favoriteOnly, folderFilter, folderScope, mediaFilter, ratingFilter, resolutionFilter, search, selectionMode, sort, sourceFilter, tagFilter]);
+  }, [availabilityFilter, collectionFilter, containerFilter, creatorFilter, dateFilter, durationFilter, favoriteOnly, folderFilter, folderScope, mediaFilter, publishedFilter, ratingFilter, resolutionFilter, search, selectionMode, seriesFilter, siteFilter, sort, sourceFilter, tagFilter]);
 
   useEffect(() => {
     if (folderFilter === "all") return;
@@ -766,7 +791,8 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
 
   function resetFilters() {
     setMediaFilter("all"); setSourceFilter("all"); setFolderFilter("all"); setFolderScope("tree"); setResolutionFilter("all"); setContainerFilter("all");
-    setDurationFilter("all"); setDateFilter("all"); setAvailabilityFilter("available"); setTagFilter("all");
+    setDurationFilter("all"); setDateFilter("all"); setPublishedFilter("all"); setAvailabilityFilter("available"); setTagFilter("all"); setCreatorFilter("all");
+    setSeriesFilter("all"); setSiteFilter("all");
     setRatingFilter("all"); setCollectionFilter("all"); setFavoriteOnly(false);
     setSort("recent");
   }
@@ -1094,10 +1120,14 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
         <label className="shrink-0"><span className="sr-only">Filter by container</span><Select className="h-9 w-[130px] bg-elevated/70 text-xs" value={containerFilter} onChange={(event) => setContainerFilter(event.target.value)}><option value="all">Any format</option>{containers.map((container) => <option key={container} value={container}>{container.toLocaleUpperCase()}</option>)}</Select></label>
         <label className="shrink-0"><span className="sr-only">Filter by duration</span><Select className="h-9 w-[130px] bg-elevated/70 text-xs" value={durationFilter} onChange={(event) => setDurationFilter(event.target.value as DurationFilter)}><option value="all">Any duration</option><option value="short">Under 5 min</option><option value="medium">5–30 min</option><option value="long">Over 30 min</option><option value="unknown">Unknown time</option></Select></label>
         <label className="shrink-0"><span className="sr-only">Filter by date added</span><Select className="h-9 w-[120px] bg-elevated/70 text-xs" value={dateFilter} onChange={(event) => setDateFilter(event.target.value as DateFilter)}><option value="all">Any date</option><option value="week">This week</option><option value="month">This month</option><option value="year">This year</option></Select></label>
+        <label className="shrink-0"><span className="sr-only">Filter by published date</span><Select className="h-9 w-[145px] bg-elevated/70 text-xs" value={publishedFilter} onChange={(event) => setPublishedFilter(event.target.value as DateFilter)}><option value="all">Any published date</option><option value="week">Published this week</option><option value="month">Published this month</option><option value="year">Published this year</option></Select></label>
         <label className="shrink-0"><span className="sr-only">Filter by availability</span><Select className="h-9 w-[130px] bg-elevated/70 text-xs" value={availabilityFilter} onChange={(event) => setAvailabilityFilter(event.target.value as AvailabilityFilter)}><option value="available">Available</option><option value="missing">Missing files</option><option value="all">All records</option></Select></label>
         <label className="shrink-0"><span className="sr-only">Filter by tag</span><Select className="h-9 w-[120px] bg-elevated/70 text-xs" value={tagFilter} onChange={(event) => setTagFilter(event.target.value)}><option value="all">Any tag</option>{tags.map((tag) => <option key={tag} value={tag}>#{tag}</option>)}</Select></label>
+        <label className="shrink-0"><span className="sr-only">Filter by creator</span><Select className="h-9 w-[170px] bg-elevated/70 text-xs" value={creatorFilter} onChange={(event) => setCreatorFilter(event.target.value)}><option value="all">Any creator</option>{creators.map((creator) => <option key={creator} value={creator}>{creator}</option>)}</Select></label>
+        <label className="shrink-0"><span className="sr-only">Filter by series</span><Select className="h-9 w-[170px] bg-elevated/70 text-xs" value={seriesFilter} onChange={(event) => setSeriesFilter(event.target.value)}><option value="all">Any series</option>{seriesOptions.map((series) => <option key={series} value={series}>{series}</option>)}</Select></label>
+        <label className="shrink-0"><span className="sr-only">Filter by site</span><Select className="h-9 w-[145px] bg-elevated/70 text-xs" value={siteFilter} onChange={(event) => setSiteFilter(event.target.value)}><option value="all">Any site</option>{sites.map((site) => <option key={site} value={site}>{site}</option>)}</Select></label>
         <label className="shrink-0"><span className="sr-only">Filter by rating</span><Select className="h-9 w-[120px] bg-elevated/70 text-xs" value={ratingFilter} onChange={(event) => setRatingFilter(event.target.value)}><option value="all">Any rating</option><option value="rated">Rated</option><option value="5">5 stars</option><option value="4">4 stars</option><option value="3">3 stars</option><option value="unrated">Unrated</option></Select></label>
-        <label className="shrink-0"><span className="sr-only">Sort library results</span><Select className="h-9 w-[175px] bg-elevated/70 text-xs" value={sort} onChange={(event) => setSort(event.target.value as LibrarySort)}><option value="recent">Newest added</option><option value="oldest">Oldest added</option><option value="fileDateDesc">Newest file date</option><option value="fileDateAsc">Oldest file date</option><option value="titleAsc">Title A–Z</option><option value="titleDesc">Title Z–A</option><option value="durationDesc">Longest first</option><option value="durationAsc">Shortest first</option><option value="sizeDesc">Largest first</option><option value="sizeAsc">Smallest first</option></Select></label>
+        <label className="shrink-0"><span className="sr-only">Sort library results</span><Select className="h-9 w-[175px] bg-elevated/70 text-xs" value={sort} onChange={(event) => setSort(event.target.value as LibrarySort)}><option value="recent">Newest added</option><option value="oldest">Oldest added</option><option value="publishedDesc">Newest published</option><option value="publishedAsc">Oldest published</option><option value="fileDateDesc">Newest file date</option><option value="fileDateAsc">Oldest file date</option><option value="titleAsc">Title A–Z</option><option value="titleDesc">Title Z–A</option><option value="durationDesc">Longest first</option><option value="durationAsc">Shortest first</option><option value="sizeDesc">Largest first</option><option value="sizeAsc">Smallest first</option></Select></label>
       </nav>
 
       {activePlaylist ? (
@@ -1118,7 +1148,7 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
       ) : facets.totalItems === 0 ? (
         <EmptyLibrary onAdd={() => { setManageOpen(true); openSourceForm(); }} />
       ) : isFiltered || selectionMode ? (
-        <><div id="library-results" className={`scroll-mt-24 transition-opacity ${queryLoading ? "opacity-55" : "opacity-100"}`} aria-busy={queryLoading}><MediaSection title={selectionMode ? "Select media" : search.trim() ? `Results for “${search.trim()}”` : mediaFilter === "video" ? "Videos" : mediaFilter === "image" ? "Images" : sourceNames.get(sourceFilter) || "All media"} subtitle={queryLoading ? "Updating results…" : queryResult.totalItems === 0 ? "No matching items" : selectionMode ? `${selectedIds.size} selected · showing ${resultStart + 1}–${resultEnd} of ${queryResult.totalItems}` : `Showing ${resultStart + 1}–${resultEnd} of ${queryResult.totalItems} matching item${queryResult.totalItems === 1 ? "" : "s"}`} items={items} sourceNames={sourceNames} onSelect={openDetails} selectionMode={selectionMode} selectedIds={selectedIds} onToggleSelection={toggleSelection} viewMode={viewMode} /></div><LibraryPagination currentPage={currentResultPage} pageCount={resultPageCount} totalItems={queryResult.totalItems} onPageChange={changeResultPage} /></>
+        <><div id="library-results" className={`scroll-mt-24 transition-opacity ${queryLoading ? "opacity-55" : "opacity-100"}`} aria-busy={queryLoading}><MediaSection title={selectionMode ? "Select media" : resultTitle} subtitle={queryLoading ? "Updating results…" : queryResult.totalItems === 0 ? "No matching items" : selectionMode ? `${selectedIds.size} selected · showing ${resultStart + 1}–${resultEnd} of ${queryResult.totalItems}` : `Showing ${resultStart + 1}–${resultEnd} of ${queryResult.totalItems} matching item${queryResult.totalItems === 1 ? "" : "s"}`} items={items} sourceNames={sourceNames} onSelect={openDetails} selectionMode={selectionMode} selectedIds={selectedIds} onToggleSelection={toggleSelection} viewMode={viewMode} /></div><LibraryPagination currentPage={currentResultPage} pageCount={resultPageCount} totalItems={queryResult.totalItems} onPageChange={changeResultPage} /></>
       ) : (
         <>
           <PlaylistShelf playlists={playlists} onOpen={(playlist) => void openPlaylist(playlist)} onChanged={setPlaylists} />
@@ -1134,7 +1164,7 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
 
 {selectionMode ? <BulkActionBar selectedIds={selectedIds} collections={collections} busy={busy} onMove={openBulkMove} onApply={applyBulkAction} onClose={closeSelectionMode} /> : null}
       {bulkMoveOpen ? <BulkMoveDialog selectedIds={selectedIds} onClose={closeBulkMove} onComplete={(result) => { applyBulkMoveResult(result); closeBulkMove(); }} /> : null}
-</div>{imageWorkspace}{active && selectedItem ? <div className="relative z-[80]"><MediaDetails item={selectedItem} sourceName={sourceLabel(selectedItem, sourceNames)} onClose={closeDetails} onWatch={openSelectedMedia} onChanged={updateItem} onWatchStateChanged={() => scheduleLibraryRefresh(0)} onRemoved={() => removeItem(selectedItem.id)} onOperation={applyFileOperationResult} /></div> : null}{watchWorkspace}</>
+</div>{imageWorkspace}{active && selectedItem ? <div className="relative z-[80]"><MediaDetails item={selectedItem} sourceName={sourceLabel(selectedItem, sourceNames)} onClose={closeDetails} onWatch={openSelectedMedia} onChanged={updateItem} onMetadataChanged={() => scheduleLibraryRefresh(0)} onBrowseCreator={(creator) => { closeDetails(false); resetFilters(); setCreatorFilter(creator); setResultPage(1); }} onBrowseSeries={(series) => { closeDetails(false); resetFilters(); setSeriesFilter(series); setResultPage(1); }} onBrowseSite={(site) => { closeDetails(false); resetFilters(); setSiteFilter(site); setResultPage(1); }} onRemoved={() => removeItem(selectedItem.id)} onOperation={applyFileOperationResult} /></div> : null}{watchWorkspace}</>
   );
 }
 
@@ -2024,13 +2054,24 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, onRestore, onC
   </section>{consent ? <div className="fixed inset-0 z-[90] grid place-items-center bg-black/75 p-5 backdrop-blur-sm" onMouseDown={dismissConsent}><section ref={consentDialogRef} className="panel-shadow w-full max-w-xl overflow-hidden rounded-[14px] border border-line bg-panel" role="dialog" aria-modal="true" aria-labelledby="compatibility-copy-title" aria-describedby="compatibility-copy-description" aria-busy={consentBusy} onKeyDown={trapConsentFocus} onMouseDown={(event) => event.stopPropagation()}><header className="flex items-start gap-4 border-b border-line/70 px-5 py-5"><div className="grid size-11 shrink-0 place-items-center rounded-[10px] border border-accent/20 bg-accent/10 text-accent"><Copy size={20} /></div><div><p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-accent">Embedded playback compatibility</p><h2 id="compatibility-copy-title" className="mt-1 text-xl font-semibold tracking-[-0.03em]">{consent.reencodeRequired ? "Create an H.264 playback copy?" : "Create a temporary playback copy?"}</h2><p id="compatibility-copy-description" className="mt-2 text-xs leading-5 text-muted">{consent.reason}</p></div></header><div className="space-y-4 px-5 py-5"><dl className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-5 gap-y-2.5 border-y border-line/60 py-4 text-xs"><dt className="text-muted">Estimated copy size</dt><dd className="number-font font-medium text-ink">{formatBytes(consent.estimatedCopyBytes)}</dd><dt className="text-muted">Free space available</dt><dd className="number-font font-medium text-ink">{consent.availableSpaceBytes != null ? formatBytes(consent.availableSpaceBytes) : "Unknown"}</dd><dt className="text-muted">Conversion</dt><dd className="font-medium text-ink">{consent.reencodeRequired ? "H.264/AAC · video re-encode" : "Stream-copy · no re-encoding"}</dd></dl>{consent.availableSpaceBytes != null && consent.estimatedCopyBytes > consent.availableSpaceBytes ? <p className="border-l-2 border-red-400/70 bg-red-400/5 px-3 py-2 text-xs leading-5 text-red-300" role="alert">There may not be enough free space to create this copy.</p> : null}{consent.unusuallyLarge ? <p className="border-l-2 border-amber-400/70 bg-amber-400/5 px-3 py-2 text-xs leading-5 text-amber-200">This is an unusually large copy, so Nice Downloader always asks before creating it—even when automatic copies are enabled.</p> : null}<div className="rounded-[9px] bg-elevated/55 p-3 text-[11px] leading-5 text-muted"><p><strong className="font-semibold text-ink">Your original stays untouched.</strong> The copy exists only in Nice Downloader’s private playback cache.</p><p className="mt-1">The oldest copies are removed automatically before the cache exceeds 4 files or 8 GiB. You can review or clear the cache in Settings.</p></div>{!consent.reencodeRequired && consent.preference === "never" ? <p className="text-[11px] leading-5 text-muted">Your saved preference is <strong className="text-ink">Never create automatically</strong>. “Create copy and play” is a one-time override unless you enable the option below.</p> : null}{!consent.reencodeRequired ? <label className="flex items-start gap-3 text-xs text-muted"><input className="mt-0.5" type="checkbox" checked={rememberAutomatic} onChange={(event) => setRememberAutomatic(event.target.checked)} /><span><strong className="block font-medium text-ink">Automatically create compatible copies in the future</strong>Large copies will still require confirmation.</span></label> : <p className="text-[11px] leading-5 text-muted">This fallback is never created automatically because it changes the cached copy’s video codec. The original file and its quality remain unchanged.</p>}{consentBusy && consent.reencodeRequired ? <p className="flex items-center gap-2 text-xs text-accent" role="status"><LoaderCircle className="animate-spin" size={14} /> Encoding the compatibility copy. Keep Nice Downloader open; this may take several minutes.</p> : null}</div><footer className="flex flex-wrap items-center justify-end gap-2 border-t border-line/70 bg-elevated/25 px-5 py-4"><Button data-consent-cancel variant="ghost" disabled={consentBusy} onClick={dismissConsent}>Cancel</Button><Button variant="secondary" disabled={consentBusy} onClick={() => void openOriginalFromConsent()}><ExternalLink size={15} /> Open original in system player</Button><Button disabled={consentBusy} onClick={() => void approveCompatibilityCopy()}>{consentBusy ? <LoaderCircle className="animate-spin" size={15} /> : <Copy size={15} />} {consentBusy && consent.reencodeRequired ? "Encoding…" : consent.reencodeRequired ? "Create H.264 copy and play" : "Create copy and play"}</Button></footer></section></div> : null}</>;
 }
 
-function MediaDetails({ item, sourceName, onClose, onWatch, onChanged, onRemoved, onOperation }: { item: LibraryItem; sourceName: string; onClose: () => void; onWatch: () => void; onChanged: (item: LibraryItem) => void; onWatchStateChanged?: () => void; onRemoved: () => void; onOperation: (result: LibraryFileOperationResult) => void }) {
+function MediaDetails({ item, sourceName, onClose, onWatch, onChanged, onMetadataChanged, onBrowseCreator, onBrowseSeries, onBrowseSite, onRemoved, onOperation }: { item: LibraryItem; sourceName: string; onClose: () => void; onWatch: () => void; onChanged: (item: LibraryItem) => void; onMetadataChanged: () => void; onBrowseCreator: (creator: string) => void; onBrowseSeries: (series: string) => void; onBrowseSite: (site: string) => void; onRemoved: () => void; onOperation: (result: LibraryFileOperationResult) => void }) {
   const setError = useAppStore((state) => state.setError);
   const setNotice = useAppStore((state) => state.setNotice);
   const [editing, setEditing] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [title, setTitle] = useState(item.title);
   const [tags, setTags] = useState(item.tags.join(", "));
+  const [richMetadata, setRichMetadata] = useState<LibraryRichMetadata | null>(null);
+  const [metadataEditing, setMetadataEditing] = useState(false);
+  const [metadataBusy, setMetadataBusy] = useState(false);
+  const [creator, setCreator] = useState("");
+  const [description, setDescription] = useState("");
+  const [uploadDate, setUploadDate] = useState("");
+  const [series, setSeries] = useState("");
+  const [episode, setEpisode] = useState("");
+  const [originalUrl, setOriginalUrl] = useState("");
+  const activeItemId = useRef(item.id);
+  activeItemId.current = item.id;
   const [organizeOpen, setOrganizeOpen] = useState(false);
   const [operationKind, setOperationKind] = useState<LibraryFileOperationKind>("rename");
   const [destinationDirectory, setDestinationDirectory] = useState("");
@@ -2053,7 +2094,93 @@ function MediaDetails({ item, sourceName, onClose, onWatch, onChanged, onRemoved
     setDestinationDirectory("");
     setNewFileName(fileNameFromPath(item.path));
     setOperationPlan(null);
+    setRichMetadata(null);
+    setMetadataEditing(false);
+    let disposed = false;
+    void api.getLibraryRichMetadata(item.id)
+      .then((metadata) => {
+        if (disposed) return;
+        setRichMetadata(metadata);
+        loadMetadataForm(metadata);
+      })
+      .catch((error) => { if (!disposed) setError(normalizeError(error)); });
+    return () => { disposed = true; };
   }, [item.id, item.path]);
+
+  function loadMetadataForm(metadata: LibraryRichMetadata) {
+    setCreator(metadata.effective.creator || "");
+    setDescription(metadata.effective.description || "");
+    setUploadDate(metadata.effective.uploadDate || "");
+    setSeries(metadata.effective.series || "");
+    setEpisode(metadata.effective.episode || "");
+    setOriginalUrl(metadata.effective.originalUrl || "");
+  }
+
+  async function saveRichMetadata() {
+    if (metadataBusy) return;
+    const requestedItemId = item.id;
+    setMetadataBusy(true);
+    try {
+      const metadata = await api.saveLibraryRichMetadata({
+        itemId: requestedItemId,
+        creator: creator || null,
+        description: description || null,
+        uploadDate: uploadDate || null,
+        series: series || null,
+        episode: episode || null,
+        originalUrl: originalUrl || null,
+      });
+      if (activeItemId.current !== requestedItemId) return;
+      setRichMetadata(metadata);
+      loadMetadataForm(metadata);
+      setMetadataEditing(false);
+      onMetadataChanged();
+      setNotice({ message: "Metadata overrides saved. The original media was not changed.", view: "library" });
+    } catch (error) {
+      setError(normalizeError(error));
+    } finally {
+      setMetadataBusy(false);
+    }
+  }
+
+  async function resetRichMetadata() {
+    if (metadataBusy) return;
+    const requestedItemId = item.id;
+    setMetadataBusy(true);
+    try {
+      const metadata = await api.resetLibraryRichMetadata(requestedItemId);
+      if (activeItemId.current !== requestedItemId) return;
+      setRichMetadata(metadata);
+      loadMetadataForm(metadata);
+      setMetadataEditing(false);
+      onMetadataChanged();
+      setNotice({ message: "Using extracted sidecar metadata again.", view: "library" });
+    } catch (error) {
+      setError(normalizeError(error));
+    } finally {
+      setMetadataBusy(false);
+    }
+  }
+
+  async function chooseArtwork() {
+    const selected = await open({ multiple: false, directory: false, title: "Choose library artwork", filters: [{ name: "Images", extensions: ["jpg", "jpeg", "png", "webp"] }] });
+    if (!selected) return;
+    try {
+      onChanged(await api.setLibraryArtwork({ itemId: item.id, path: selected }));
+      setNotice({ message: "Custom artwork selected. The source image was not modified.", view: "library" });
+    } catch (error) {
+      setError(normalizeError(error));
+    }
+  }
+
+  async function clearArtwork() {
+    try {
+      onChanged(await api.setLibraryArtwork({ itemId: item.id, path: null }));
+      setNotice({ message: "Custom artwork cleared. A generated preview will be used.", view: "library" });
+    } catch (error) {
+      setError(normalizeError(error));
+    }
+  }
 
   async function openItem() {
     try {
@@ -2144,7 +2271,12 @@ function MediaDetails({ item, sourceName, onClose, onWatch, onChanged, onRemoved
 
   return <aside className="fixed bottom-0 right-0 top-0 z-50 w-[min(500px,100vw)] overflow-y-auto border-l border-line/70 bg-panel/98 shadow-[-28px_0_80px_rgb(0_0_0/0.32)] backdrop-blur-xl" role="dialog" aria-modal="true" aria-label={`${item.title} details`} onKeyDown={trapFocus}><div className="sticky top-0 z-[1] flex items-center justify-between border-b border-line/60 bg-panel/90 px-5 py-4 backdrop-blur-xl"><div><p className="text-xs font-semibold">Media details</p><p className="mt-0.5 text-[10px] text-muted">Use ← → to browse · Esc to close</p></div><button ref={closeButtonRef} className="grid size-8 place-items-center rounded-[7px] text-muted transition hover:bg-elevated hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70" onClick={onClose} aria-label="Close media details"><X size={17} /></button></div><div className="p-5"><div className="aspect-video overflow-hidden rounded-[12px] bg-elevated"><MediaArtwork item={item} eager /></div>{editing ? <div className="mt-5 space-y-3"><Field label="Title"><Input value={title} onChange={(event) => setTitle(event.target.value)} /></Field><Field label="Tags"><Input value={tags} onChange={(event) => setTags(event.target.value)} placeholder="Comma-separated tags" /></Field><div className="flex gap-2"><Button onClick={() => void update()}>Save changes</Button><Button variant="secondary" onClick={() => setEditing(false)}>Cancel</Button></div></div> : <><h2 className="mt-5 text-[22px] font-semibold leading-[1.2] tracking-[-0.035em] text-balance">{item.title}</h2><p className="mt-2 text-xs text-muted">{sourceName}{item.durationSeconds != null ? ` · ${formatDuration(item.durationSeconds)}` : ""}</p><div className="mt-5 flex flex-wrap gap-2">{item.mediaKind === "video" ? <Button className="flex-1" disabled={item.missing} onClick={onWatch}><Play size={16} fill="currentColor" /> Watch here</Button> : <Button className="flex-1" disabled={item.missing} onClick={onWatch}><FileImage size={16} /> View image</Button>}<Button variant="secondary" disabled={item.missing} onClick={() => void openItem()}><ExternalLink size={15} /> {item.mediaKind === "image" ? "System viewer" : "System player"}</Button><Button variant="secondary" onClick={() => setEditing(true)}>Edit</Button></div></>}
       <div className="mt-4 flex items-center gap-2"><Button variant="secondary" className={item.favorite ? "text-rose-300" : ""} onClick={() => void updateCuration(!item.favorite, item.rating)}><Heart size={15} fill={item.favorite ? "currentColor" : "none"} /> {item.favorite ? "Favorited" : "Favorite"}</Button><label className="flex flex-1 items-center gap-2 text-xs text-muted"><Star size={15} /><span className="sr-only">Rating</span><Select className="h-10" value={item.rating ?? ""} onChange={(event) => void updateCuration(item.favorite, event.target.value ? Number(event.target.value) : null)}><option value="">Not rated</option>{[5, 4, 3, 2, 1].map((rating) => <option key={rating} value={rating}>{rating} star{rating === 1 ? "" : "s"}</option>)}</Select></label></div>
-      <dl className="mt-7 grid grid-cols-[110px_1fr] gap-x-4 gap-y-3 border-t border-line/60 pt-5 text-xs"><dt className="text-muted">Type</dt><dd>{item.mediaKind === "image" ? "Image" : "Video"}{item.container ? ` · ${item.container.toLocaleUpperCase()}` : ""}</dd>{item.width && item.height ? <><dt className="text-muted">Dimensions</dt><dd className="number-font">{item.width} × {item.height}{item.fps ? ` · ${formatFps(item.fps)} fps` : ""}{item.dynamicRange ? ` · ${item.dynamicRange}` : ""}</dd></> : null}{item.videoCodec || item.audioCodec ? <><dt className="text-muted">Codecs</dt><dd>{[formatCodec(item.videoCodec), formatCodec(item.audioCodec)].filter(Boolean).join(" + ")}</dd></> : null}{item.fileSizeBytes != null ? <><dt className="text-muted">File size</dt><dd className="number-font">{formatBytes(item.fileSizeBytes)}</dd></> : null}<dt className="text-muted">Added</dt><dd>{new Date(item.addedAt).toLocaleString()}</dd>{item.modifiedAtMs ? <><dt className="text-muted">Modified</dt><dd>{new Date(item.modifiedAtMs).toLocaleString()}</dd></> : null}<dt className="text-muted">Location</dt><dd className="break-all text-muted" title={item.path}>{item.relativePath || item.path}</dd>{item.site ? <><dt className="text-muted">Origin</dt><dd>{item.site}</dd></> : null}</dl>
+      <section className="mt-7 border-t border-line/60 pt-5" aria-labelledby="rich-metadata-title">
+        <div className="flex items-start justify-between gap-3"><div><h3 id="rich-metadata-title" className="text-sm font-semibold">Media information</h3><p className="mt-1 text-[11px] leading-5 text-muted">Imported from yt-dlp sidecars. Your edits stay in Nice Downloader and survive rescans.</p></div><Button variant="ghost" className="h-8 text-xs" disabled={!richMetadata || metadataBusy} onClick={() => { if (richMetadata) loadMetadataForm(richMetadata); setMetadataEditing((value) => !value); }}>{metadataEditing ? "Cancel" : "Edit metadata"}</Button></div>
+        {metadataEditing ? <div className="mt-4 space-y-3"><Field label="Creator or channel"><Input value={creator} maxLength={200} onChange={(event) => setCreator(event.target.value)} /></Field><Field label="Description"><Textarea className="min-h-28" value={description} maxLength={10000} onChange={(event) => setDescription(event.target.value)} /></Field><div className="grid gap-3 sm:grid-cols-2"><Field label="Upload date"><Input type="date" value={uploadDate} onChange={(event) => setUploadDate(event.target.value)} /></Field><Field label="Series"><Input value={series} maxLength={200} onChange={(event) => setSeries(event.target.value)} /></Field><Field label="Episode"><Input value={episode} maxLength={200} onChange={(event) => setEpisode(event.target.value)} /></Field><Field label="Original URL"><Input type="url" value={originalUrl} maxLength={2000} onChange={(event) => setOriginalUrl(event.target.value)} /></Field></div><div className="flex flex-wrap gap-2"><Button disabled={metadataBusy} onClick={() => void saveRichMetadata()}>{metadataBusy ? <LoaderCircle className="animate-spin" size={14} /> : <Save size={14} />} Save metadata</Button>{richMetadata && richMetadata.overriddenFields.length > 0 ? <Button variant="secondary" disabled={metadataBusy} onClick={() => void resetRichMetadata()}><RotateCcw size={14} /> Use extracted values</Button> : null}</div></div> : richMetadata ? <div className="mt-4"><dl className="grid grid-cols-[92px_1fr] gap-x-3 gap-y-2 text-xs">{richMetadata.effective.creator ? <><dt className="text-muted">Creator</dt><dd><button className="font-medium text-accent hover:underline" onClick={() => onBrowseCreator(richMetadata.effective.creator!)}>{richMetadata.effective.creator}</button></dd></> : null}{richMetadata.effective.uploadDate ? <><dt className="text-muted">Published</dt><dd>{new Date(`${richMetadata.effective.uploadDate}T00:00:00`).toLocaleDateString()}</dd></> : null}{richMetadata.effective.series ? <><dt className="text-muted">Series</dt><dd><button className="font-medium text-accent hover:underline" onClick={() => onBrowseSeries(richMetadata.effective.series!)}>{richMetadata.effective.series}</button>{richMetadata.effective.episode ? ` · ${richMetadata.effective.episode}` : ""}</dd></> : richMetadata.effective.episode ? <><dt className="text-muted">Episode</dt><dd>{richMetadata.effective.episode}</dd></> : null}{richMetadata.effective.originalUrl ? <><dt className="text-muted">Original</dt><dd className="break-all text-muted" title={richMetadata.effective.originalUrl}>{richMetadata.effective.originalUrl}</dd></> : null}</dl>{richMetadata.effective.description ? <p className="mt-4 whitespace-pre-wrap text-xs leading-5 text-muted">{richMetadata.effective.description}</p> : null}{richMetadata.overriddenFields.length > 0 ? <p className="mt-3 text-[10px] text-accent">User overrides: {richMetadata.overriddenFields.join(", ")}</p> : <p className="mt-3 text-[10px] text-muted">Extracted metadata · no user overrides</p>}</div> : <p className="mt-4 flex items-center gap-2 text-xs text-muted" role="status"><LoaderCircle className="animate-spin" size={13} /> Loading metadata…</p>}
+        <div className="mt-5 flex flex-wrap gap-2 border-t border-line/50 pt-4"><Button variant="secondary" className="h-8 text-xs" onClick={() => void chooseArtwork()}><ImageIcon size={13} /> Choose artwork</Button>{item.thumbnail ? <Button variant="ghost" className="h-8 text-xs" onClick={() => void clearArtwork()}><RotateCcw size={13} /> Use generated artwork</Button> : null}</div>
+      </section>
+      <dl className="mt-7 grid grid-cols-[110px_1fr] gap-x-4 gap-y-3 border-t border-line/60 pt-5 text-xs"><dt className="text-muted">Type</dt><dd>{item.mediaKind === "image" ? "Image" : "Video"}{item.container ? ` · ${item.container.toLocaleUpperCase()}` : ""}</dd>{item.width && item.height ? <><dt className="text-muted">Dimensions</dt><dd className="number-font">{item.width} × {item.height}{item.fps ? ` · ${formatFps(item.fps)} fps` : ""}{item.dynamicRange ? ` · ${item.dynamicRange}` : ""}</dd></> : null}{item.videoCodec || item.audioCodec ? <><dt className="text-muted">Codecs</dt><dd>{[formatCodec(item.videoCodec), formatCodec(item.audioCodec)].filter(Boolean).join(" + ")}</dd></> : null}{item.fileSizeBytes != null ? <><dt className="text-muted">File size</dt><dd className="number-font">{formatBytes(item.fileSizeBytes)}</dd></> : null}<dt className="text-muted">Added</dt><dd>{new Date(item.addedAt).toLocaleString()}</dd>{item.modifiedAtMs ? <><dt className="text-muted">Modified</dt><dd>{new Date(item.modifiedAtMs).toLocaleString()}</dd></> : null}<dt className="text-muted">Location</dt><dd className="break-all text-muted" title={item.path}>{item.relativePath || item.path}</dd>{item.site ? <><dt className="text-muted">Origin</dt><dd><button className="font-medium text-accent hover:underline" onClick={() => onBrowseSite(item.site!)}>{item.site}</button></dd></> : null}</dl>
       {item.metadataState === "pending" ? <p className="mt-5 flex items-center gap-2 text-[11px] text-muted" role="status"><LoaderCircle className="animate-spin text-accent" size={13} /> Inspecting resolution, codecs, and duration…</p> : null}
       {item.metadataError ? <details className="mt-5 border-l-2 border-amber-400/50 pl-3 text-[11px] text-muted"><summary className="cursor-pointer font-medium text-amber-300">Media inspection unavailable</summary><p className="mt-2 leading-5">{item.metadataError}</p></details> : null}
       {item.tags.length > 0 ? <div className="mt-6 flex flex-wrap gap-1.5">{item.tags.map((tag) => <span key={tag} className="rounded-[6px] bg-elevated px-2 py-1 text-[10px] text-muted">#{tag}</span>)}</div> : null}

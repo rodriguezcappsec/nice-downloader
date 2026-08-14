@@ -6,12 +6,13 @@ use crate::{
         LibraryBulkAction, LibraryChange, LibraryChangeKind, LibraryCollection,
         LibraryFacetRequest, LibraryFacets, LibraryFileIdentity, LibraryFileOperation,
         LibraryFileOperationKind, LibraryFileOperationState, LibraryFolderFacet,
-        LibraryFolderScope, LibraryItem, LibraryMediaKind, LibraryMetadataState,
-        LibraryPlaybackEntry, LibraryPlaybackState, LibraryPlaylist, LibraryProbeResult,
-        LibraryQueryRequest, LibraryQueryResult, LibraryScanJob, LibraryScanState, LibrarySort,
-        LibrarySource, LibrarySourceStatus, LibraryWatchState, Preset, PresetIntent, QueueSettings,
-        SaveAuthenticationProfileRequest, SaveLibraryCollectionRequest, SaveLibraryPlaybackRequest,
-        SaveLibraryPlaylistRequest, SaveLibrarySourceRequest, SavePresetRequest,
+        LibraryFolderScope, LibraryItem, LibraryMediaKind, LibraryMetadataFields,
+        LibraryMetadataState, LibraryPlaybackEntry, LibraryPlaybackState, LibraryPlaylist,
+        LibraryProbeResult, LibraryQueryRequest, LibraryQueryResult, LibraryRichMetadata,
+        LibraryScanJob, LibraryScanState, LibrarySort, LibrarySource, LibrarySourceStatus,
+        LibraryWatchState, Preset, PresetIntent, QueueSettings, SaveAuthenticationProfileRequest,
+        SaveLibraryCollectionRequest, SaveLibraryPlaybackRequest, SaveLibraryPlaylistRequest,
+        SaveLibraryRichMetadataRequest, SaveLibrarySourceRequest, SavePresetRequest,
         SaveSitePresetRuleRequest, SaveSubscriptionRequest, SitePresetRule, StartDownloadRequest,
         Subscription, TransformationOperation, TransformationState, TransformationTask,
         UpdateLibraryItemRequest,
@@ -47,6 +48,7 @@ const MIGRATION_0014: &str = include_str!("migrations/0014_library_file_operatio
 const MIGRATION_0015: &str = include_str!("migrations/0015_library_playback.sql");
 const MIGRATION_0016: &str = include_str!("migrations/0016_library_watch_later.sql");
 const MIGRATION_0017: &str = include_str!("migrations/0017_library_playlists.sql");
+const MIGRATION_0018: &str = include_str!("migrations/0018_library_rich_metadata.sql");
 const ENGINE_PREFERENCES_KEY: &str = "engine.preferences";
 const QUEUE_SETTINGS_KEY: &str = "queue.settings";
 const DESKTOP_PREFERENCES_KEY: &str = "desktop.preferences";
@@ -97,6 +99,7 @@ impl Database {
             (15, MIGRATION_0015),
             (16, MIGRATION_0016),
             (17, MIGRATION_0017),
+            (18, MIGRATION_0018),
         ] {
             let migrated: bool = transaction.query_row(
                 "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = ?1)",
@@ -1120,7 +1123,7 @@ impl Database {
              ON CONFLICT(path) DO UPDATE SET
                 title = excluded.title,
                 source_url = COALESCE(excluded.source_url, media_library.source_url),
-                thumbnail = COALESCE(excluded.thumbnail, media_library.thumbnail),
+                thumbnail = COALESCE(media_library.thumbnail, excluded.thumbnail),
                 duration_seconds = COALESCE(excluded.duration_seconds, media_library.duration_seconds),
                 site = COALESCE(excluded.site, media_library.site),
                 tags_json = excluded.tags_json,
@@ -1148,6 +1151,7 @@ impl Database {
         let mut stored = item.clone();
         stored.id.clone_from(&item_id);
         save_library_metadata(&connection, &stored)?;
+        save_extracted_library_metadata(&connection, &item_id, &item.metadata)?;
         drop(connection);
         self.get_library_item(&item_id)
     }
@@ -1167,7 +1171,7 @@ impl Database {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
              ON CONFLICT(path) DO UPDATE SET
                 source_url = COALESCE(excluded.source_url, media_library.source_url),
-                thumbnail = COALESCE(excluded.thumbnail, media_library.thumbnail),
+                thumbnail = COALESCE(media_library.thumbnail, excluded.thumbnail),
                 duration_seconds = COALESCE(excluded.duration_seconds, media_library.duration_seconds),
                 site = COALESCE(excluded.site, media_library.site),
                 metadata_json = excluded.metadata_json,
@@ -1243,6 +1247,7 @@ impl Database {
                 Utc::now().timestamp_millis(),
             ],
         )?;
+        save_extracted_library_metadata(&connection, &item_id, &item.metadata)?;
         drop(connection);
         self.get_library_item(&item_id)
     }
@@ -1317,7 +1322,13 @@ impl Database {
             AppError::new("database_unavailable", "The media library is unavailable.")
         })?;
         let total_items: i64 = connection.query_row(
-            &format!("SELECT COUNT(*) FROM media_library LEFT JOIN library_media_metadata ON item_id = media_library.id {where_clause}"),
+            &format!(
+                "SELECT COUNT(*)
+                 FROM media_library
+                 LEFT JOIN library_media_metadata ON library_media_metadata.item_id = media_library.id
+                 LEFT JOIN library_rich_metadata rich ON rich.item_id = media_library.id
+                 {where_clause}"
+            ),
             params_from_iter(parameters.iter()),
             |row| row.get(0),
         )?;
@@ -1340,7 +1351,8 @@ impl Database {
                     video_codec, audio_codec, container, dynamic_range,
                     COALESCE(state, 'pending'), error, favorite, rating
              FROM media_library
-             LEFT JOIN library_media_metadata ON item_id = media_library.id
+             LEFT JOIN library_media_metadata ON library_media_metadata.item_id = media_library.id
+             LEFT JOIN library_rich_metadata rich ON rich.item_id = media_library.id
              {where_clause}
              ORDER BY {order_by}
              LIMIT ?{} OFFSET ?{}",
@@ -1370,6 +1382,11 @@ impl Database {
         let connection = self.connection.lock().map_err(|_| {
             AppError::new("database_unavailable", "The media library is unavailable.")
         })?;
+        let source_condition = if request.source_id.is_some() {
+            " AND media_library.source_id = ?1"
+        } else {
+            ""
+        };
         let (total_items, available_items, missing_items): (i64, i64, i64) = connection.query_row(
             "SELECT COUNT(*),
                         COALESCE(SUM(CASE WHEN missing = 0 THEN 1 ELSE 0 END), 0),
@@ -1388,28 +1405,97 @@ impl Database {
                 "SELECT DISTINCT container
                  FROM library_media_metadata
                  JOIN media_library ON media_library.id = item_id
-                 WHERE container IS NOT NULL AND container != ''{availability_condition}
+                 WHERE container IS NOT NULL AND container != ''{availability_condition}{source_condition}
                  ORDER BY container COLLATE NOCASE"
             ))?;
             let values = statement
-                .query_map([], |row| row.get(0))?
+                .query_map(params_from_iter(request.source_id.iter()), |row| row.get(0))?
                 .collect::<Result<Vec<String>, _>>()?;
             values
         };
         let tags = {
-            let tag_where = match request.availability {
+            let availability_condition = match request.availability {
                 LibraryAvailabilityFilter::All => "",
-                LibraryAvailabilityFilter::Available => "WHERE media_library.missing = 0",
-                LibraryAvailabilityFilter::Missing => "WHERE media_library.missing = 1",
+                LibraryAvailabilityFilter::Available => " AND media_library.missing = 0",
+                LibraryAvailabilityFilter::Missing => " AND media_library.missing = 1",
             };
             let mut statement = connection.prepare(&format!(
                 "SELECT DISTINCT json_each.value
                  FROM media_library, json_each(media_library.tags_json)
-                 {tag_where}
+                 WHERE 1 = 1{availability_condition}{source_condition}
                  ORDER BY json_each.value COLLATE NOCASE"
             ))?;
             let values = statement
-                .query_map([], |row| row.get(0))?
+                .query_map(params_from_iter(request.source_id.iter()), |row| row.get(0))?
+                .collect::<Result<Vec<String>, _>>()?;
+            values
+        };
+        let creators = {
+            let availability_condition = match request.availability {
+                LibraryAvailabilityFilter::All => "",
+                LibraryAvailabilityFilter::Available => " AND media_library.missing = 0",
+                LibraryAvailabilityFilter::Missing => " AND media_library.missing = 1",
+            };
+            let mut statement = connection.prepare(&format!(
+                "SELECT DISTINCT COALESCE(
+                    NULLIF(json_extract(rich.overrides_json, '$.creator'), ''),
+                    json_extract(rich.extracted_json, '$.creator')
+                 ) AS creator
+                 FROM library_rich_metadata rich
+                 JOIN media_library ON media_library.id = rich.item_id
+                 WHERE creator IS NOT NULL AND creator != '' {availability_condition}{source_condition}
+                 ORDER BY creator COLLATE NOCASE
+                 LIMIT 200"
+            ))?;
+            let values = statement
+                .query_map(params_from_iter(request.source_id.iter()), |row| row.get(0))?
+                .collect::<Result<Vec<String>, _>>()?;
+            values
+        };
+        let series = {
+            let availability_condition = match request.availability {
+                LibraryAvailabilityFilter::All => "",
+                LibraryAvailabilityFilter::Available => " AND media_library.missing = 0",
+                LibraryAvailabilityFilter::Missing => " AND media_library.missing = 1",
+            };
+            let mut statement = connection.prepare(&format!(
+                "SELECT DISTINCT COALESCE(
+                    NULLIF(json_extract(rich.overrides_json, '$.series'), ''),
+                    json_extract(rich.extracted_json, '$.series')
+                 ) AS series_name
+                 FROM library_rich_metadata rich
+                 JOIN media_library ON media_library.id = rich.item_id
+                 WHERE COALESCE(
+                    NULLIF(json_extract(rich.overrides_json, '$.series'), ''),
+                    json_extract(rich.extracted_json, '$.series')
+                 ) IS NOT NULL
+                   AND COALESCE(
+                    NULLIF(json_extract(rich.overrides_json, '$.series'), ''),
+                    json_extract(rich.extracted_json, '$.series')
+                 ) != '' {availability_condition}{source_condition}
+                 ORDER BY series_name COLLATE NOCASE
+                 LIMIT 200"
+            ))?;
+            let values = statement
+                .query_map(params_from_iter(request.source_id.iter()), |row| row.get(0))?
+                .collect::<Result<Vec<String>, _>>()?;
+            values
+        };
+        let sites = {
+            let availability_condition = match request.availability {
+                LibraryAvailabilityFilter::All => "",
+                LibraryAvailabilityFilter::Available => " AND missing = 0",
+                LibraryAvailabilityFilter::Missing => " AND missing = 1",
+            };
+            let mut statement = connection.prepare(&format!(
+                "SELECT DISTINCT site
+                 FROM media_library
+                 WHERE site IS NOT NULL AND site != '' {availability_condition}{source_condition}
+                 ORDER BY site COLLATE NOCASE
+                 LIMIT 200"
+            ))?;
+            let values = statement
+                .query_map(params_from_iter(request.source_id.iter()), |row| row.get(0))?
                 .collect::<Result<Vec<String>, _>>()?;
             values
         };
@@ -1423,9 +1509,9 @@ impl Database {
             LibraryAvailabilityFilter::Available => folder_sql.push_str(" AND missing = 0"),
             LibraryAvailabilityFilter::Missing => folder_sql.push_str(" AND missing = 1"),
         }
-        if let Some(source_id) = request.source_id {
+        if let Some(source_id) = request.source_id.as_deref() {
             folder_sql.push_str(" AND source_id = ?1");
-            folder_parameters.push(SqlValue::Text(source_id));
+            folder_parameters.push(SqlValue::Text(source_id.to_owned()));
         }
         let mut statement = connection.prepare(&folder_sql)?;
         let rows = statement.query_map(params_from_iter(folder_parameters.iter()), |row| {
@@ -1475,6 +1561,9 @@ impl Database {
             missing_items: usize::try_from(missing_items).unwrap_or(usize::MAX),
             containers,
             tags,
+            creators,
+            series,
+            sites,
             folders,
         })
     }
@@ -1992,6 +2081,183 @@ impl Database {
         }
         drop(connection);
         self.get_library_item(&request.id)
+    }
+
+    pub fn get_library_rich_metadata(
+        &self,
+        item_id: &str,
+    ) -> Result<LibraryRichMetadata, AppError> {
+        validate_uuid(item_id, "library item")?;
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "The media library is unavailable.")
+        })?;
+        let record = connection
+            .query_row(
+                "SELECT extracted_json, overrides_json, updated_at
+                 FROM library_rich_metadata WHERE item_id = ?1",
+                [item_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        if let Some((extracted_json, overrides_json, updated_at)) = record {
+            return rich_metadata_from_json(item_id, &extracted_json, &overrides_json, updated_at);
+        }
+        let metadata_json: Option<String> = connection
+            .query_row(
+                "SELECT metadata_json FROM media_library WHERE id = ?1",
+                [item_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let metadata_json = metadata_json.ok_or_else(|| {
+            AppError::new("library_item_not_found", "The library item was not found.")
+        })?;
+        let metadata = serde_json::from_str(&metadata_json).unwrap_or_default();
+        let extracted = metadata_fields_from_value(&metadata);
+        rich_metadata_from_fields(
+            item_id,
+            extracted,
+            LibraryMetadataFields::default(),
+            Utc::now().timestamp_millis(),
+        )
+    }
+
+    pub fn list_library_rich_metadata_for_backup(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<LibraryRichMetadata>, AppError> {
+        if !(1..=100_001).contains(&limit) {
+            return Err(AppError::new(
+                "invalid_library_backup_limit",
+                "The rich metadata backup limit is invalid.",
+            ));
+        }
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "The media library is unavailable.")
+        })?;
+        let mut statement = connection.prepare(
+            "SELECT item_id, extracted_json, overrides_json, updated_at
+             FROM library_rich_metadata ORDER BY item_id LIMIT ?1",
+        )?;
+        let rows = statement.query_map([i64::try_from(limit).unwrap_or(i64::MAX)], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let (item_id, extracted, overrides, updated_at) = row?;
+            rich_metadata_from_json(&item_id, &extracted, &overrides, updated_at)
+        })
+        .collect()
+    }
+
+    pub fn save_library_rich_metadata(
+        &self,
+        request: SaveLibraryRichMetadataRequest,
+    ) -> Result<LibraryRichMetadata, AppError> {
+        validate_uuid(&request.item_id, "library item")?;
+        let mut overrides = validate_library_metadata_fields(LibraryMetadataFields {
+            creator: request.creator,
+            description: request.description,
+            upload_date: request.upload_date,
+            series: request.series,
+            episode: request.episode,
+            original_url: request.original_url,
+        })?;
+        let now = Utc::now().timestamp_millis();
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "The media library is unavailable.")
+        })?;
+        if !connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM media_library WHERE id = ?1)",
+            [&request.item_id],
+            |row| row.get(0),
+        )? {
+            return Err(AppError::new(
+                "library_item_not_found",
+                "The library item was not found.",
+            ));
+        }
+        let extracted_json: Option<String> = connection
+            .query_row(
+                "SELECT extracted_json FROM library_rich_metadata WHERE item_id = ?1",
+                [&request.item_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let extracted = extracted_json
+            .as_deref()
+            .and_then(|value| serde_json::from_str::<LibraryMetadataFields>(value).ok())
+            .unwrap_or_default();
+        clear_matching_metadata_overrides(&mut overrides, &extracted);
+        let overrides_json = serde_json::to_string(&overrides)
+            .map_err(|error| AppError::internal("could not serialize metadata overrides", error))?;
+        connection.execute(
+            "INSERT INTO library_rich_metadata (item_id, extracted_json, overrides_json, updated_at)
+             VALUES (?1, '{}', ?2, ?3)
+             ON CONFLICT(item_id) DO UPDATE SET
+                overrides_json = excluded.overrides_json,
+                updated_at = excluded.updated_at",
+            params![request.item_id, overrides_json, now],
+        )?;
+        drop(connection);
+        self.get_library_rich_metadata(&request.item_id)
+    }
+
+    pub fn reset_library_rich_metadata(
+        &self,
+        item_id: &str,
+    ) -> Result<LibraryRichMetadata, AppError> {
+        validate_uuid(item_id, "library item")?;
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "The media library is unavailable.")
+        })?;
+        if connection.execute(
+            "UPDATE library_rich_metadata SET overrides_json = '{}', updated_at = ?2
+             WHERE item_id = ?1",
+            params![item_id, Utc::now().timestamp_millis()],
+        )? == 0
+        {
+            drop(connection);
+            return self.get_library_rich_metadata(item_id);
+        }
+        drop(connection);
+        self.get_library_rich_metadata(item_id)
+    }
+
+    pub fn set_library_artwork(
+        &self,
+        item_id: &str,
+        path: Option<String>,
+    ) -> Result<LibraryItem, AppError> {
+        validate_uuid(item_id, "library item")?;
+        let path = path
+            .map(|value| validate_library_artwork_path(&value))
+            .transpose()?;
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "The media library is unavailable.")
+        })?;
+        if connection.execute(
+            "UPDATE media_library SET thumbnail = ?2, updated_at = ?3 WHERE id = ?1",
+            params![item_id, path, Utc::now().timestamp_millis()],
+        )? == 0
+        {
+            return Err(AppError::new(
+                "library_item_not_found",
+                "The library item was not found.",
+            ));
+        }
+        drop(connection);
+        self.get_library_item(item_id)
     }
 
     pub fn list_library_collections(&self) -> Result<Vec<LibraryCollection>, AppError> {
@@ -3317,6 +3583,12 @@ fn library_order_by(sort: LibrarySort) -> &'static str {
         LibrarySort::FileDateAsc => {
             "modified_at_ms IS NULL ASC, modified_at_ms ASC, added_at DESC, media_library.id DESC"
         }
+        LibrarySort::PublishedDesc => {
+            "COALESCE(NULLIF(json_extract(rich.overrides_json, '$.uploadDate'), ''), json_extract(rich.extracted_json, '$.uploadDate')) IS NULL ASC, COALESCE(NULLIF(json_extract(rich.overrides_json, '$.uploadDate'), ''), json_extract(rich.extracted_json, '$.uploadDate')) DESC, added_at DESC, media_library.id DESC"
+        }
+        LibrarySort::PublishedAsc => {
+            "COALESCE(NULLIF(json_extract(rich.overrides_json, '$.uploadDate'), ''), json_extract(rich.extracted_json, '$.uploadDate')) IS NULL ASC, COALESCE(NULLIF(json_extract(rich.overrides_json, '$.uploadDate'), ''), json_extract(rich.extracted_json, '$.uploadDate')) ASC, added_at DESC, media_library.id DESC"
+        }
     }
 }
 
@@ -3343,7 +3615,12 @@ fn build_library_query(request: &LibraryQueryRequest) -> Result<(String, Vec<Sql
                 escape_sql_like(&search.to_lowercase())
             )));
             clauses.push(format!(
-                "LOWER(COALESCE(title, '') || ' ' || COALESCE(site, '') || ' ' || path || ' ' || tags_json || ' ' || COALESCE(container, '') || ' ' || COALESCE(video_codec, '') || ' ' || COALESCE(audio_codec, '')) LIKE {placeholder} ESCAPE '\\'"
+                "(LOWER(COALESCE(title, '') || ' ' || COALESCE(site, '') || ' ' || path || ' ' || tags_json || ' ' || COALESCE(container, '') || ' ' || COALESCE(video_codec, '') || ' ' || COALESCE(audio_codec, '')) LIKE {placeholder} ESCAPE '\\'
+                 OR EXISTS (
+                    SELECT 1 FROM library_rich_metadata rich
+                    WHERE rich.item_id = media_library.id
+                      AND LOWER(COALESCE(rich.extracted_json, '') || ' ' || COALESCE(rich.overrides_json, '')) LIKE {placeholder} ESCAPE '\\'
+                 ))"
             ));
         }
     }
@@ -3447,6 +3724,28 @@ fn build_library_query(request: &LibraryQueryRequest) -> Result<(String, Vec<Sql
         clauses.push(format!("added_at >= {placeholder}"));
     }
 
+    if let Some(date_published) = request.date_published.as_deref() {
+        let days = match date_published {
+            "week" => 7,
+            "month" => 31,
+            "year" => 366,
+            _ => return Err(invalid_library_filter("published date")),
+        };
+        let cutoff = Utc::now()
+            .checked_sub_signed(Duration::days(days))
+            .unwrap_or(DateTime::<Utc>::UNIX_EPOCH)
+            .date_naive()
+            .format("%Y-%m-%d")
+            .to_string();
+        let placeholder = bind(SqlValue::Text(cutoff));
+        clauses.push(format!(
+            "COALESCE(
+                NULLIF(json_extract(rich.overrides_json, '$.uploadDate'), ''),
+                json_extract(rich.extracted_json, '$.uploadDate')
+             ) >= {placeholder}"
+        ));
+    }
+
     match request.availability {
         LibraryAvailabilityFilter::All => {}
         LibraryAvailabilityFilter::Available => clauses.push("missing = 0".to_owned()),
@@ -3459,6 +3758,37 @@ fn build_library_query(request: &LibraryQueryRequest) -> Result<(String, Vec<Sql
         clauses.push(format!(
             "EXISTS (SELECT 1 FROM json_each(media_library.tags_json) WHERE json_each.value = {placeholder} COLLATE NOCASE)"
         ));
+    }
+    if let Some(creator) = request.creator.as_deref() {
+        let creator = validate_library_filter_text(creator, "creator", 200)?;
+        let placeholder = bind(SqlValue::Text(creator));
+        clauses.push(format!(
+            "EXISTS (
+                SELECT 1 FROM library_rich_metadata rich
+                WHERE rich.item_id = media_library.id
+                  AND COALESCE(
+                    NULLIF(json_extract(rich.overrides_json, '$.creator'), ''),
+                    json_extract(rich.extracted_json, '$.creator')
+                  ) = {placeholder} COLLATE NOCASE
+            )"
+        ));
+    }
+
+    if let Some(series) = request.series.as_deref() {
+        let series = validate_library_filter_text(series, "series", 200)?;
+        let placeholder = bind(SqlValue::Text(series));
+        clauses.push(format!(
+            "COALESCE(
+                NULLIF(json_extract(rich.overrides_json, '$.series'), ''),
+                json_extract(rich.extracted_json, '$.series')
+             ) = {placeholder} COLLATE NOCASE"
+        ));
+    }
+
+    if let Some(site) = request.site.as_deref() {
+        let site = validate_library_filter_text(site, "site", 200)?;
+        let placeholder = bind(SqlValue::Text(site));
+        clauses.push(format!("media_library.site = {placeholder} COLLATE NOCASE"));
     }
 
     if let Some(rating) = request.rating.as_deref() {
@@ -3652,6 +3982,297 @@ fn normalize_library_tags(tags: Vec<String>) -> Result<Vec<String>, AppError> {
     }
     normalized.truncate(20);
     Ok(normalized)
+}
+
+pub(crate) fn validate_library_metadata_fields(
+    mut fields: LibraryMetadataFields,
+) -> Result<LibraryMetadataFields, AppError> {
+    fields.creator = normalize_metadata_text(fields.creator, "creator", 200)?;
+    fields.description = normalize_metadata_description(fields.description)?;
+    fields.series = normalize_metadata_text(fields.series, "series", 200)?;
+    fields.episode = normalize_metadata_text(fields.episode, "episode", 200)?;
+    fields.upload_date = fields
+        .upload_date
+        .map(|value| normalize_upload_date(&value))
+        .transpose()?;
+    fields.original_url = normalize_original_url(fields.original_url)?;
+    Ok(fields)
+}
+
+fn normalize_metadata_text(
+    value: Option<String>,
+    label: &str,
+    max_chars: usize,
+) -> Result<Option<String>, AppError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let value = value.trim().to_owned();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if value.chars().count() > max_chars || value.chars().any(char::is_control) {
+        return Err(AppError::new(
+            "invalid_library_metadata",
+            format!("The {label} contains unsupported text or is too long."),
+        ));
+    }
+    Ok(Some(value))
+}
+
+fn normalize_metadata_description(value: Option<String>) -> Result<Option<String>, AppError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let value = value.trim().replace("\r\n", "\n").replace('\r', "\n");
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if value.chars().count() > 10_000
+        || value
+            .chars()
+            .any(|character| character.is_control() && !matches!(character, '\n' | '\t'))
+    {
+        return Err(AppError::new(
+            "invalid_library_metadata",
+            "The description contains unsupported text or is too long.",
+        ));
+    }
+    Ok(Some(value))
+}
+
+fn normalize_upload_date(value: &str) -> Result<String, AppError> {
+    let value = value.trim();
+    let normalized = if value.len() == 8 && value.bytes().all(|byte| byte.is_ascii_digit()) {
+        format!("{}-{}-{}", &value[..4], &value[4..6], &value[6..8])
+    } else {
+        value.to_owned()
+    };
+    chrono::NaiveDate::parse_from_str(&normalized, "%Y-%m-%d").map_err(|_| {
+        AppError::new(
+            "invalid_library_metadata",
+            "The upload date must use YYYY-MM-DD.",
+        )
+    })?;
+    Ok(normalized)
+}
+
+fn normalize_original_url(value: Option<String>) -> Result<Option<String>, AppError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let value = value.trim().to_owned();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if value.chars().count() > 2_000 || value.chars().any(char::is_control) {
+        return Err(AppError::new(
+            "invalid_library_metadata",
+            "The original URL must be a valid HTTP or HTTPS URL.",
+        ));
+    }
+    let parsed = url::Url::parse(&value).map_err(|_| {
+        AppError::new(
+            "invalid_library_metadata",
+            "The original URL must be a valid HTTP or HTTPS URL.",
+        )
+    })?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return Err(AppError::new(
+            "invalid_library_metadata",
+            "The original URL must be a valid HTTP or HTTPS URL.",
+        ));
+    }
+    Ok(Some(value))
+}
+
+fn metadata_fields_from_value(value: &serde_json::Value) -> LibraryMetadataFields {
+    let string = |keys: &[&str]| {
+        keys.iter()
+            .find_map(|key| value.get(*key).and_then(serde_json::Value::as_str))
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    };
+    LibraryMetadataFields {
+        creator: normalize_metadata_text(
+            string(&["uploader", "channel", "creator"]),
+            "creator",
+            200,
+        )
+        .unwrap_or(None),
+        description: normalize_metadata_description(string(&["description"])).unwrap_or(None),
+        upload_date: string(&["uploadDate", "upload_date"])
+            .and_then(|value| normalize_upload_date(&value).ok()),
+        series: normalize_metadata_text(
+            string(&["series", "playlistTitle", "playlist_title"]),
+            "series",
+            200,
+        )
+        .unwrap_or(None),
+        episode: normalize_metadata_text(
+            string(&["episode", "episodeNumber", "episode_number"]),
+            "episode",
+            200,
+        )
+        .unwrap_or(None),
+        original_url: normalize_original_url(string(&[
+            "webpageUrl",
+            "webpage_url",
+            "originalUrl",
+            "original_url",
+        ]))
+        .unwrap_or(None),
+    }
+}
+
+fn save_extracted_library_metadata(
+    connection: &Connection,
+    item_id: &str,
+    metadata: &serde_json::Value,
+) -> Result<(), AppError> {
+    let extracted = validate_library_metadata_fields(metadata_fields_from_value(metadata))?;
+    let extracted_json = serde_json::to_string(&extracted)
+        .map_err(|error| AppError::internal("could not serialize extracted metadata", error))?;
+    connection.execute(
+        "INSERT INTO library_rich_metadata (item_id, extracted_json, overrides_json, updated_at)
+         VALUES (?1, ?2, '{}', ?3)
+         ON CONFLICT(item_id) DO UPDATE SET
+            extracted_json = excluded.extracted_json,
+            updated_at = excluded.updated_at",
+        params![item_id, extracted_json, Utc::now().timestamp_millis()],
+    )?;
+    Ok(())
+}
+
+fn rich_metadata_from_json(
+    item_id: &str,
+    extracted_json: &str,
+    overrides_json: &str,
+    updated_at: i64,
+) -> Result<LibraryRichMetadata, AppError> {
+    let extracted = serde_json::from_str(extracted_json)
+        .map_err(|error| AppError::internal("could not read extracted metadata", error))?;
+    let overrides = serde_json::from_str(overrides_json)
+        .map_err(|error| AppError::internal("could not read metadata overrides", error))?;
+    rich_metadata_from_fields(item_id, extracted, overrides, updated_at)
+}
+
+fn rich_metadata_from_fields(
+    item_id: &str,
+    extracted: LibraryMetadataFields,
+    overrides: LibraryMetadataFields,
+    updated_at: i64,
+) -> Result<LibraryRichMetadata, AppError> {
+    let mut overridden_fields = Vec::new();
+    let effective = LibraryMetadataFields {
+        creator: metadata_override(
+            "creator",
+            &overrides.creator,
+            &extracted.creator,
+            &mut overridden_fields,
+        ),
+        description: metadata_override(
+            "description",
+            &overrides.description,
+            &extracted.description,
+            &mut overridden_fields,
+        ),
+        upload_date: metadata_override(
+            "uploadDate",
+            &overrides.upload_date,
+            &extracted.upload_date,
+            &mut overridden_fields,
+        ),
+        series: metadata_override(
+            "series",
+            &overrides.series,
+            &extracted.series,
+            &mut overridden_fields,
+        ),
+        episode: metadata_override(
+            "episode",
+            &overrides.episode,
+            &extracted.episode,
+            &mut overridden_fields,
+        ),
+        original_url: metadata_override(
+            "originalUrl",
+            &overrides.original_url,
+            &extracted.original_url,
+            &mut overridden_fields,
+        ),
+    };
+    Ok(LibraryRichMetadata {
+        item_id: item_id.to_owned(),
+        extracted,
+        overrides,
+        effective,
+        overridden_fields,
+        updated_at: timestamp_or_epoch(updated_at),
+    })
+}
+
+fn metadata_override(
+    field: &str,
+    override_value: &Option<String>,
+    extracted_value: &Option<String>,
+    overridden_fields: &mut Vec<String>,
+) -> Option<String> {
+    if override_value.is_some() {
+        overridden_fields.push(field.to_owned());
+        override_value.clone()
+    } else {
+        extracted_value.clone()
+    }
+}
+
+fn clear_matching_metadata_overrides(
+    overrides: &mut LibraryMetadataFields,
+    extracted: &LibraryMetadataFields,
+) {
+    if overrides.creator == extracted.creator {
+        overrides.creator = None;
+    }
+    if overrides.description == extracted.description {
+        overrides.description = None;
+    }
+    if overrides.upload_date == extracted.upload_date {
+        overrides.upload_date = None;
+    }
+    if overrides.series == extracted.series {
+        overrides.series = None;
+    }
+    if overrides.episode == extracted.episode {
+        overrides.episode = None;
+    }
+    if overrides.original_url == extracted.original_url {
+        overrides.original_url = None;
+    }
+}
+
+fn validate_library_artwork_path(value: &str) -> Result<String, AppError> {
+    let path = Path::new(value);
+    if !path.is_absolute()
+        || std::fs::symlink_metadata(path)
+            .map(|metadata| !metadata.file_type().is_file() || metadata.file_type().is_symlink())
+            .unwrap_or(true)
+        || !matches!(
+            path.extension()
+                .and_then(|extension| extension.to_str())
+                .map(str::to_ascii_lowercase)
+                .as_deref(),
+            Some("jpg" | "jpeg" | "png" | "webp")
+        )
+    {
+        return Err(AppError::new(
+            "invalid_library_artwork",
+            "Choose a regular JPEG, PNG, or WebP image file.",
+        ));
+    }
+    path.canonicalize()
+        .map(|path| path.to_string_lossy().into_owned())
+        .map_err(|error| AppError::internal("could not validate the artwork file", error))
 }
 
 fn library_item_not_found() -> AppError {
@@ -4689,7 +5310,7 @@ mod tests {
                 row.get(0)
             })
             .expect("recovered migration version");
-        assert_eq!(latest_version, 17);
+        assert_eq!(latest_version, 18);
         let has_playback: bool = connection
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'library_playback')",
@@ -4707,6 +5328,15 @@ mod tests {
             )
             .expect("playlist table state");
         assert!(has_playlists);
+        let has_rich_metadata: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master
+                 WHERE type = 'table' AND name = 'library_rich_metadata')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("rich metadata table state");
+        assert!(has_rich_metadata);
     }
 
     #[test]
@@ -4968,6 +5598,283 @@ mod tests {
             .list_library_scan_jobs()
             .expect("scan jobs")
             .is_empty());
+    }
+
+    #[test]
+    fn imports_filters_and_preserves_rich_metadata_overrides() {
+        let directory = tempdir().expect("temporary directory");
+        let database =
+            Database::open(&directory.path().join("rich-metadata.sqlite3")).expect("database");
+        let item_id = Uuid::new_v4().to_string();
+        {
+            let connection = database.connection.lock().expect("database lock");
+            connection
+                .execute(
+                    "INSERT INTO media_library
+                     (id, path, title, tags_json, metadata_json, missing, added_at, updated_at, media_kind)
+                     VALUES (?1, ?2, 'Episode', '[]', '{}', 0, ?3, ?3, 'video')",
+                    params![
+                        item_id,
+                        directory.path().join("episode.mp4").to_string_lossy(),
+                        Utc::now().timestamp_millis()
+                    ],
+                )
+                .expect("catalog item");
+            save_extracted_library_metadata(
+                &connection,
+                &item_id,
+                &serde_json::json!({
+                    "uploader": "Extracted channel",
+                    "description": "Sidecar description",
+                    "uploadDate": "20260102",
+                    "series": "Season one",
+                    "episode": "Episode two",
+                    "webpageUrl": "https://example.com/watch/2"
+                }),
+            )
+            .expect("extracted metadata");
+        }
+
+        let extracted = database
+            .get_library_rich_metadata(&item_id)
+            .expect("rich metadata");
+        assert_eq!(
+            extracted.effective.creator.as_deref(),
+            Some("Extracted channel")
+        );
+        assert_eq!(
+            extracted.effective.upload_date.as_deref(),
+            Some("2026-01-02")
+        );
+
+        let overridden = database
+            .save_library_rich_metadata(SaveLibraryRichMetadataRequest {
+                item_id: item_id.clone(),
+                creator: Some("My channel name".to_owned()),
+                description: Some("Sidecar description".to_owned()),
+                upload_date: Some("2026-01-02".to_owned()),
+                series: Some("Season one".to_owned()),
+                episode: Some("Episode two".to_owned()),
+                original_url: Some("https://example.com/watch/2".to_owned()),
+            })
+            .expect("metadata override");
+        assert_eq!(overridden.overridden_fields, vec!["creator"]);
+        assert_eq!(
+            overridden.effective.creator.as_deref(),
+            Some("My channel name")
+        );
+
+        let mut request = library_query_request();
+        request.creator = Some("My channel name".to_owned());
+        assert_eq!(
+            database
+                .query_library_items(request)
+                .expect("creator filter")
+                .total_items,
+            1
+        );
+        assert!(database
+            .library_facets(LibraryFacetRequest {
+                source_id: None,
+                availability: LibraryAvailabilityFilter::Available,
+            })
+            .expect("creator facets")
+            .creators
+            .iter()
+            .any(|creator| creator == "My channel name"));
+
+        {
+            let connection = database.connection.lock().expect("database lock");
+            save_extracted_library_metadata(
+                &connection,
+                &item_id,
+                &serde_json::json!({ "uploader": "Updated extracted channel" }),
+            )
+            .expect("refreshed extracted metadata");
+        }
+        let refreshed = database
+            .get_library_rich_metadata(&item_id)
+            .expect("refreshed metadata");
+        assert_eq!(
+            refreshed.extracted.creator.as_deref(),
+            Some("Updated extracted channel")
+        );
+        assert_eq!(
+            refreshed.effective.creator.as_deref(),
+            Some("My channel name")
+        );
+    }
+
+    #[test]
+    fn filters_sorts_resets_and_validates_rich_metadata() {
+        let directory = tempdir().expect("temporary directory");
+        let database =
+            Database::open(&directory.path().join("rich-discovery.sqlite3")).expect("database");
+        let recent_id = Uuid::new_v4().to_string();
+        let old_id = Uuid::new_v4().to_string();
+        let now = Utc::now().timestamp_millis();
+        let current_date = Utc::now().date_naive().format("%Y-%m-%d").to_string();
+
+        {
+            let connection = database.connection.lock().expect("database lock");
+            for (id, name, site) in [
+                (&recent_id, "Recent episode", "YouTube"),
+                (&old_id, "Archive episode", "Vimeo"),
+            ] {
+                connection
+                    .execute(
+                        "INSERT INTO media_library
+                         (id, path, title, site, tags_json, metadata_json, missing, added_at, updated_at, media_kind)
+                         VALUES (?1, ?2, ?3, ?4, '[]', '{}', 0, ?5, ?5, 'video')",
+                        params![
+                            id,
+                            directory.path().join(format!("{id}.mp4")).to_string_lossy(),
+                            name,
+                            site,
+                            now
+                        ],
+                    )
+                    .expect("catalog item");
+            }
+            save_extracted_library_metadata(
+                &connection,
+                &recent_id,
+                &serde_json::json!({
+                    "uploader": "Current creator",
+                    "description": "First line\nSecond line",
+                    "uploadDate": current_date,
+                    "series": "Current series",
+                    "webpageUrl": "file:///tmp/untrusted.mp4"
+                }),
+            )
+            .expect("recent metadata");
+            save_extracted_library_metadata(
+                &connection,
+                &old_id,
+                &serde_json::json!({
+                    "uploader": "Archive creator",
+                    "uploadDate": "2020-01-02",
+                    "series": "Archive series"
+                }),
+            )
+            .expect("old metadata");
+        }
+
+        let extracted = database
+            .get_library_rich_metadata(&recent_id)
+            .expect("sanitized extracted metadata");
+        assert_eq!(
+            extracted.effective.description.as_deref(),
+            Some("First line\nSecond line")
+        );
+        assert!(extracted.effective.original_url.is_none());
+
+        let mut request = library_query_request();
+        request.series = Some("current SERIES".to_owned());
+        request.site = Some("youtube".to_owned());
+        assert_eq!(
+            database
+                .query_library_items(request)
+                .expect("series and site filter")
+                .items[0]
+                .id,
+            recent_id
+        );
+
+        let mut published_this_year = library_query_request();
+        published_this_year.date_published = Some("year".to_owned());
+        assert_eq!(
+            database
+                .query_library_items(published_this_year)
+                .expect("published date filter")
+                .items
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![recent_id.as_str()]
+        );
+
+        let mut newest = library_query_request();
+        newest.sort = LibrarySort::PublishedDesc;
+        assert_eq!(
+            database
+                .query_library_items(newest)
+                .expect("newest published")
+                .items[0]
+                .id,
+            recent_id
+        );
+        let mut oldest = library_query_request();
+        oldest.sort = LibrarySort::PublishedAsc;
+        assert_eq!(
+            database
+                .query_library_items(oldest)
+                .expect("oldest published")
+                .items[0]
+                .id,
+            old_id
+        );
+
+        let facets = database
+            .library_facets(LibraryFacetRequest {
+                source_id: None,
+                availability: LibraryAvailabilityFilter::Available,
+            })
+            .expect("rich facets");
+        assert_eq!(facets.series, vec!["Archive series", "Current series"]);
+        assert_eq!(facets.sites, vec!["Vimeo", "YouTube"]);
+
+        let overridden = database
+            .save_library_rich_metadata(SaveLibraryRichMetadataRequest {
+                item_id: recent_id.clone(),
+                creator: Some("Personal label".to_owned()),
+                description: None,
+                upload_date: None,
+                series: None,
+                episode: None,
+                original_url: None,
+            })
+            .expect("creator override");
+        assert_eq!(
+            overridden.effective.creator.as_deref(),
+            Some("Personal label")
+        );
+        let reset = database
+            .reset_library_rich_metadata(&recent_id)
+            .expect("reset override");
+        assert_eq!(reset.effective.creator.as_deref(), Some("Current creator"));
+        assert!(reset.overridden_fields.is_empty());
+
+        let invalid_date = database
+            .save_library_rich_metadata(SaveLibraryRichMetadataRequest {
+                item_id: recent_id.clone(),
+                creator: None,
+                description: None,
+                upload_date: Some("2026-99-99".to_owned()),
+                series: None,
+                episode: None,
+                original_url: None,
+            })
+            .expect_err("invalid upload date");
+        assert_eq!(invalid_date.code, "invalid_library_metadata");
+
+        let invalid_url = database
+            .save_library_rich_metadata(SaveLibraryRichMetadataRequest {
+                item_id: recent_id.clone(),
+                creator: None,
+                description: None,
+                upload_date: None,
+                series: None,
+                episode: None,
+                original_url: Some("file:///tmp/private.mp4".to_owned()),
+            })
+            .expect_err("invalid original URL");
+        assert_eq!(invalid_url.code, "invalid_library_metadata");
+
+        let invalid_artwork = database
+            .set_library_artwork(&recent_id, Some("relative-cover.jpg".to_owned()))
+            .expect_err("relative artwork path");
+        assert_eq!(invalid_artwork.code, "invalid_library_artwork");
     }
 
     #[test]
@@ -5253,8 +6160,12 @@ mod tests {
             container: None,
             duration: None,
             date_added: None,
+            date_published: None,
             availability: LibraryAvailabilityFilter::All,
             tag: None,
+            creator: None,
+            series: None,
+            site: None,
             rating: None,
             collection_id: None,
             favorite_only: false,

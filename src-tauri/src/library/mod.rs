@@ -2,16 +2,17 @@ mod operations;
 use crate::models::{LibraryPlaylist, SaveLibraryPlaylistRequest};
 
 use crate::{
-    database::Database,
+    database::{validate_library_metadata_fields, Database},
     engines::managed,
     errors::AppError,
     models::{
         LibraryArtworkCacheStatus, LibraryBulkAction, LibraryCacheResult, LibraryChangeKind,
         LibraryCollection, LibraryDuplicateAnalysisJob, LibraryDuplicateAnalysisState,
         LibraryDuplicateGroup, LibraryDuplicateTrashResult, LibraryFileIdentity, LibraryItem,
-        LibraryMediaKind, LibraryMetadataState, LibraryProbeResult, LibraryScanJob,
-        LibraryScanResult, LibraryScanState, LibrarySource, LibrarySourceStatus,
-        SaveLibraryCollectionRequest, SaveLibrarySourceRequest,
+        LibraryMediaKind, LibraryMetadataFields, LibraryMetadataState, LibraryProbeResult,
+        LibraryRichMetadata, LibraryScanJob, LibraryScanResult, LibraryScanState, LibrarySource,
+        LibrarySourceStatus, SaveLibraryCollectionRequest, SaveLibraryRichMetadataRequest,
+        SaveLibrarySourceRequest,
     },
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -2488,6 +2489,8 @@ struct LibraryBackup {
     collections: Vec<LibraryCollection>,
     #[serde(default)]
     playlists: Vec<LibraryPlaylist>,
+    #[serde(default)]
+    rich_metadata: Vec<LibraryRichMetadata>,
 }
 
 pub fn export_backup(database: &Database, path: &str) -> Result<(), AppError> {
@@ -2501,6 +2504,8 @@ pub fn export_backup(database: &Database, path: &str) -> Result<(), AppError> {
         items: database.list_library_items_for_backup(MAX_LIBRARY_BACKUP_ITEMS + 1)?,
         collections: database.list_library_collections()?,
         playlists: database.list_library_playlists()?,
+        rich_metadata: database
+            .list_library_rich_metadata_for_backup(MAX_LIBRARY_BACKUP_ITEMS + 1)?,
     };
     validate_backup_shape(&backup)?;
     let bytes = serde_json::to_vec_pretty(&backup).map_err(|error| {
@@ -2555,6 +2560,31 @@ pub fn restore_backup(database: &Database, path: &str) -> Result<Vec<LibraryItem
         .collect::<HashSet<_>>();
     let prepared_playlists =
         prepare_backup_playlists(database, backup.playlists, &video_backup_ids)?;
+    let backup_item_ids = prepared_items
+        .iter()
+        .map(|(backup_id, _)| backup_id.clone())
+        .collect::<HashSet<_>>();
+    let mut rich_metadata_ids = HashSet::new();
+    let mut prepared_rich_metadata = Vec::with_capacity(backup.rich_metadata.len());
+    for metadata in &backup.rich_metadata {
+        if !backup_item_ids.contains(&metadata.item_id)
+            || !rich_metadata_ids.insert(metadata.item_id.clone())
+        {
+            return Err(invalid_backup(
+                "Rich metadata must reference one unique backup item.",
+            ));
+        }
+        let overrides = validate_library_metadata_fields(LibraryMetadataFields {
+            creator: metadata.overrides.creator.clone(),
+            description: metadata.overrides.description.clone(),
+            upload_date: metadata.overrides.upload_date.clone(),
+            series: metadata.overrides.series.clone(),
+            episode: metadata.overrides.episode.clone(),
+            original_url: metadata.overrides.original_url.clone(),
+        })
+        .map_err(|_| invalid_backup("Rich metadata contains an invalid override."))?;
+        prepared_rich_metadata.push((metadata.item_id.clone(), overrides));
+    }
 
     for request in source_requests {
         database.save_library_source(request)?;
@@ -2566,6 +2596,20 @@ pub fn restore_backup(database: &Database, path: &str) -> Result<Vec<LibraryItem
         let stored = database.upsert_library_item(item)?;
         item_id_map.insert(backup_id.clone(), stored.id.clone());
         restored_items.push(stored);
+    }
+
+    for (backup_item_id, overrides) in prepared_rich_metadata {
+        if let Some(item_id) = item_id_map.get(&backup_item_id) {
+            database.save_library_rich_metadata(SaveLibraryRichMetadataRequest {
+                item_id: item_id.clone(),
+                creator: overrides.creator,
+                description: overrides.description,
+                upload_date: overrides.upload_date,
+                series: overrides.series,
+                episode: overrides.episode,
+                original_url: overrides.original_url,
+            })?;
+        }
     }
 
     for collection in prepared_collections {
@@ -2623,6 +2667,7 @@ fn validate_backup_shape(backup: &LibraryBackup) -> Result<(), AppError> {
         || backup.sources.len() > MAX_LIBRARY_BACKUP_SOURCES
         || backup.collections.len() > MAX_LIBRARY_BACKUP_COLLECTIONS
         || backup.playlists.len() > MAX_LIBRARY_BACKUP_PLAYLISTS
+        || backup.rich_metadata.len() > MAX_LIBRARY_BACKUP_ITEMS
         || membership_count.is_none_or(|count| count > MAX_LIBRARY_BACKUP_MEMBERSHIPS)
     {
         return Err(AppError::new(
@@ -2974,9 +3019,35 @@ fn read_sidecar(path: &Path) -> Option<Value> {
 }
 
 fn safe_sidecar_metadata(value: &Value) -> Value {
+    let uploader = value
+        .get("uploader")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("channel").and_then(Value::as_str));
+    let series = value
+        .get("series")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("playlist_title").and_then(Value::as_str));
+    let episode = value
+        .get("episode")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| {
+            value
+                .get("episode_number")
+                .and_then(Value::as_i64)
+                .map(|number| number.to_string())
+        });
+    let webpage_url = value
+        .get("webpage_url")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("original_url").and_then(Value::as_str));
     json!({
-        "id": value.get("id"), "title": value.get("title"), "uploader": value.get("uploader"),
+        "id": value.get("id"), "title": value.get("title"),
+        "uploader": uploader,
         "uploadDate": value.get("upload_date"), "description": value.get("description").and_then(Value::as_str).map(|text| text.chars().take(2000).collect::<String>()),
+        "series": series,
+        "episode": episode,
+        "webpageUrl": webpage_url,
         "extractor": value.get("extractor"), "format": value.get("format"),
     })
 }
@@ -3030,7 +3101,12 @@ mod tests {
             duration_seconds: Some(12.5),
             site: Some("Example".to_owned()),
             tags: vec!["Favorite".to_owned()],
-            metadata: json!({ "safe": true }),
+            metadata: json!({
+                "safe": true,
+                "uploader": "Extracted creator",
+                "description": "Extracted description",
+                "uploadDate": "2026-02-03"
+            }),
             file_size_bytes: Some(size),
             modified_at_ms: Some(modified_at),
             width: Some(1920),
@@ -3105,6 +3181,17 @@ mod tests {
         let item = source_database
             .upsert_library_item(&backup_test_item(&media_path, Some(source.id.clone())))
             .expect("item");
+        source_database
+            .save_library_rich_metadata(SaveLibraryRichMetadataRequest {
+                item_id: item.id.clone(),
+                creator: Some("Personal creator label".to_owned()),
+                description: Some("Extracted description".to_owned()),
+                upload_date: Some("2026-02-03".to_owned()),
+                series: Some("My series".to_owned()),
+                episode: None,
+                original_url: Some("https://example.invalid/watch/1".to_owned()),
+            })
+            .expect("metadata overrides");
         let collection = source_database
             .save_library_collection(SaveLibraryCollectionRequest {
                 id: None,
@@ -3169,6 +3256,21 @@ mod tests {
         assert_eq!(restored_playlists[0].name, "Evening");
         assert_eq!(restored_playlists[0].description, "Ordered viewing");
         assert_eq!(restored_playlists[0].item_ids, [restored[0].id.clone()]);
+        let restored_metadata = restored_database
+            .get_library_rich_metadata(&restored[0].id)
+            .expect("restored rich metadata");
+        assert_eq!(
+            restored_metadata.effective.creator.as_deref(),
+            Some("Personal creator label")
+        );
+        assert_eq!(
+            restored_metadata.effective.series.as_deref(),
+            Some("My series")
+        );
+        assert_eq!(
+            restored_metadata.extracted.description.as_deref(),
+            Some("Extracted description")
+        );
     }
 
     #[test]
@@ -3237,6 +3339,7 @@ mod tests {
             items: Vec::new(),
             collections: Vec::new(),
             playlists: Vec::new(),
+            rich_metadata: Vec::new(),
         };
         std::fs::write(
             &backup_path,

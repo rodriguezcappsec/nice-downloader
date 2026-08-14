@@ -169,6 +169,8 @@ Migration `0016_library_watch_later.sql` stores ordered video IDs with catalog-d
 
 Migration `0017_library_playlists.sql` stores named playlists and ordered, cascade-safe video membership. Rust owns playlist validation, the 500-item bound, add/remove/reorder transactions, and position normalization. React receives playlist IDs and catalog items through narrow Tauri commands; it never persists order or supplies paths. Playlist playback skips missing entries and stops at both boundaries. Version 2 backup/restore merges validated playlist membership without deleting current data or touching source media.
 
+Migration `0018_library_rich_metadata.sql` stores normalized extracted sidecar fields and user overrides as separate JSON documents keyed by catalog item. Rust computes effective creator, description, upload date, series, episode, and original URL values; rescans replace only the extracted document. Parameterized SQLite queries expose source-aware creator/series/site facets, published-date filters, and static publication sort clauses. Custom artwork accepts only a catalog ID plus a native-picker path, then Rust validates an absolute regular non-symlink JPEG/PNG/WebP. Backup/restore carries bounded override records and remaps their item IDs through the validated catalog restore map.
+
 ## Media organizer boundary
 
 The Library can index multiple user-selected folders independently of download destinations. Sources, durable scan jobs, and catalog items are persisted in SQLite. A Rust-owned scanner performs bounded directory walks, ignores symlinks by default, classifies supported video and image extensions, and emits normalized progress events. Files remain in place; scanning and record removal never mutate external media.

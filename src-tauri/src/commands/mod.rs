@@ -24,14 +24,14 @@ use crate::{
         LibraryFacetRequest, LibraryFacets, LibraryFileOperation, LibraryFileOperationPlan,
         LibraryFileOperationResult, LibraryImageSession, LibraryItem, LibraryPlaybackCacheStatus,
         LibraryPlaybackEntry, LibraryPlaybackPreflight, LibraryPlaybackSession,
-        LibraryPlaybackState, LibraryQueryRequest, LibraryQueryResult, LibraryScanJob,
-        LibraryScanResult, LibrarySource, MediaAnalysis, OnboardingStatus, Preset,
+        LibraryPlaybackState, LibraryQueryRequest, LibraryQueryResult, LibraryRichMetadata,
+        LibraryScanJob, LibraryScanResult, LibrarySource, MediaAnalysis, OnboardingStatus, Preset,
         PreviewLibraryBulkMoveRequest, PreviewLibraryFileOperationRequest, QueueSettings,
         QueueSnapshot, SaveAuthenticationProfileRequest, SaveLibraryCollectionRequest,
-        SaveLibraryPlaybackRequest, SaveLibrarySourceRequest, SavePresetRequest,
-        SaveSitePresetRuleRequest, SaveSubscriptionRequest, SitePresetRule, StartDownloadRequest,
-        StartTransformationRequest, Subscription, SubscriptionCheckResult, TransformationTask,
-        UpdateLibraryItemRequest,
+        SaveLibraryPlaybackRequest, SaveLibraryRichMetadataRequest, SaveLibrarySourceRequest,
+        SavePresetRequest, SaveSitePresetRuleRequest, SaveSubscriptionRequest,
+        SetLibraryArtworkRequest, SitePresetRule, StartDownloadRequest, StartTransformationRequest,
+        Subscription, SubscriptionCheckResult, TransformationTask, UpdateLibraryItemRequest,
     },
     queue::{disk_space, QueueManager},
     subscriptions,
@@ -246,6 +246,38 @@ pub fn update_library_item(
     request: UpdateLibraryItemRequest,
 ) -> Result<LibraryItem, AppError> {
     database.update_library_item(request)
+}
+
+#[tauri::command]
+pub fn get_library_rich_metadata(
+    database: State<'_, Database>,
+    item_id: String,
+) -> Result<LibraryRichMetadata, AppError> {
+    database.get_library_rich_metadata(&item_id)
+}
+
+#[tauri::command]
+pub fn save_library_rich_metadata(
+    database: State<'_, Database>,
+    request: SaveLibraryRichMetadataRequest,
+) -> Result<LibraryRichMetadata, AppError> {
+    database.save_library_rich_metadata(request)
+}
+
+#[tauri::command]
+pub fn reset_library_rich_metadata(
+    database: State<'_, Database>,
+    item_id: String,
+) -> Result<LibraryRichMetadata, AppError> {
+    database.reset_library_rich_metadata(&item_id)
+}
+
+#[tauri::command]
+pub fn set_library_artwork(
+    database: State<'_, Database>,
+    request: SetLibraryArtworkRequest,
+) -> Result<LibraryItem, AppError> {
+    database.set_library_artwork(&request.item_id, request.path)
 }
 
 #[tauri::command]

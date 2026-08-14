@@ -6,6 +6,12 @@ Implementation is tracked in `docs/MEDIA_ORGANIZER.md`. Milestones 1–6 are imp
 
 Milestone 12 adds persistent Watch Later, local playback history, watched/reset controls, and bounded non-looping Autoplay to complete the first YouTube-like repeat-viewing workflow. Milestone 13 adds persistent ordered video playlists, Library and Watch workspace management, non-looping ordered playback, cascade-safe membership, and backup/restore support.
 
+## Milestone 14: rich metadata and creator browsing
+
+Deliver typed yt-dlp `.info.json` metadata import, separate extracted values from user overrides, preserve edits across rescans, add creator/series/site and published-date discovery, validate custom artwork in Rust, and include rich overrides in versioned Library backup/restore.
+
+Status: implemented on `feat/library-rich-metadata`.
+
 ## Maturity roadmap delivered
 
 - First-run engine/privacy onboarding and Linux AppImage/DEB plus Windows NSIS release workflows.

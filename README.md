@@ -76,8 +76,10 @@ warning because current builds are not code-signed.
   output containers, filename templates, and reusable presets
 - Searchable download history, duplicate prevention, and output verification
 - Local media library with hierarchical folder filters, stable paginated sorting,
-  tags, collections, change review, exact-duplicate analysis, recoverable Trash
-  cleanup, previewable Move/Copy/Rename with Undo, and metadata backup/restore
+  creator/series/site and published-date discovery, sidecar metadata overrides,
+  custom artwork, tags, collections, change review, exact-duplicate analysis,
+  recoverable Trash cleanup, previewable Move/Copy/Rename with Undo, and metadata
+  backup/restore
 - Integrated Watch workspace with embedded playback, resume positions,
   Continue Watching, subtitle tracks, searchable paginated browsing, and an
   persistent in-app mini player; compatibility copies require informed consent

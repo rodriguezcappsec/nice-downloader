@@ -169,7 +169,7 @@ Status: implementation in progress on `feat/library-accessibility-performance`.
 - Filter and pagination changes announce the exact visible result range. The Watch workspace separately announces its debounced search result page.
 - A keyboard-only and Orca checklist lives in [Library Accessibility QA](ACCESSIBILITY_QA.md), including scan, duplicate, Watch, fallback, scaling, contrast, and reduced-motion expectations.
 - Media details and Bulk Move now trap focus, preserve their invoking control, and use Library search/main content as a fallback when an operation removes that control. Add folder focuses its first action and restores focus when dismissed.
-- SQLite migration recovery now has an automated rollback test that forces a mid-chain migration failure, proves schema and version changes are atomic, repairs the obstruction, and completes the same database through migration 17.
+- SQLite migration recovery has an automated rollback test that forces a mid-chain migration failure, proves schema and version changes are atomic, repairs the obstruction, and completes the same database through migration 18.
 - An ignored, repeatable 10,000–250,000-item Rust profiling harness measures database open, transactional seeding, first-page query, text search, and facet generation. `NICE_DOWNLOADER_LIBRARY_PROFILE_DIR` places the synthetic database on a chosen local, removable, or network filesystem; see [Library Performance Profiling](LIBRARY_PROFILING.md).
 
 Remaining before completion:
@@ -229,6 +229,19 @@ Status: implemented on `feat/library-accessibility-performance`.
 - Async playlist loads and mutations are guarded so stale responses and rapid reorder/remove input cannot overwrite newer UI state.
 
 Acceptance: create a playlist, add videos from Watch, reorder and remove entries, relaunch with the same order, play continuously without looping, restore the playlist from backup, and delete the playlist without changing any source video.
+
+## Milestone 14 - Rich metadata and creator browsing
+
+Status: implemented on `feat/library-rich-metadata`.
+
+- Migration `0018_library_rich_metadata.sql` stores extracted sidecar metadata separately from user overrides. Rescans refresh creator/channel, description, upload date, series, episode, and original URL without replacing intentional edits.
+- `.info.json` import remains bounded and typed. Dates normalize to `YYYY-MM-DD`, original URLs must be HTTP(S), and text limits are enforced before persistence.
+- Library discovery supports creator, series, site, and published-date filters plus deterministic newest/oldest published sorting. Facets remain SQLite-backed and source-aware.
+- Media details show metadata provenance, reset overrides to extracted values, and open filtered creator, series, or site views.
+- Custom JPEG, PNG, or WebP artwork is selected through the native picker and validated by Rust as an absolute regular non-symlink file. Original media and sidecars remain untouched.
+- Version 2 Library backup/restore includes bounded rich-metadata overrides and remaps referenced catalog IDs safely.
+
+Acceptance: scan media with a yt-dlp `.info.json` sidecar, browse its creator/series/site, sort by publication date, edit and reset metadata, choose artwork, rescan without losing edits, and restore overrides from a Library backup.
 
 ## Explicitly deferred
 
