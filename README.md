@@ -76,8 +76,9 @@ warning because current builds are not code-signed.
   output containers, filename templates, and reusable presets
 - Searchable download history, duplicate prevention, and output verification
 - Local media library with hierarchical folder filters, stable paginated sorting,
-  creator/series/site and published-date discovery, sidecar metadata overrides,
-  custom artwork, tags, collections, change review, exact-duplicate analysis,
+  FTS search, creator/series workspaces, related media, dynamic saved views,
+  multi-value creator/series/site/tag and published-date discovery, sidecar
+  metadata overrides, custom artwork, collections, change review, exact-duplicate analysis,
   recoverable Trash cleanup, previewable Move/Copy/Rename with Undo, and metadata
   backup/restore
 - Integrated Watch workspace with embedded playback, resume positions,

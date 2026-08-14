@@ -25,10 +25,11 @@ use crate::{
         LibraryFileOperationResult, LibraryImageSession, LibraryItem, LibraryPlaybackCacheStatus,
         LibraryPlaybackEntry, LibraryPlaybackPreflight, LibraryPlaybackSession,
         LibraryPlaybackState, LibraryQueryRequest, LibraryQueryResult, LibraryRichMetadata,
-        LibraryScanJob, LibraryScanResult, LibrarySource, MediaAnalysis, OnboardingStatus, Preset,
-        PreviewLibraryBulkMoveRequest, PreviewLibraryFileOperationRequest, QueueSettings,
-        QueueSnapshot, SaveAuthenticationProfileRequest, SaveLibraryCollectionRequest,
-        SaveLibraryPlaybackRequest, SaveLibraryRichMetadataRequest, SaveLibrarySourceRequest,
+        LibraryScanJob, LibraryScanResult, LibrarySearchStatus, LibrarySmartView, LibrarySource,
+        MediaAnalysis, OnboardingStatus, Preset, PreviewLibraryBulkMoveRequest,
+        PreviewLibraryFileOperationRequest, QueueSettings, QueueSnapshot,
+        SaveAuthenticationProfileRequest, SaveLibraryCollectionRequest, SaveLibraryPlaybackRequest,
+        SaveLibraryRichMetadataRequest, SaveLibrarySmartViewRequest, SaveLibrarySourceRequest,
         SavePresetRequest, SaveSitePresetRuleRequest, SaveSubscriptionRequest,
         SetLibraryArtworkRequest, SitePresetRule, StartDownloadRequest, StartTransformationRequest,
         Subscription, SubscriptionCheckResult, TransformationTask, UpdateLibraryItemRequest,
@@ -278,6 +279,52 @@ pub fn set_library_artwork(
     request: SetLibraryArtworkRequest,
 ) -> Result<LibraryItem, AppError> {
     database.set_library_artwork(&request.item_id, request.path)
+}
+
+#[tauri::command]
+pub fn get_library_search_status(
+    database: State<'_, Database>,
+) -> Result<LibrarySearchStatus, AppError> {
+    database.library_search_status()
+}
+
+#[tauri::command]
+pub fn rebuild_library_search_index(
+    database: State<'_, Database>,
+) -> Result<LibrarySearchStatus, AppError> {
+    database.rebuild_library_search_index()
+}
+
+#[tauri::command]
+pub fn list_library_smart_views(
+    database: State<'_, Database>,
+) -> Result<Vec<LibrarySmartView>, AppError> {
+    database.list_library_smart_views()
+}
+
+#[tauri::command]
+pub fn save_library_smart_view(
+    database: State<'_, Database>,
+    request: SaveLibrarySmartViewRequest,
+) -> Result<LibrarySmartView, AppError> {
+    database.save_library_smart_view(request)
+}
+
+#[tauri::command]
+pub fn delete_library_smart_view(
+    database: State<'_, Database>,
+    id: String,
+) -> Result<(), AppError> {
+    database.delete_library_smart_view(&id)
+}
+
+#[tauri::command]
+pub fn get_related_library_items(
+    database: State<'_, Database>,
+    item_id: String,
+    limit: usize,
+) -> Result<Vec<LibraryItem>, AppError> {
+    database.related_library_items(&item_id, limit)
 }
 
 #[tauri::command]

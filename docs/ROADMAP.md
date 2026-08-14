@@ -12,6 +12,12 @@ Deliver typed yt-dlp `.info.json` metadata import, separate extracted values fro
 
 Status: implemented on `feat/library-rich-metadata`.
 
+## Milestone 15: smart discovery and saved views
+
+Deliver trigger-maintained FTS5 search, multi-value discovery filters, dedicated creator/series workspaces, dynamic saved views, bounded related media, and transactional search-index recovery.
+
+Status: implemented on `feat/library-smart-discovery`.
+
 ## Maturity roadmap delivered
 
 - First-run engine/privacy onboarding and Linux AppImage/DEB plus Windows NSIS release workflows.

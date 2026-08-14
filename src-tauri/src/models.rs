@@ -668,18 +668,74 @@ pub struct LibraryQueryRequest {
     #[serde(default)]
     pub date_published: Option<String>,
     pub availability: LibraryAvailabilityFilter,
-    pub tag: Option<String>,
     #[serde(default)]
-    pub creator: Option<String>,
+    pub tags: Vec<String>,
     #[serde(default)]
-    pub series: Option<String>,
+    pub creators: Vec<String>,
     #[serde(default)]
-    pub site: Option<String>,
+    pub series: Vec<String>,
+    #[serde(default)]
+    pub sites: Vec<String>,
     pub rating: Option<String>,
     pub collection_id: Option<String>,
     pub favorite_only: bool,
     #[serde(default)]
     pub sort: LibrarySort,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibrarySmartViewQuery {
+    pub search: Option<String>,
+    pub source_id: Option<String>,
+    pub folder_source_id: Option<String>,
+    pub folder_path: Option<String>,
+    pub folder_scope: LibraryFolderScope,
+    pub media_kind: Option<LibraryMediaKind>,
+    pub resolution: Option<String>,
+    pub container: Option<String>,
+    pub duration: Option<String>,
+    pub date_added: Option<String>,
+    pub date_published: Option<String>,
+    pub availability: LibraryAvailabilityFilter,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub creators: Vec<String>,
+    #[serde(default)]
+    pub series: Vec<String>,
+    #[serde(default)]
+    pub sites: Vec<String>,
+    pub rating: Option<String>,
+    pub collection_id: Option<String>,
+    pub favorite_only: bool,
+    pub sort: LibrarySort,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibrarySmartView {
+    pub id: String,
+    pub name: String,
+    pub query: LibrarySmartViewQuery,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveLibrarySmartViewRequest {
+    pub id: Option<String>,
+    pub name: String,
+    pub query: LibrarySmartViewQuery,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibrarySearchStatus {
+    pub catalog_items: usize,
+    pub indexed_items: usize,
+    pub consistent: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

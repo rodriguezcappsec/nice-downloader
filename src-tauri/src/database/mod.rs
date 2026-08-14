@@ -9,13 +9,14 @@ use crate::{
         LibraryFolderScope, LibraryItem, LibraryMediaKind, LibraryMetadataFields,
         LibraryMetadataState, LibraryPlaybackEntry, LibraryPlaybackState, LibraryPlaylist,
         LibraryProbeResult, LibraryQueryRequest, LibraryQueryResult, LibraryRichMetadata,
-        LibraryScanJob, LibraryScanState, LibrarySort, LibrarySource, LibrarySourceStatus,
-        LibraryWatchState, Preset, PresetIntent, QueueSettings, SaveAuthenticationProfileRequest,
+        LibraryScanJob, LibraryScanState, LibrarySearchStatus, LibrarySmartView,
+        LibrarySmartViewQuery, LibrarySort, LibrarySource, LibrarySourceStatus, LibraryWatchState,
+        Preset, PresetIntent, QueueSettings, SaveAuthenticationProfileRequest,
         SaveLibraryCollectionRequest, SaveLibraryPlaybackRequest, SaveLibraryPlaylistRequest,
-        SaveLibraryRichMetadataRequest, SaveLibrarySourceRequest, SavePresetRequest,
-        SaveSitePresetRuleRequest, SaveSubscriptionRequest, SitePresetRule, StartDownloadRequest,
-        Subscription, TransformationOperation, TransformationState, TransformationTask,
-        UpdateLibraryItemRequest,
+        SaveLibraryRichMetadataRequest, SaveLibrarySmartViewRequest, SaveLibrarySourceRequest,
+        SavePresetRequest, SaveSitePresetRuleRequest, SaveSubscriptionRequest, SitePresetRule,
+        StartDownloadRequest, Subscription, TransformationOperation, TransformationState,
+        TransformationTask, UpdateLibraryItemRequest,
     },
     utils::validation::{
         normalize_engine_preferences, validate_destination, validate_engine_preferences,
@@ -49,6 +50,7 @@ const MIGRATION_0015: &str = include_str!("migrations/0015_library_playback.sql"
 const MIGRATION_0016: &str = include_str!("migrations/0016_library_watch_later.sql");
 const MIGRATION_0017: &str = include_str!("migrations/0017_library_playlists.sql");
 const MIGRATION_0018: &str = include_str!("migrations/0018_library_rich_metadata.sql");
+const MIGRATION_0019: &str = include_str!("migrations/0019_library_smart_discovery.sql");
 const ENGINE_PREFERENCES_KEY: &str = "engine.preferences";
 const QUEUE_SETTINGS_KEY: &str = "queue.settings";
 const DESKTOP_PREFERENCES_KEY: &str = "desktop.preferences";
@@ -100,6 +102,7 @@ impl Database {
             (16, MIGRATION_0016),
             (17, MIGRATION_0017),
             (18, MIGRATION_0018),
+            (19, MIGRATION_0019),
         ] {
             let migrated: bool = transaction.query_row(
                 "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = ?1)",
@@ -2260,6 +2263,237 @@ impl Database {
         self.get_library_item(item_id)
     }
 
+    pub fn library_search_status(&self) -> Result<LibrarySearchStatus, AppError> {
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "The media library is unavailable.")
+        })?;
+        let catalog_items: i64 =
+            connection.query_row("SELECT COUNT(*) FROM media_library", [], |row| row.get(0))?;
+        let (indexed_rows, indexed_items): (i64, i64) = connection.query_row(
+            "SELECT COUNT(*), COUNT(DISTINCT item_id) FROM library_search",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let catalog_items = usize::try_from(catalog_items).unwrap_or(usize::MAX);
+        let indexed_items = usize::try_from(indexed_items).unwrap_or(usize::MAX);
+        let same_item_ids: bool = connection.query_row(
+            "SELECT NOT EXISTS(
+                SELECT 1 FROM (
+                    SELECT id AS item_id FROM media_library
+                    EXCEPT SELECT item_id FROM library_search
+                )
+                UNION ALL
+                SELECT 1 FROM (
+                    SELECT item_id FROM library_search
+                    EXCEPT SELECT id FROM media_library
+                )
+             )",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(LibrarySearchStatus {
+            catalog_items,
+            indexed_items,
+            consistent: catalog_items == indexed_items
+                && indexed_rows == i64::try_from(indexed_items).unwrap_or(i64::MAX)
+                && same_item_ids,
+        })
+    }
+
+    pub fn rebuild_library_search_index(&self) -> Result<LibrarySearchStatus, AppError> {
+        let mut connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "The media library is unavailable.")
+        })?;
+        let transaction = connection.transaction()?;
+        transaction.execute("DELETE FROM library_search", [])?;
+        transaction.execute(
+            "INSERT INTO library_search (item_id, title, creator, series, description, site, tags, path)
+             SELECT
+                media_library.id,
+                COALESCE(media_library.title, ''),
+                COALESCE(NULLIF(json_extract(rich.overrides_json, '$.creator'), ''), json_extract(rich.extracted_json, '$.creator'), ''),
+                COALESCE(NULLIF(json_extract(rich.overrides_json, '$.series'), ''), json_extract(rich.extracted_json, '$.series'), ''),
+                COALESCE(NULLIF(json_extract(rich.overrides_json, '$.description'), ''), json_extract(rich.extracted_json, '$.description'), ''),
+                COALESCE(media_library.site, ''),
+                COALESCE((SELECT group_concat(value, ' ') FROM json_each(media_library.tags_json)), ''),
+                COALESCE(media_library.relative_path, media_library.path, '')
+             FROM media_library
+             LEFT JOIN library_rich_metadata rich ON rich.item_id = media_library.id",
+            [],
+        )?;
+        transaction.commit()?;
+        drop(connection);
+        self.library_search_status()
+    }
+
+    pub fn list_library_smart_views(&self) -> Result<Vec<LibrarySmartView>, AppError> {
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "The media library is unavailable.")
+        })?;
+        let mut statement = connection.prepare(
+            "SELECT id, name, query_json, created_at, updated_at
+             FROM library_smart_views ORDER BY name COLLATE NOCASE, id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let (id, name, query_json, created_at, updated_at) = row?;
+            let query =
+                serde_json::from_str::<LibrarySmartViewQuery>(&query_json).map_err(|error| {
+                    AppError::internal("could not parse a saved Library view", error)
+                })?;
+            Ok(LibrarySmartView {
+                id,
+                name,
+                query,
+                created_at: timestamp_or_epoch(created_at),
+                updated_at: timestamp_or_epoch(updated_at),
+            })
+        })
+        .collect()
+    }
+
+    pub fn save_library_smart_view(
+        &self,
+        request: SaveLibrarySmartViewRequest,
+    ) -> Result<LibrarySmartView, AppError> {
+        let SaveLibrarySmartViewRequest { id, name, query } = request;
+        let name = validate_smart_view_name(&name)?;
+        let query = normalize_smart_view_query(query)?;
+        let id = if let Some(id) = id {
+            validate_uuid(&id, "smart view")?;
+            id
+        } else {
+            Uuid::new_v4().to_string()
+        };
+        let query_json = serde_json::to_string(&query)
+            .map_err(|error| AppError::internal("could not serialize the smart view", error))?;
+        let now = Utc::now().timestamp_millis();
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "The media library is unavailable.")
+        })?;
+        let duplicate: bool = connection.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM library_smart_views
+                WHERE name = ?1 COLLATE NOCASE AND id != ?2
+             )",
+            params![name, id],
+            |row| row.get(0),
+        )?;
+        if duplicate {
+            return Err(AppError::new(
+                "duplicate_library_smart_view",
+                "A saved Library view already uses that name.",
+            ));
+        }
+        connection.execute(
+            "INSERT INTO library_smart_views (id, name, query_json, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?4)
+             ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                query_json = excluded.query_json,
+                updated_at = excluded.updated_at",
+            params![id, name, query_json, now],
+        )?;
+        drop(connection);
+        self.list_library_smart_views()?
+            .into_iter()
+            .find(|view| view.id == id)
+            .ok_or_else(|| {
+                AppError::new(
+                    "library_smart_view_not_found",
+                    "The saved view was not found.",
+                )
+            })
+    }
+
+    pub fn delete_library_smart_view(&self, id: &str) -> Result<(), AppError> {
+        validate_uuid(id, "smart view")?;
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "The media library is unavailable.")
+        })?;
+        if connection.execute("DELETE FROM library_smart_views WHERE id = ?1", [id])? == 0 {
+            return Err(AppError::new(
+                "library_smart_view_not_found",
+                "The saved view was not found.",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn related_library_items(
+        &self,
+        item_id: &str,
+        limit: usize,
+    ) -> Result<Vec<LibraryItem>, AppError> {
+        validate_uuid(item_id, "library item")?;
+        if !(1..=24).contains(&limit) {
+            return Err(AppError::new(
+                "invalid_library_related_limit",
+                "Related media requests must contain between 1 and 24 items.",
+            ));
+        }
+        let item = self.get_library_item(item_id)?;
+        let metadata = self.get_library_rich_metadata(item_id)?;
+        let mut requests = Vec::with_capacity(4);
+        if let Some(series) = metadata.effective.series {
+            let mut request = empty_library_query_request(
+                1,
+                u32::try_from(limit.saturating_add(1)).unwrap_or(25),
+            );
+            request.series.push(series);
+            requests.push(request);
+        }
+        if let Some(creator) = metadata.effective.creator {
+            let mut request = empty_library_query_request(
+                1,
+                u32::try_from(limit.saturating_add(1)).unwrap_or(25),
+            );
+            request.creators.push(creator);
+            requests.push(request);
+        }
+        if let Some(site) = item.site {
+            let mut request = empty_library_query_request(
+                1,
+                u32::try_from(limit.saturating_add(1)).unwrap_or(25),
+            );
+            request.sites.push(site);
+            requests.push(request);
+        }
+        if let Some(source_id) = item.source_id {
+            let mut request = empty_library_query_request(
+                1,
+                u32::try_from(limit.saturating_add(1)).unwrap_or(25),
+            );
+            request.source_id = Some(source_id);
+            requests.push(request);
+        }
+
+        let mut related = Vec::with_capacity(limit);
+        let mut seen = HashSet::with_capacity(limit.saturating_add(1));
+        seen.insert(item_id.to_owned());
+        for mut request in requests {
+            request.media_kind = item.media_kind;
+            request.sort = LibrarySort::PublishedDesc;
+            for candidate in self.query_library_items(request)?.items {
+                if seen.insert(candidate.id.clone()) {
+                    related.push(candidate);
+                    if related.len() == limit {
+                        return Ok(related);
+                    }
+                }
+            }
+        }
+        Ok(related)
+    }
+
     pub fn list_library_collections(&self) -> Result<Vec<LibraryCollection>, AppError> {
         let connection = self.connection.lock().map_err(|_| {
             AppError::new(
@@ -3610,17 +3844,12 @@ fn build_library_query(request: &LibraryQueryRequest) -> Result<(String, Vec<Sql
             ));
         }
         if !search.is_empty() {
-            let placeholder = bind(SqlValue::Text(format!(
-                "%{}%",
-                escape_sql_like(&search.to_lowercase())
-            )));
+            let query = library_fts_query(search)?;
+            let placeholder = bind(SqlValue::Text(query));
             clauses.push(format!(
-                "(LOWER(COALESCE(title, '') || ' ' || COALESCE(site, '') || ' ' || path || ' ' || tags_json || ' ' || COALESCE(container, '') || ' ' || COALESCE(video_codec, '') || ' ' || COALESCE(audio_codec, '')) LIKE {placeholder} ESCAPE '\\'
-                 OR EXISTS (
-                    SELECT 1 FROM library_rich_metadata rich
-                    WHERE rich.item_id = media_library.id
-                      AND LOWER(COALESCE(rich.extracted_json, '') || ' ' || COALESCE(rich.overrides_json, '')) LIKE {placeholder} ESCAPE '\\'
-                 ))"
+                "media_library.id IN (
+                    SELECT item_id FROM library_search WHERE library_search MATCH {placeholder}
+                 )"
             ));
         }
     }
@@ -3752,43 +3981,61 @@ fn build_library_query(request: &LibraryQueryRequest) -> Result<(String, Vec<Sql
         LibraryAvailabilityFilter::Missing => clauses.push("missing = 1".to_owned()),
     }
 
-    if let Some(tag) = request.tag.as_deref() {
-        let tag = validate_library_filter_text(tag, "tag", 40)?;
-        let placeholder = bind(SqlValue::Text(tag));
-        clauses.push(format!(
-            "EXISTS (SELECT 1 FROM json_each(media_library.tags_json) WHERE json_each.value = {placeholder} COLLATE NOCASE)"
-        ));
+    let tags = validate_library_filter_values(&request.tags, "tag", 40)?;
+    if !tags.is_empty() {
+        let matches = tags
+            .into_iter()
+            .map(|tag| {
+                let placeholder = bind(SqlValue::Text(tag));
+                format!("EXISTS (SELECT 1 FROM json_each(media_library.tags_json) WHERE json_each.value = {placeholder} COLLATE NOCASE)")
+            })
+            .collect::<Vec<_>>();
+        clauses.push(format!("({})", matches.join(" OR ")));
     }
-    if let Some(creator) = request.creator.as_deref() {
-        let creator = validate_library_filter_text(creator, "creator", 200)?;
-        let placeholder = bind(SqlValue::Text(creator));
-        clauses.push(format!(
-            "EXISTS (
-                SELECT 1 FROM library_rich_metadata rich
-                WHERE rich.item_id = media_library.id
-                  AND COALESCE(
-                    NULLIF(json_extract(rich.overrides_json, '$.creator'), ''),
-                    json_extract(rich.extracted_json, '$.creator')
-                  ) = {placeholder} COLLATE NOCASE
-            )"
-        ));
-    }
-
-    if let Some(series) = request.series.as_deref() {
-        let series = validate_library_filter_text(series, "series", 200)?;
-        let placeholder = bind(SqlValue::Text(series));
-        clauses.push(format!(
-            "COALESCE(
-                NULLIF(json_extract(rich.overrides_json, '$.series'), ''),
-                json_extract(rich.extracted_json, '$.series')
-             ) = {placeholder} COLLATE NOCASE"
-        ));
+    let creators = validate_library_filter_values(&request.creators, "creator", 200)?;
+    if !creators.is_empty() {
+        let matches = creators
+            .into_iter()
+            .map(|creator| {
+                let placeholder = bind(SqlValue::Text(creator));
+                format!(
+                    "COALESCE(
+                        NULLIF(json_extract(rich.overrides_json, '$.creator'), ''),
+                        json_extract(rich.extracted_json, '$.creator')
+                     ) = {placeholder} COLLATE NOCASE"
+                )
+            })
+            .collect::<Vec<_>>();
+        clauses.push(format!("({})", matches.join(" OR ")));
     }
 
-    if let Some(site) = request.site.as_deref() {
-        let site = validate_library_filter_text(site, "site", 200)?;
-        let placeholder = bind(SqlValue::Text(site));
-        clauses.push(format!("media_library.site = {placeholder} COLLATE NOCASE"));
+    let series = validate_library_filter_values(&request.series, "series", 200)?;
+    if !series.is_empty() {
+        let matches = series
+            .into_iter()
+            .map(|series| {
+                let placeholder = bind(SqlValue::Text(series));
+                format!(
+                    "COALESCE(
+                        NULLIF(json_extract(rich.overrides_json, '$.series'), ''),
+                        json_extract(rich.extracted_json, '$.series')
+                     ) = {placeholder} COLLATE NOCASE"
+                )
+            })
+            .collect::<Vec<_>>();
+        clauses.push(format!("({})", matches.join(" OR ")));
+    }
+
+    let sites = validate_library_filter_values(&request.sites, "site", 200)?;
+    if !sites.is_empty() {
+        let matches = sites
+            .into_iter()
+            .map(|site| {
+                let placeholder = bind(SqlValue::Text(site));
+                format!("media_library.site = {placeholder} COLLATE NOCASE")
+            })
+            .collect::<Vec<_>>();
+        clauses.push(format!("({})", matches.join(" OR ")));
     }
 
     if let Some(rating) = request.rating.as_deref() {
@@ -3851,11 +4098,177 @@ fn validate_library_filter_text(
     Ok(value.to_owned())
 }
 
+fn validate_library_filter_values(
+    values: &[String],
+    label: &str,
+    max_length: usize,
+) -> Result<Vec<String>, AppError> {
+    if values.len() > 20 {
+        return Err(invalid_library_filter(label));
+    }
+    let mut normalized = Vec::with_capacity(values.len());
+    for value in values {
+        let value = validate_library_filter_text(value, label, max_length)?;
+        if !normalized
+            .iter()
+            .any(|existing: &String| existing.eq_ignore_ascii_case(&value))
+        {
+            normalized.push(value);
+        }
+    }
+    Ok(normalized)
+}
+
+fn library_fts_query(search: &str) -> Result<String, AppError> {
+    let tokens = search
+        .split_whitespace()
+        .filter(|token| token.chars().any(char::is_alphanumeric))
+        .take(20)
+        .map(|token| format!("\"{}\"*", token.replace('"', "\"\"")))
+        .collect::<Vec<_>>();
+    if tokens.is_empty() {
+        return Err(AppError::new(
+            "invalid_library_search",
+            "Enter at least one letter or number to search the Library.",
+        ));
+    }
+    Ok(tokens.join(" AND "))
+}
+
 fn invalid_library_filter(label: &str) -> AppError {
     AppError::new(
         "invalid_library_filter",
         format!("The selected library {label} filter is invalid."),
     )
+}
+
+fn validate_smart_view_name(value: &str) -> Result<String, AppError> {
+    let value = value.trim();
+    if value.is_empty() || value.chars().count() > 80 || value.chars().any(char::is_control) {
+        return Err(AppError::new(
+            "invalid_library_smart_view_name",
+            "Use a saved-view name between 1 and 80 characters.",
+        ));
+    }
+    Ok(value.to_owned())
+}
+
+fn normalize_smart_view_query(
+    mut query: LibrarySmartViewQuery,
+) -> Result<LibrarySmartViewQuery, AppError> {
+    query.search = match query.search.take() {
+        Some(search) => {
+            let search = search.trim();
+            if search.is_empty() {
+                None
+            } else {
+                if search.chars().count() > 200 || search.chars().any(char::is_control) {
+                    return Err(AppError::new(
+                        "invalid_library_search",
+                        "Library search text must be 200 characters or fewer.",
+                    ));
+                }
+                Some(search.to_owned())
+            }
+        }
+        None => None,
+    };
+    query.source_id = normalize_smart_view_uuid(query.source_id, "library source")?;
+    query.folder_source_id =
+        normalize_smart_view_uuid(query.folder_source_id, "library folder source")?;
+    query.collection_id = normalize_smart_view_uuid(query.collection_id, "collection")?;
+    query.folder_path = query
+        .folder_path
+        .take()
+        .map(|path| normalize_library_folder_path(&path))
+        .transpose()?;
+    query.container = query
+        .container
+        .take()
+        .map(|container| validate_library_filter_text(&container, "container", 40))
+        .transpose()?;
+    query.tags = validate_library_filter_values(&query.tags, "tag", 40)?;
+    query.creators = validate_library_filter_values(&query.creators, "creator", 200)?;
+    query.series = validate_library_filter_values(&query.series, "series", 200)?;
+    query.sites = validate_library_filter_values(&query.sites, "site", 200)?;
+    build_library_query(&library_query_from_smart_view(&query, 1, 1))?;
+    Ok(query)
+}
+
+fn normalize_smart_view_uuid(
+    value: Option<String>,
+    label: &str,
+) -> Result<Option<String>, AppError> {
+    value
+        .map(|value| {
+            Uuid::parse_str(&value)
+                .map(|id| id.to_string())
+                .map_err(|_| {
+                    AppError::new(
+                        "invalid_library_smart_view",
+                        format!("The saved view contains an invalid {label} identifier."),
+                    )
+                })
+        })
+        .transpose()
+}
+
+fn library_query_from_smart_view(
+    query: &LibrarySmartViewQuery,
+    page: u32,
+    page_size: u32,
+) -> LibraryQueryRequest {
+    LibraryQueryRequest {
+        page,
+        page_size,
+        search: query.search.clone(),
+        source_id: query.source_id.clone(),
+        folder_source_id: query.folder_source_id.clone(),
+        folder_path: query.folder_path.clone(),
+        folder_scope: query.folder_scope,
+        media_kind: query.media_kind,
+        resolution: query.resolution.clone(),
+        container: query.container.clone(),
+        duration: query.duration.clone(),
+        date_added: query.date_added.clone(),
+        date_published: query.date_published.clone(),
+        availability: query.availability,
+        tags: query.tags.clone(),
+        creators: query.creators.clone(),
+        series: query.series.clone(),
+        sites: query.sites.clone(),
+        rating: query.rating.clone(),
+        collection_id: query.collection_id.clone(),
+        favorite_only: query.favorite_only,
+        sort: query.sort,
+    }
+}
+
+fn empty_library_query_request(page: u32, page_size: u32) -> LibraryQueryRequest {
+    LibraryQueryRequest {
+        page,
+        page_size,
+        search: None,
+        source_id: None,
+        folder_source_id: None,
+        folder_path: None,
+        folder_scope: LibraryFolderScope::Tree,
+        media_kind: None,
+        resolution: None,
+        container: None,
+        duration: None,
+        date_added: None,
+        date_published: None,
+        availability: LibraryAvailabilityFilter::Available,
+        tags: Vec::new(),
+        creators: Vec::new(),
+        series: Vec::new(),
+        sites: Vec::new(),
+        rating: None,
+        collection_id: None,
+        favorite_only: false,
+        sort: LibrarySort::Recent,
+    }
 }
 
 fn escape_sql_like(value: &str) -> String {
@@ -5310,7 +5723,7 @@ mod tests {
                 row.get(0)
             })
             .expect("recovered migration version");
-        assert_eq!(latest_version, 18);
+        assert_eq!(latest_version, 19);
         let has_playback: bool = connection
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'library_playback')",
@@ -5337,6 +5750,24 @@ mod tests {
             )
             .expect("rich metadata table state");
         assert!(has_rich_metadata);
+        let has_smart_views: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master
+                 WHERE type = 'table' AND name = 'library_smart_views')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("smart view table state");
+        assert!(has_smart_views);
+        let has_search: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master
+                 WHERE type = 'table' AND name = 'library_search')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("search table state");
+        assert!(has_search);
     }
 
     #[test]
@@ -5665,7 +6096,7 @@ mod tests {
         );
 
         let mut request = library_query_request();
-        request.creator = Some("My channel name".to_owned());
+        request.creators = vec!["My channel name".to_owned()];
         assert_eq!(
             database
                 .query_library_items(request)
@@ -5770,8 +6201,8 @@ mod tests {
         assert!(extracted.effective.original_url.is_none());
 
         let mut request = library_query_request();
-        request.series = Some("current SERIES".to_owned());
-        request.site = Some("youtube".to_owned());
+        request.series = vec!["current SERIES".to_owned()];
+        request.sites = vec!["youtube".to_owned()];
         assert_eq!(
             database
                 .query_library_items(request)
@@ -5875,6 +6306,234 @@ mod tests {
             .set_library_artwork(&recent_id, Some("relative-cover.jpg".to_owned()))
             .expect_err("relative artwork path");
         assert_eq!(invalid_artwork.code, "invalid_library_artwork");
+    }
+
+    #[test]
+    fn indexes_search_saves_dynamic_views_and_recovers_drift() {
+        let directory = tempdir().expect("temporary directory");
+        let database =
+            Database::open(&directory.path().join("smart-discovery.sqlite3")).expect("database");
+        let first_id = Uuid::new_v4().to_string();
+        let second_id = Uuid::new_v4().to_string();
+        let third_id = Uuid::new_v4().to_string();
+        let now = Utc::now().timestamp_millis();
+        {
+            let connection = database.connection.lock().expect("database lock");
+            for (id, title, site, tags, relative_path) in [
+                (
+                    &first_id,
+                    "Quiet ocean",
+                    "YouTube",
+                    r#"["ambient"]"#,
+                    "Nature/ocean.mp4",
+                ),
+                (
+                    &second_id,
+                    "Forest walk",
+                    "Vimeo",
+                    r#"["nature"]"#,
+                    "Nature/forest.mp4",
+                ),
+                (
+                    &third_id,
+                    "Wildlife documentary",
+                    "YouTube",
+                    r#"["documentary"]"#,
+                    "Documentaries/wildlife.mp4",
+                ),
+            ] {
+                connection
+                    .execute(
+                        "INSERT INTO media_library
+                         (id, path, relative_path, title, site, tags_json, metadata_json, missing, added_at, updated_at, media_kind)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, '{}', 0, ?7, ?7, 'video')",
+                        params![
+                            id,
+                            directory.path().join(relative_path).to_string_lossy(),
+                            relative_path,
+                            title,
+                            site,
+                            tags,
+                            now
+                        ],
+                    )
+                    .expect("catalog item");
+            }
+            save_extracted_library_metadata(
+                &connection,
+                &first_id,
+                &serde_json::json!({
+                    "uploader": "Calm creator",
+                    "series": "Relaxation",
+                    "description": "Deep blue water"
+                }),
+            )
+            .expect("first search metadata");
+            save_extracted_library_metadata(
+                &connection,
+                &second_id,
+                &serde_json::json!({
+                    "uploader": "Trail creator",
+                    "series": "Relaxation",
+                    "description": "Green woodland trail"
+                }),
+            )
+            .expect("second search metadata");
+        }
+
+        for term in ["ocean", "deep water", "ambient", "Nature"] {
+            let mut request = library_query_request();
+            request.search = Some(term.to_owned());
+            assert!(
+                database
+                    .query_library_items(request)
+                    .expect("indexed search")
+                    .items
+                    .iter()
+                    .any(|item| item.id == first_id),
+                "search term {term} did not find the indexed item"
+            );
+        }
+
+        database
+            .save_library_rich_metadata(SaveLibraryRichMetadataRequest {
+                item_id: first_id.clone(),
+                creator: Some("Sleep channel".to_owned()),
+                description: Some("Deep blue water".to_owned()),
+                upload_date: None,
+                series: Some("Relaxation".to_owned()),
+                episode: None,
+                original_url: None,
+            })
+            .expect("searchable override");
+        let mut override_search = library_query_request();
+        override_search.search = Some("sleep channel".to_owned());
+        assert_eq!(
+            database
+                .query_library_items(override_search)
+                .expect("updated rich search index")
+                .items[0]
+                .id,
+            first_id
+        );
+
+        let mut metacharacters = library_query_request();
+        metacharacters.search = Some("ocean*".to_owned());
+        assert_eq!(
+            database
+                .query_library_items(metacharacters)
+                .expect("quoted FTS metacharacters")
+                .items[0]
+                .id,
+            first_id
+        );
+
+        let mut multi_creator = library_query_request();
+        multi_creator.creators = vec!["SLEEP CHANNEL".to_owned(), "Trail creator".to_owned()];
+        assert_eq!(
+            database
+                .query_library_items(multi_creator)
+                .expect("multi creator OR filter")
+                .total_items,
+            2
+        );
+
+        let smart_query = LibrarySmartViewQuery {
+            search: None,
+            source_id: None,
+            folder_source_id: None,
+            folder_path: None,
+            folder_scope: LibraryFolderScope::Tree,
+            media_kind: Some(LibraryMediaKind::Video),
+            resolution: None,
+            container: None,
+            duration: None,
+            date_added: None,
+            date_published: None,
+            availability: LibraryAvailabilityFilter::Available,
+            tags: Vec::new(),
+            creators: Vec::new(),
+            series: vec![" Relaxation ".to_owned(), "relaxation".to_owned()],
+            sites: Vec::new(),
+            rating: None,
+            collection_id: None,
+            favorite_only: false,
+            sort: LibrarySort::Recent,
+        };
+        let smart_view = database
+            .save_library_smart_view(SaveLibrarySmartViewRequest {
+                id: None,
+                name: "Relaxation videos".to_owned(),
+                query: smart_query.clone(),
+            })
+            .expect("save smart view");
+        assert_eq!(
+            database
+                .list_library_smart_views()
+                .expect("smart views")
+                .len(),
+            1
+        );
+        assert_eq!(smart_view.query.series, ["Relaxation"]);
+        assert_eq!(
+            database
+                .query_library_items(library_query_from_smart_view(&smart_view.query, 1, 60))
+                .expect("dynamic smart view")
+                .total_items,
+            2
+        );
+        let duplicate = database
+            .save_library_smart_view(SaveLibrarySmartViewRequest {
+                id: None,
+                name: "relaxation VIDEOS".to_owned(),
+                query: smart_query,
+            })
+            .expect_err("duplicate smart view name");
+        assert_eq!(duplicate.code, "duplicate_library_smart_view");
+        let mut oversized_query = smart_view.query.clone();
+        oversized_query.creators = (0..21).map(|index| format!("Creator {index}")).collect();
+        let invalid_query = database
+            .save_library_smart_view(SaveLibrarySmartViewRequest {
+                id: None,
+                name: "Too many creators".to_owned(),
+                query: oversized_query,
+            })
+            .expect_err("oversized smart view filter");
+        assert_eq!(invalid_query.code, "invalid_library_filter");
+
+        let related = database
+            .related_library_items(&first_id, 2)
+            .expect("related media");
+        assert_eq!(related.len(), 2);
+        assert_eq!(related[0].id, second_id);
+        assert_eq!(related[1].id, third_id);
+
+        {
+            let connection = database.connection.lock().expect("database lock");
+            connection
+                .execute("DELETE FROM library_search WHERE item_id = ?1", [&first_id])
+                .expect("damage search index");
+        }
+        assert!(
+            !database
+                .library_search_status()
+                .expect("damaged status")
+                .consistent
+        );
+        let rebuilt = database
+            .rebuild_library_search_index()
+            .expect("rebuild search index");
+        assert!(rebuilt.consistent);
+        assert_eq!(rebuilt.catalog_items, 3);
+        assert_eq!(rebuilt.indexed_items, 3);
+
+        database
+            .delete_library_smart_view(&smart_view.id)
+            .expect("delete smart view");
+        assert!(database
+            .list_library_smart_views()
+            .expect("smart views")
+            .is_empty());
     }
 
     #[test]
@@ -6162,10 +6821,10 @@ mod tests {
             date_added: None,
             date_published: None,
             availability: LibraryAvailabilityFilter::All,
-            tag: None,
-            creator: None,
-            series: None,
-            site: None,
+            tags: Vec::new(),
+            creators: Vec::new(),
+            series: Vec::new(),
+            sites: Vec::new(),
             rating: None,
             collection_id: None,
             favorite_only: false,
@@ -6448,7 +7107,7 @@ mod tests {
         combined.container = Some("mp4".to_owned());
         combined.duration = Some("short".to_owned());
         combined.availability = LibraryAvailabilityFilter::Available;
-        combined.tag = Some("curated".to_owned());
+        combined.tags = vec!["curated".to_owned()];
         combined.rating = Some("5".to_owned());
         combined.collection_id = Some(collection.id);
         combined.favorite_only = true;
@@ -6659,6 +7318,12 @@ mod tests {
             transaction.commit().expect("commit profile catalog");
         }
         let seed_elapsed = seeded_at.elapsed();
+        let search_status = database
+            .library_search_status()
+            .expect("profile search index status");
+        assert!(search_status.consistent);
+        assert_eq!(search_status.catalog_items, item_count);
+        assert_eq!(search_status.indexed_items, item_count);
 
         let first_page_at = Instant::now();
         let first_page = database

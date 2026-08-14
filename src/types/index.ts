@@ -455,14 +455,36 @@ export interface LibraryQueryRequest {
   dateAdded?: string | null;
   datePublished?: string | null;
   availability: LibraryAvailabilityFilter;
-  tag?: string | null;
-  creator?: string | null;
-  series?: string | null;
-  site?: string | null;
+  tags: string[];
+  creators: string[];
+  series: string[];
+  sites: string[];
   rating?: string | null;
   collectionId?: string | null;
   favoriteOnly: boolean;
   sort: LibrarySort;
+}
+
+export type LibrarySmartViewQuery = Omit<LibraryQueryRequest, "page" | "pageSize">;
+
+export interface LibrarySmartView {
+  id: string;
+  name: string;
+  query: LibrarySmartViewQuery;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SaveLibrarySmartViewRequest {
+  id?: string | null;
+  name: string;
+  query: LibrarySmartViewQuery;
+}
+
+export interface LibrarySearchStatus {
+  catalogItems: number;
+  indexedItems: number;
+  consistent: boolean;
 }
 
 export interface LibraryQueryResult {

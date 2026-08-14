@@ -169,7 +169,7 @@ Status: implementation in progress on `feat/library-accessibility-performance`.
 - Filter and pagination changes announce the exact visible result range. The Watch workspace separately announces its debounced search result page.
 - A keyboard-only and Orca checklist lives in [Library Accessibility QA](ACCESSIBILITY_QA.md), including scan, duplicate, Watch, fallback, scaling, contrast, and reduced-motion expectations.
 - Media details and Bulk Move now trap focus, preserve their invoking control, and use Library search/main content as a fallback when an operation removes that control. Add folder focuses its first action and restores focus when dismissed.
-- SQLite migration recovery has an automated rollback test that forces a mid-chain migration failure, proves schema and version changes are atomic, repairs the obstruction, and completes the same database through migration 18.
+- SQLite migration recovery has an automated rollback test that forces a mid-chain migration failure, proves schema and version changes are atomic, repairs the obstruction, and completes the same database through migration 19.
 - An ignored, repeatable 10,000–250,000-item Rust profiling harness measures database open, transactional seeding, first-page query, text search, and facet generation. `NICE_DOWNLOADER_LIBRARY_PROFILE_DIR` places the synthetic database on a chosen local, removable, or network filesystem; see [Library Performance Profiling](LIBRARY_PROFILING.md).
 
 Remaining before completion:
@@ -242,6 +242,20 @@ Status: implemented on `feat/library-rich-metadata`.
 - Version 2 Library backup/restore includes bounded rich-metadata overrides and remaps referenced catalog IDs safely.
 
 Acceptance: scan media with a yt-dlp `.info.json` sidecar, browse its creator/series/site, sort by publication date, edit and reset metadata, choose artwork, rescan without losing edits, and restore overrides from a Library backup.
+
+## Milestone 15 - Smart discovery and saved views
+
+Status: implemented on `feat/library-smart-discovery`.
+
+- Migration `0019_library_smart_discovery.sql` adds a local FTS5 index across title, creator, series, description, site, tags, and relative path. SQLite triggers update exactly one index row for every catalog insert, relevant update, rich-metadata refresh, and deletion.
+- Search input is converted into bounded quoted prefix terms before `MATCH`; React never supplies FTS syntax or SQL. A typed status command detects missing, extra, or duplicate index rows, and rebuilding runs as one Rust-owned SQLite transaction.
+- Creator and series selections open dedicated, paginated discovery headers with representative artwork and live result counts.
+- Tags, creators, series, and sites accept multiple values. Values use OR within their group and AND across groups, with visible removable filter chips and a 20-value backend limit per group.
+- Saved smart views persist validated filter and sort intent rather than item membership. Applying one restores the full query, and newly scanned matching media appears automatically.
+- Media details request a bounded related-media list using series first, then creator, site, or source. Responses are guarded when users navigate quickly, and the current item is never returned as its own recommendation.
+- Existing 5,105-item paging coverage and the manual 10,000–250,000-item profiling harness now exercise trigger-maintained FTS search.
+
+Acceptance: combine several filter values, save and reopen the view, scan matching media and see it appear automatically, browse a creator or series workspace, open related media, deliberately damage the search index in a test, and recover it without modifying source files.
 
 ## Explicitly deferred
 
