@@ -10,7 +10,7 @@ Filename templates remain typed intent. Rust rejects empty templates, path separ
 
 Subscriptions persist a channel or playlist URL, preset, destination, bounded recent-entry limit, and check interval. A Rust-owned scheduler loads due records once per minute, expands at most 20 recent entries through structured yt-dlp output, analyzes each entry, consults the durable download archive, and enqueues typed requests. The frontend can request an immediate check but never owns timers or deduplication state.
 
-Nice Downloader is a Linux-first Tauri desktop application that presents a stable, task-oriented interface over mature media tools. React renders the desktop experience; Rust owns every privileged or authoritative operation.
+Nice Downloader is a Linux-first Tauri desktop media hub that combines a non-destructive local library with a stable, task-oriented interface over mature media tools. React renders the desktop experience; Rust owns every privileged or authoritative operation.
 
 ## Design principles
 
@@ -125,9 +125,33 @@ Presets store reusable intent fields, not engine flags. Queue concurrency, queue
 - `subscriptions`: Rust-owned periodic playlist expansion, archive deduplication, and typed queue creation.
 - `transformations`: FFmpeg task ownership, structured `-progress` parsing, cancellation, crash reconciliation, and independent SQLite history.
 - `library`: non-destructive local-media catalog, safe `.info.json` normalization, tagging, missing-file reconciliation, and versioned metadata backup/restore.
+
+Library scans write catalog identity immediately, then enqueue IDs into a globally bounded metadata pipeline. ffprobe runs without a shell, emits JSON, and has a per-file timeout. Normalized duration, dimensions, FPS, codecs, container, HDR range, and the size/mtime fingerprint live in `library_media_metadata`; a changed fingerprint resets the record to pending while unchanged records retain their probe result. Artwork is generated into the application cache with a fingerprinted filename and can be cleared independently of source media.
+
+Library curation is persisted separately from filesystem scanning. Favorites and ratings live on catalog items; collections use dedicated collection and membership tables. Bulk curation commands validate a bounded set of UUIDs and execute in a single SQLite transaction. Rescanning an existing path preserves its title, tags, favorite, rating, and collection membership.
+
+Opt-in library watching is owned by `LibraryManager`. The native watcher coalesces event bursts before requesting a normal bounded scan; it never applies filesystem mutations. A lightweight source monitor detects unavailable watched volumes, emits normalized source status events, recreates watchers when volumes return, and schedules a source-scoped reconciliation scan. React can enable or disable watching but does not own watcher tasks or scan state.
+
+Reconciliation stores stable filesystem identity separately from user-facing metadata. On Unix, a unique device/inode match can preserve the existing item ID and curation across a rename, but only after confirming the previous path is gone. Added, modified, renamed, missing, and restored transitions become bounded review records delivered through normalized events.
+
+Duplicate analysis is an explicit, cancellable `LibraryManager` task. It narrows candidates by size, streams files through SHA-256 without following symlinks, verifies the fingerprint before and after reading, and caches only current hashes. React renders exact-content evidence and progress but cannot bypass the backend cleanup policy.
+
+Exact duplicate cleanup is a separate narrow command. It accepts only a current duplicate-group ID and member ID, re-derives the group from current SQLite fingerprints, requires another available member, and re-hashes the selected and retained files before invoking the platform Trash API. The catalog row is removed only after that recoverable operation succeeds; no permanent-delete command is exposed.
+
+Library organization uses persisted typed plans. React can request a Move, Copy, or Rename preview for a catalog item, but execution accepts only the resulting opaque operation ID. `LibraryManager` revalidates the regular-file source, catalog fingerprint, destination parent, filename extension, no-clobber condition, and journal state. SQLite atomically claims a plan before filesystem work. Copy stages data inside the destination filesystem before no-clobber publication; Move and Rename are same-filesystem no-clobber transitions. Completed actions update the catalog and journal, and Undo revalidates both paths and the latest fingerprint before reversing a move/rename or sending a copied file to platform Trash. Startup marks interrupted operations for explicit verification and expires abandoned previews. Cross-filesystem Move is rejected instead of silently becoming copy-delete.
+
+Subfolder browsing is presentation state derived from normalized `sourceId` plus `relativePath`. The selector exposes every ancestor folder with descendant-aware counts. A folder filter always includes nested paths and is combined with the source, media, curation, and metadata filters without granting React filesystem access.
 - `authentication`: longest-host-suffix matching, browser-profile discovery, and backend-only managed Netscape cookie files. Managed paths use owner-only permissions on Unix and are omitted from frontend DTOs.
 
-The tray and desktop settings form a small platform boundary. Window close policy is applied in the Tauri frontend while process survival, queue recovery, and persisted preferences remain backend-owned.
+The tray and desktop settings form a small platform boundary. Window close policy is applied in the Tauri frontend while process survival, queue recovery, and persisted preferences remain backend-owned. Desktop preferences also carry validated interface scale, reduced-motion, and high-contrast intent. React applies the visual classes and uses Tauri's narrowly permitted webview zoom command; only 90%, 100%, 110%, and 125% are accepted by Rust.
+
+## Media organizer boundary
+
+The Library can index multiple user-selected folders independently of download destinations. Sources, durable scan jobs, and catalog items are persisted in SQLite. A Rust-owned scanner performs bounded directory walks, ignores symlinks by default, classifies supported video and image extensions, and emits normalized progress events. Files remain in place; scanning and record removal never mutate external media.
+
+The default Library presentation is a browse-first media hub. React may request artwork only by catalog item ID. Rust validates the stored item, resolves FFmpeg internally, limits concurrent artwork work, and returns a bounded cached JPEG data URL; the webview never receives arbitrary filesystem read access. Opening media likewise accepts an item ID and resolves the persisted path in Rust.
+
+`docs/MEDIA_ORGANIZER.md` is the source of truth for organizer milestones, safety invariants, acceptance criteria, and deferred scope.
 
 ## Remaining extension points
 

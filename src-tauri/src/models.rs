@@ -571,6 +571,12 @@ pub struct TransformationTask {
 pub struct LibraryItem {
     pub id: String,
     pub path: String,
+    #[serde(default)]
+    pub source_id: Option<String>,
+    #[serde(default)]
+    pub relative_path: Option<String>,
+    #[serde(default)]
+    pub media_kind: Option<LibraryMediaKind>,
     pub title: String,
     pub source_url: Option<String>,
     pub thumbnail: Option<String>,
@@ -578,9 +584,68 @@ pub struct LibraryItem {
     pub site: Option<String>,
     pub tags: Vec<String>,
     pub metadata: serde_json::Value,
+    #[serde(default)]
+    pub file_size_bytes: Option<u64>,
+    #[serde(default)]
+    pub modified_at_ms: Option<i64>,
+    #[serde(default)]
+    pub width: Option<u32>,
+    #[serde(default)]
+    pub height: Option<u32>,
+    #[serde(default)]
+    pub fps: Option<f64>,
+    #[serde(default)]
+    pub video_codec: Option<String>,
+    #[serde(default)]
+    pub audio_codec: Option<String>,
+    #[serde(default)]
+    pub container: Option<String>,
+    #[serde(default)]
+    pub dynamic_range: Option<String>,
+    #[serde(default)]
+    pub metadata_state: LibraryMetadataState,
+    #[serde(default)]
+    pub metadata_error: Option<String>,
+    #[serde(default)]
+    pub favorite: bool,
+    #[serde(default)]
+    pub rating: Option<u8>,
     pub missing: bool,
     pub added_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum LibraryMetadataState {
+    #[default]
+    Pending,
+    Ready,
+    Failed,
+    Unavailable,
+}
+
+#[derive(Debug, Clone)]
+pub struct LibraryProbeResult {
+    pub file_size_bytes: u64,
+    pub modified_at_ms: i64,
+    pub duration_seconds: Option<f64>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub fps: Option<f64>,
+    pub video_codec: Option<String>,
+    pub audio_codec: Option<String>,
+    pub container: Option<String>,
+    pub dynamic_range: Option<String>,
+    pub state: LibraryMetadataState,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryCacheResult {
+    pub removed_files: usize,
+    pub freed_bytes: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -589,6 +654,174 @@ pub struct UpdateLibraryItemRequest {
     pub id: String,
     pub title: String,
     pub tags: Vec<String>,
+    pub favorite: bool,
+    pub rating: Option<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryCollection {
+    pub id: String,
+    pub name: String,
+    pub item_ids: Vec<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum LibraryChangeKind {
+    Added,
+    Modified,
+    Renamed,
+    Missing,
+    Restored,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryChange {
+    pub id: String,
+    pub item_id: String,
+    pub source_id: Option<String>,
+    pub kind: LibraryChangeKind,
+    pub previous_path: Option<String>,
+    pub detected_at: DateTime<Utc>,
+    pub reviewed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LibraryFileIdentity {
+    pub device_id: u64,
+    pub file_id: u64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum LibraryDuplicateAnalysisState {
+    Running,
+    Completed,
+    Cancelled,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryDuplicateAnalysisJob {
+    pub id: String,
+    pub state: LibraryDuplicateAnalysisState,
+    pub examined_items: usize,
+    pub candidate_items: usize,
+    pub hashed_items: usize,
+    pub skipped_items: usize,
+    pub total_candidate_bytes: u64,
+    pub hashed_bytes: u64,
+    pub groups_found: usize,
+    pub current_title: Option<String>,
+    pub error: Option<String>,
+    pub started_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryDuplicateGroup {
+    pub id: String,
+    pub item_ids: Vec<String>,
+    pub file_size_bytes: u64,
+    pub potential_reclaim_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryDuplicateTrashResult {
+    pub item_id: String,
+    pub group_id: String,
+    pub remaining_item_ids: Vec<String>,
+    pub moved_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum LibraryFileOperationKind {
+    Move,
+    Copy,
+    Rename,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum LibraryFileOperationState {
+    Planned,
+    Executing,
+    Completed,
+    Failed,
+    Undone,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewLibraryFileOperationRequest {
+    pub item_id: String,
+    pub kind: LibraryFileOperationKind,
+    pub destination_directory: Option<String>,
+    pub new_file_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryFileOperation {
+    pub id: String,
+    pub item_id: String,
+    pub output_item_id: Option<String>,
+    pub kind: LibraryFileOperationKind,
+    pub state: LibraryFileOperationState,
+    pub source_path: String,
+    pub destination_path: String,
+    pub source_size_bytes: u64,
+    pub source_modified_at_ms: i64,
+    pub error: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryFileOperationPlan {
+    pub operation: LibraryFileOperation,
+    pub source_display_name: String,
+    pub destination_display_name: String,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryFileOperationResult {
+    pub operation: LibraryFileOperation,
+    pub items: Vec<LibraryItem>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveLibraryCollectionRequest {
+    pub id: Option<String>,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum LibraryBulkAction {
+    SetFavorite { favorite: bool },
+    SetRating { rating: Option<u8> },
+    AddTags { tags: Vec<String> },
+    AddToCollection { collection_id: String },
+    RemoveFromCollection { collection_id: String },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -596,6 +829,85 @@ pub struct UpdateLibraryItemRequest {
 pub struct LibraryScanResult {
     pub checked_count: usize,
     pub missing_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum LibraryMediaKind {
+    Video,
+    Image,
+    Both,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum LibrarySourceStatus {
+    Online,
+    Offline,
+    Scanning,
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibrarySource {
+    pub id: String,
+    pub name: String,
+    pub path: String,
+    pub media_kind: LibraryMediaKind,
+    pub recursive: bool,
+    pub watch_enabled: bool,
+    pub private: bool,
+    pub include_patterns: Vec<String>,
+    pub exclude_patterns: Vec<String>,
+    pub status: LibrarySourceStatus,
+    pub last_error: Option<String>,
+    pub last_scanned_at: Option<DateTime<Utc>>,
+    pub item_count: usize,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveLibrarySourceRequest {
+    pub id: Option<String>,
+    pub name: String,
+    pub path: String,
+    pub media_kind: LibraryMediaKind,
+    pub recursive: bool,
+    pub watch_enabled: bool,
+    pub private: bool,
+    #[serde(default)]
+    pub include_patterns: Vec<String>,
+    #[serde(default)]
+    pub exclude_patterns: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum LibraryScanState {
+    Running,
+    Completed,
+    Cancelled,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryScanJob {
+    pub id: String,
+    pub source_id: String,
+    pub state: LibraryScanState,
+    pub discovered_count: usize,
+    pub indexed_count: usize,
+    pub skipped_count: usize,
+    pub warning_count: usize,
+    pub current_path: Option<String>,
+    pub warnings: Vec<String>,
+    pub started_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -648,10 +960,14 @@ pub enum CloseBehavior {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+#[serde(default)]
 pub struct DesktopPreferences {
     pub close_behavior: CloseBehavior,
     pub start_minimized: bool,
     pub notify_when_backgrounded: bool,
+    pub reduce_motion: bool,
+    pub high_contrast: bool,
+    pub interface_scale_percent: u16,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -666,6 +982,9 @@ impl Default for DesktopPreferences {
             close_behavior: CloseBehavior::Ask,
             start_minimized: false,
             notify_when_backgrounded: true,
+            reduce_motion: false,
+            high_contrast: false,
+            interface_scale_percent: 100,
         }
     }
 }
@@ -874,5 +1193,18 @@ mod tests {
         .unwrap();
         assert_eq!(options.gallery_selection, None);
         assert_eq!(options.output_conflict_policy, OutputConflictPolicy::Skip);
+    }
+
+    #[test]
+    fn older_desktop_preferences_receive_accessibility_defaults() {
+        let preferences: DesktopPreferences = serde_json::from_value(json!({
+            "closeBehavior": "ask",
+            "startMinimized": false,
+            "notifyWhenBackgrounded": true
+        }))
+        .expect("legacy desktop preferences");
+        assert!(!preferences.reduce_motion);
+        assert!(!preferences.high_contrast);
+        assert_eq!(preferences.interface_scale_percent, 100);
     }
 }

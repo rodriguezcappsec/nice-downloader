@@ -11,7 +11,7 @@ mod transformations;
 mod utils;
 
 use crate::{
-    database::Database, engines::managed, queue::QueueManager,
+    database::Database, engines::managed, library::LibraryManager, queue::QueueManager,
     transformations::TransformationManager,
 };
 use tauri::Manager;
@@ -87,6 +87,8 @@ pub fn run() {
             }
             let queue = QueueManager::new(database.clone())?;
             let transformations = TransformationManager::new(database.clone())?;
+            let library = LibraryManager::new(database.clone())?;
+            library.start_source_monitor(app.handle().clone());
             let recovery_queue = queue.clone();
             let recovery_app = app.handle().clone();
             let recovery_preferences = database.load_engine_preferences()?;
@@ -99,6 +101,7 @@ pub fn run() {
             app.manage(database);
             app.manage(queue);
             app.manage(transformations);
+            app.manage(library);
             tracing::info!(path = %data_directory.display(), "application backend initialized");
             Ok(())
         })
@@ -154,10 +157,34 @@ pub fn run() {
             commands::list_library_items,
             commands::import_library_files,
             commands::update_library_item,
+            commands::list_library_collections,
+            commands::save_library_collection,
+            commands::delete_library_collection,
+            commands::apply_library_bulk_action,
+            commands::list_library_changes,
+            commands::review_library_changes,
+            commands::get_library_duplicate_analysis,
+            commands::list_library_duplicate_groups,
+            commands::start_library_duplicate_analysis,
+            commands::cancel_library_duplicate_analysis,
+            commands::trash_library_duplicate_item,
+            commands::preview_library_file_operation,
+            commands::execute_library_file_operation,
+            commands::undo_library_file_operation,
+            commands::list_library_file_operations,
             commands::remove_library_item,
+            commands::get_library_artwork,
+            commands::clear_library_artwork_cache,
+            commands::open_library_item,
             commands::reconcile_library,
             commands::export_library,
             commands::restore_library,
+            commands::list_library_sources,
+            commands::save_library_source,
+            commands::remove_library_source,
+            commands::list_library_scan_jobs,
+            commands::start_library_scan,
+            commands::cancel_library_scan,
             commands::list_authentication_profiles,
             commands::save_authentication_profile,
             commands::delete_authentication_profile,

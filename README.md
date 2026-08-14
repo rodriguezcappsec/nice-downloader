@@ -1,17 +1,20 @@
 # Nice Downloader
 
-Nice Downloader is a desktop media download manager for Linux and Windows. It
-provides a task-focused interface over established tools such as
+Nice Downloader is a private desktop media hub and download manager for Linux
+and Windows. It brings downloaded media and existing local folders into a
+browse-first library, while providing a task-focused interface over established
+download tools such as
 [yt-dlp](https://github.com/yt-dlp/yt-dlp),
 [FFmpeg](https://ffmpeg.org/),
 [gallery-dl](https://github.com/mikf/gallery-dl), and
 [aria2](https://aria2.github.io/) instead of reimplementing media extraction.
 
-Paste a URL, inspect the available media, choose an understandable quality and
-format, and follow the download through analysis, transfer, merging, and
-post-processing. Rust owns engine execution, queue state, cancellation,
-filesystem access, and SQLite persistence; the React frontend never executes
-shell commands.
+The app opens into Media home, where videos and images are searchable and ready
+to open in the system player or viewer. Downloading has its own workspace for
+URL analysis, quality selection, active transfers, queue management, history,
+and subscriptions. Rust owns engine execution, scanning, queue state,
+cancellation, filesystem access, and SQLite persistence; the React frontend
+never executes shell commands.
 
 > Nice Downloader is an independent project. Download only media you are
 > authorized to access, and follow the terms and laws that apply to you.
@@ -58,6 +61,9 @@ warning because current builds are not code-signed.
 
 ## Features
 
+- Media-first home with visual shelves, source shortcuts, search, local artwork,
+  and video/image browsing
+- Non-destructive indexing for multiple local or external-drive folders
 - Structured media analysis with title, thumbnail, uploader, duration, site,
   formats, codecs, resolution, FPS, HDR, and estimated size when available
 - Simplified Best, 2160p, 1440p, 1080p, 720p, 480p, and audio-only choices
@@ -69,14 +75,17 @@ warning because current builds are not code-signed.
 - Subtitles, metadata, thumbnails, chapters, audio quality, codec preferences,
   output containers, filename templates, and reusable presets
 - Searchable download history, duplicate prevention, and output verification
-- Local media library with tags, missing-file reconciliation, sidecar imports,
-  and metadata backup/restore
+- Local media library with hierarchical folder filters, tags, collections,
+  change review, exact-duplicate analysis, recoverable Trash cleanup,
+  previewable Move/Copy/Rename with Undo, and metadata backup/restore
 - Scheduled playlist/channel subscriptions with archive-aware deduplication
 - FFmpeg-powered media transformations with progress and cancellation
 - Per-site browser-cookie, browser-profile, and proxy preferences
 - Managed yt-dlp and gallery-dl versions with checksum verification, pinning,
   update checks, and rollback
 - Dark/light themes, system tray behavior, diagnostics, and desktop notifications
+- Keyboard workspace commands, shortcut help, interface scaling, reduced motion,
+  high contrast, and assistive-technology status announcements
 
 ## Site and engine support
 

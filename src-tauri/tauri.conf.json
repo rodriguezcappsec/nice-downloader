@@ -13,10 +13,11 @@
     "windows": [
       {
         "title": "Nice Downloader",
-        "width": 1180,
-        "height": 760,
-        "minWidth": 900,
-        "minHeight": 620,
+        "width": 1440,
+        "height": 900,
+        "minWidth": 1000,
+        "minHeight": 680,
+        "maximized": true,
         "resizable": true,
         "center": true
       }
@@ -30,8 +31,8 @@
     "active": true,
     "targets": ["deb", "appimage"],
     "category": "Utility",
-    "shortDescription": "Linux desktop media download manager",
-    "longDescription": "A Linux-first desktop orchestration layer for yt-dlp, FFmpeg, gallery-dl, aria2c, and curl.",
+    "shortDescription": "Private desktop media hub and download manager",
+    "longDescription": "A Linux-first local media library and desktop orchestration layer for yt-dlp, FFmpeg, gallery-dl, aria2c, and curl.",
     "icon": ["icons/icon.png", "icons/icon.ico"],
     "resources": {
       "resources/engines/": "engines/"

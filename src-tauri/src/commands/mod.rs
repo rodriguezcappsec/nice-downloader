@@ -15,11 +15,15 @@ use crate::{
         AuthenticationProfile, BatchAnalysisItem, BatchAnalysisResponse, BatchDownloadFailure,
         BatchDownloadResult, BrowserProfileInfo, DesktopPreferences, DesktopRuntimeStatus,
         DiskSpaceInfo, DownloadArchiveMatch, DownloadJob, EngineId, EngineInfo, EnginePreferences,
-        GalleryItemList, LibraryItem, LibraryScanResult, MediaAnalysis, OnboardingStatus, Preset,
-        QueueSettings, QueueSnapshot, SaveAuthenticationProfileRequest, SavePresetRequest,
-        SaveSitePresetRuleRequest, SaveSubscriptionRequest, SitePresetRule, StartDownloadRequest,
-        StartTransformationRequest, Subscription, SubscriptionCheckResult, TransformationTask,
-        UpdateLibraryItemRequest,
+        GalleryItemList, LibraryBulkAction, LibraryCacheResult, LibraryChange, LibraryCollection,
+        LibraryDuplicateAnalysisJob, LibraryDuplicateGroup, LibraryDuplicateTrashResult,
+        LibraryFileOperation, LibraryFileOperationPlan, LibraryFileOperationResult, LibraryItem,
+        LibraryScanJob, LibraryScanResult, LibrarySource, MediaAnalysis, OnboardingStatus, Preset,
+        PreviewLibraryFileOperationRequest, QueueSettings, QueueSnapshot,
+        SaveAuthenticationProfileRequest, SaveLibraryCollectionRequest, SaveLibrarySourceRequest,
+        SavePresetRequest, SaveSitePresetRuleRequest, SaveSubscriptionRequest, SitePresetRule,
+        StartDownloadRequest, StartTransformationRequest, Subscription, SubscriptionCheckResult,
+        TransformationTask, UpdateLibraryItemRequest,
     },
     queue::{disk_space, QueueManager},
     subscriptions,
@@ -61,17 +65,21 @@ pub fn cancel_transformation(
 }
 
 #[tauri::command]
-pub fn list_library_items(database: State<'_, Database>) -> Result<Vec<LibraryItem>, AppError> {
-    database.list_library_items()
+pub fn list_library_items(
+    app: AppHandle,
+    library: State<'_, library::LibraryManager>,
+) -> Result<Vec<LibraryItem>, AppError> {
+    library.list_items(app)
 }
 
 #[tauri::command]
 pub fn import_library_files(
-    database: State<'_, Database>,
+    app: AppHandle,
+    library: State<'_, library::LibraryManager>,
     paths: Vec<String>,
     tags: Vec<String>,
 ) -> Result<Vec<LibraryItem>, AppError> {
-    library::import_paths(&database, paths, tags)
+    library.import_paths(app, paths, tags)
 }
 
 #[tauri::command]
@@ -83,8 +91,167 @@ pub fn update_library_item(
 }
 
 #[tauri::command]
+pub fn list_library_collections(
+    database: State<'_, Database>,
+) -> Result<Vec<LibraryCollection>, AppError> {
+    database.list_library_collections()
+}
+
+#[tauri::command]
+pub fn save_library_collection(
+    database: State<'_, Database>,
+    request: SaveLibraryCollectionRequest,
+) -> Result<LibraryCollection, AppError> {
+    database.save_library_collection(request)
+}
+
+#[tauri::command]
+pub fn delete_library_collection(
+    database: State<'_, Database>,
+    id: String,
+) -> Result<(), AppError> {
+    database.delete_library_collection(&id)
+}
+
+#[tauri::command]
+pub fn apply_library_bulk_action(
+    database: State<'_, Database>,
+    ids: Vec<String>,
+    action: LibraryBulkAction,
+) -> Result<Vec<LibraryItem>, AppError> {
+    database.apply_library_bulk_action(ids, action)
+}
+
+#[tauri::command]
+pub fn list_library_changes(database: State<'_, Database>) -> Result<Vec<LibraryChange>, AppError> {
+    database.list_library_changes()
+}
+
+#[tauri::command]
+pub fn review_library_changes(
+    database: State<'_, Database>,
+    ids: Vec<String>,
+) -> Result<usize, AppError> {
+    database.review_library_changes(ids)
+}
+
+#[tauri::command]
+pub fn get_library_duplicate_analysis(
+    library: State<'_, library::LibraryManager>,
+) -> Result<Option<LibraryDuplicateAnalysisJob>, AppError> {
+    library.duplicate_analysis_job()
+}
+
+#[tauri::command]
+pub fn list_library_duplicate_groups(
+    library: State<'_, library::LibraryManager>,
+) -> Result<Vec<LibraryDuplicateGroup>, AppError> {
+    library.duplicate_groups()
+}
+
+#[tauri::command]
+pub fn start_library_duplicate_analysis(
+    app: AppHandle,
+    library: State<'_, library::LibraryManager>,
+) -> Result<LibraryDuplicateAnalysisJob, AppError> {
+    library.start_duplicate_analysis(app)
+}
+
+#[tauri::command]
+pub fn cancel_library_duplicate_analysis(
+    library: State<'_, library::LibraryManager>,
+    job_id: String,
+) -> Result<(), AppError> {
+    library.cancel_duplicate_analysis(&job_id)
+}
+
+#[tauri::command]
+pub async fn trash_library_duplicate_item(
+    library: State<'_, library::LibraryManager>,
+    group_id: String,
+    item_id: String,
+) -> Result<LibraryDuplicateTrashResult, AppError> {
+    library.trash_duplicate_item(&group_id, &item_id).await
+}
+
+#[tauri::command]
+pub fn preview_library_file_operation(
+    library: State<'_, library::LibraryManager>,
+    request: PreviewLibraryFileOperationRequest,
+) -> Result<LibraryFileOperationPlan, AppError> {
+    library.preview_file_operation(request)
+}
+
+#[tauri::command]
+pub async fn execute_library_file_operation(
+    library: State<'_, library::LibraryManager>,
+    operation_id: String,
+) -> Result<LibraryFileOperationResult, AppError> {
+    library.execute_file_operation(&operation_id).await
+}
+
+#[tauri::command]
+pub async fn undo_library_file_operation(
+    library: State<'_, library::LibraryManager>,
+    operation_id: String,
+) -> Result<LibraryFileOperationResult, AppError> {
+    library.undo_file_operation(&operation_id).await
+}
+
+#[tauri::command]
+pub fn list_library_file_operations(
+    database: State<'_, Database>,
+) -> Result<Vec<LibraryFileOperation>, AppError> {
+    database.list_library_file_operations()
+}
+
+#[tauri::command]
 pub fn remove_library_item(database: State<'_, Database>, id: String) -> Result<(), AppError> {
     database.remove_library_item(&id)
+}
+
+#[tauri::command]
+pub async fn get_library_artwork(
+    app: AppHandle,
+    library: State<'_, library::LibraryManager>,
+    id: String,
+) -> Result<Option<String>, AppError> {
+    library.artwork_data_url(&app, &id).await
+}
+
+#[tauri::command]
+pub async fn clear_library_artwork_cache(
+    app: AppHandle,
+    library: State<'_, library::LibraryManager>,
+) -> Result<LibraryCacheResult, AppError> {
+    library.clear_artwork_cache(&app).await
+}
+
+#[tauri::command]
+pub fn open_library_item(database: State<'_, Database>, id: String) -> Result<(), AppError> {
+    let item = database.get_library_item(&id)?;
+    let path = std::path::PathBuf::from(item.path);
+    if !path.is_absolute() || !path.is_file() {
+        return Err(AppError::new(
+            "library_file_not_found",
+            "This media file is no longer available at its saved location.",
+        ));
+    }
+    #[cfg(target_os = "linux")]
+    let mut command = std::process::Command::new("xdg-open");
+    #[cfg(target_os = "macos")]
+    let mut command = std::process::Command::new("open");
+    #[cfg(target_os = "windows")]
+    let mut command = std::process::Command::new("explorer.exe");
+    crate::utils::process::sanitize_std_command(&mut command);
+    let mut child = command
+        .arg(path)
+        .spawn()
+        .map_err(|error| AppError::internal("could not open the library item", error))?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
 }
 
 #[tauri::command]
@@ -103,6 +270,54 @@ pub fn restore_library(
     path: String,
 ) -> Result<Vec<LibraryItem>, AppError> {
     library::restore_backup(&database, &path)
+}
+
+#[tauri::command]
+pub fn list_library_sources(
+    library: State<'_, library::LibraryManager>,
+) -> Result<Vec<LibrarySource>, AppError> {
+    library.list_sources()
+}
+
+#[tauri::command]
+pub fn save_library_source(
+    app: AppHandle,
+    library: State<'_, library::LibraryManager>,
+    request: SaveLibrarySourceRequest,
+) -> Result<LibrarySource, AppError> {
+    library.save_source_and_sync_watcher(app, request)
+}
+
+#[tauri::command]
+pub fn remove_library_source(
+    library: State<'_, library::LibraryManager>,
+    id: String,
+) -> Result<(), AppError> {
+    library.remove_source(&id)
+}
+
+#[tauri::command]
+pub fn list_library_scan_jobs(
+    library: State<'_, library::LibraryManager>,
+) -> Result<Vec<LibraryScanJob>, AppError> {
+    library.list_scan_jobs()
+}
+
+#[tauri::command]
+pub fn start_library_scan(
+    app: AppHandle,
+    library: State<'_, library::LibraryManager>,
+    source_id: String,
+) -> Result<LibraryScanJob, AppError> {
+    library.start_scan(app, &source_id)
+}
+
+#[tauri::command]
+pub fn cancel_library_scan(
+    library: State<'_, library::LibraryManager>,
+    job_id: String,
+) -> Result<(), AppError> {
+    library.cancel_scan(&job_id)
 }
 
 #[tauri::command]
@@ -182,6 +397,12 @@ pub async fn update_desktop_preferences(
     runtime: State<'_, DesktopRuntimeState>,
     mut preferences: DesktopPreferences,
 ) -> Result<DesktopPreferences, AppError> {
+    if !matches!(preferences.interface_scale_percent, 90 | 100 | 110 | 125) {
+        return Err(AppError::new(
+            "invalid_interface_scale",
+            "Choose a supported interface scale: 90%, 100%, 110%, or 125%.",
+        ));
+    }
     if !runtime.tray_available {
         preferences.start_minimized = false;
         if preferences.close_behavior == crate::models::CloseBehavior::Background {
@@ -741,6 +962,7 @@ pub fn open_download_output(
         }
         command
     };
+    crate::utils::process::sanitize_std_command(&mut command);
     let mut child = command
         .arg(target)
         .spawn()

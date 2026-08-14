@@ -15,8 +15,8 @@ export default {
         danger: "rgb(var(--danger) / <alpha-value>)"
       },
       boxShadow: {
-        panel: "0 20px 55px rgb(3 20 16 / 0.16), inset 0 1px 0 rgb(255 255 255 / 0.025)",
-        control: "0 1px 0 rgb(255 255 255 / 0.04), 0 8px 20px rgb(3 20 16 / 0.12)"
+        panel: "0 20px 55px rgb(3 11 24 / 0.22), inset 0 1px 0 rgb(255 255 255 / 0.025)",
+        control: "0 1px 0 rgb(255 255 255 / 0.04), 0 8px 20px rgb(3 11 24 / 0.18)"
       }
     },
   },
