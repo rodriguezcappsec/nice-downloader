@@ -27,9 +27,12 @@ export function TransformationsPage() {
   useEffect(() => {
     let active = true;
     let unlisten = () => {};
-    void api.listTransformationTasks().then((value) => { if (active) setTasks(value); }).catch((error) => setError(normalizeError(error)));
+    void api.listTransformationTasks().then((value) => {
+      if (!active) return;
+      setTasks((current) => mergeTransformationTasks(value, current));
+    }).catch((error) => setError(normalizeError(error)));
     void api.onTransformationUpdated((task) => {
-      setTasks((current) => [task, ...current.filter((item) => item.id !== task.id)]);
+      setTasks((current) => mergeTransformationTasks(current, [task]));
     }).then((cleanup) => { if (active) unlisten = cleanup; else cleanup(); });
     return () => { active = false; unlisten(); };
   }, [setError]);
@@ -64,7 +67,7 @@ export function TransformationsPage() {
     setStarting(true);
     try {
       const task = await api.startTransformation(request);
-      setTasks((current) => [task, ...current]);
+      setTasks((current) => mergeTransformationTasks([task], current));
       setNotice({ message: "Transformation started.", view: "transformations" });
     } catch (error) {
       setError(normalizeError(error));
@@ -125,6 +128,20 @@ function TransformationRow({ task, onCancel }: { task: TransformationTask; onCan
 }
 
 function fileName(path: string) { return path.split(/[\\/]/).pop() || path; }
+
+function mergeTransformationTasks(
+  baseline: TransformationTask[],
+  newer: TransformationTask[],
+): TransformationTask[] {
+  const tasks = new Map(baseline.map((task) => [task.id, task]));
+  for (const task of newer) {
+    const existing = tasks.get(task.id);
+    if (!existing || Date.parse(task.updatedAt) >= Date.parse(existing.updatedAt)) {
+      tasks.set(task.id, task);
+    }
+  }
+  return [...tasks.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
 
 function suggestedOutput(input: string, operation: OperationKind, audioCodec: string, container: string) {
   if (!input) return undefined;

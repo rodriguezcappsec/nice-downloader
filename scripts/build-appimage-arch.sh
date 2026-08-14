@@ -62,7 +62,7 @@ restore_engines() {
 trap restore_engines EXIT
 
 mask_dir="$(mktemp -d "${TMPDIR:-/tmp}/nice-downloader-searxng-mask.XXXXXX")"
-trap 'rmdir "$mask_dir" 2>/dev/null || true' EXIT
+trap 'restore_engines; rmdir "$mask_dir" 2>/dev/null || true' EXIT
 
 bwrap_args=(
   --ro-bind / /

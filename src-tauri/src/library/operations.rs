@@ -767,6 +767,180 @@ fn move_file_no_clobber(
     destination: &Path,
     expected_fingerprint: (u64, i64),
 ) -> Result<(), AppError> {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        move_file_no_clobber_linux(source, destination, expected_fingerprint)
+    }
+    #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+    {
+        move_file_no_clobber_with_links(source, destination, expected_fingerprint)
+    }
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn move_file_no_clobber_linux(
+    source: &Path,
+    destination: &Path,
+    expected_fingerprint: (u64, i64),
+) -> Result<(), AppError> {
+    use nix::{
+        errno::Errno,
+        fcntl::{renameat2, RenameFlags},
+    };
+
+    if !is_regular_file_with_fingerprint(source, expected_fingerprint) {
+        return Err(AppError::new(
+            "library_operation_stale_plan",
+            "The source file changed after preview. Nothing was moved.",
+        ));
+    }
+    let source_identity = file_identity(source);
+    match renameat2(
+        None,
+        source,
+        None,
+        destination,
+        RenameFlags::RENAME_NOREPLACE,
+    ) {
+        Ok(()) => {}
+        Err(Errno::EEXIST) => {
+            return Err(AppError::new(
+                "library_operation_conflict",
+                "A file appeared at the destination. Nothing was overwritten.",
+            ));
+        }
+        Err(Errno::EXDEV) => {
+            return Err(AppError::new(
+                "library_operation_cross_device",
+                "This move crosses filesystems. Copy the file first, verify it, then move the original to Trash.",
+            ));
+        }
+        Err(Errno::EINVAL | Errno::ENOSYS | Errno::EOPNOTSUPP | Errno::EPERM) => {
+            return move_file_by_copy_no_clobber(source, destination, expected_fingerprint);
+        }
+        Err(error) => {
+            return Err(AppError::internal(
+                "could not move the file to its destination",
+                io::Error::from_raw_os_error(error as i32),
+            ));
+        }
+    }
+
+    let destination_is_valid = fs::symlink_metadata(destination)
+        .is_ok_and(|metadata| metadata.file_type().is_file() && !metadata.file_type().is_symlink())
+        && file_fingerprint(destination) == Some(expected_fingerprint)
+        && source_identity
+            .zip(file_identity(destination))
+            .is_none_or(|(expected, current)| expected == current);
+    if destination_is_valid {
+        return Ok(());
+    }
+
+    let rollback = renameat2(
+        None,
+        destination,
+        None,
+        source,
+        RenameFlags::RENAME_NOREPLACE,
+    );
+    Err(AppError::with_details(
+        "library_operation_stale_plan",
+        "The source file changed while it was being moved. The app attempted to restore it.",
+        rollback
+            .err()
+            .map(|error| format!("rollback failed: {error}"))
+            .unwrap_or_else(|| "rollback succeeded".to_owned()),
+    ))
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn move_file_by_copy_no_clobber(
+    source: &Path,
+    destination: &Path,
+    expected_fingerprint: (u64, i64),
+) -> Result<(), AppError> {
+    if !is_regular_file_with_fingerprint(source, expected_fingerprint) {
+        return Err(AppError::new(
+            "library_operation_stale_plan",
+            "The source file changed after preview. Nothing was moved.",
+        ));
+    }
+
+    let mut destination_created = false;
+    let result = (|| {
+        let source_file = fs::File::open(source)
+            .map_err(|error| AppError::internal("could not open the source file", error))?;
+        let destination_file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(destination)
+            .map_err(|error| {
+                if destination.exists() {
+                    AppError::new(
+                        "library_operation_conflict",
+                        "A file appeared at the destination. Nothing was overwritten.",
+                    )
+                } else {
+                    AppError::internal("could not create the destination file", error)
+                }
+            })?;
+        destination_created = true;
+        let mut reader = BufReader::with_capacity(1024 * 1024, source_file);
+        let mut writer = BufWriter::with_capacity(1024 * 1024, destination_file);
+        let copied = io::copy(&mut reader, &mut writer)
+            .map_err(|error| AppError::internal("could not copy the media file", error))?;
+        writer
+            .flush()
+            .map_err(|error| AppError::internal("could not flush the moved file", error))?;
+        writer
+            .get_ref()
+            .sync_all()
+            .map_err(|error| AppError::internal("could not sync the moved file", error))?;
+        drop(writer);
+
+        if copied != expected_fingerprint.0
+            || !is_regular_file_with_fingerprint(source, expected_fingerprint)
+            || fs::symlink_metadata(destination)
+                .map(|metadata| {
+                    !metadata.file_type().is_file()
+                        || metadata.file_type().is_symlink()
+                        || metadata.len() != expected_fingerprint.0
+                })
+                .unwrap_or(true)
+        {
+            return Err(AppError::new(
+                "library_operation_stale_plan",
+                "The source file changed while it was being moved. The incomplete destination was removed.",
+            ));
+        }
+
+        if let Err(error) = fs::remove_file(source) {
+            let rollback_error = fs::remove_file(destination).err();
+            return Err(if let Some(rollback_error) = rollback_error {
+                AppError::with_details(
+                    "library_operation_cleanup_failed",
+                    "The original could not be removed and the destination could not be rolled back. Run Verify files.",
+                    format!("source removal: {error}; destination rollback: {rollback_error}"),
+                )
+            } else {
+                AppError::internal("could not remove the original after copying it", error)
+            });
+        }
+        Ok(())
+    })();
+
+    if result.is_err() && destination_created && source.exists() {
+        let _ = fs::remove_file(destination);
+    }
+    result
+}
+
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+fn move_file_no_clobber_with_links(
+    source: &Path,
+    destination: &Path,
+    expected_fingerprint: (u64, i64),
+) -> Result<(), AppError> {
     if !is_regular_file_with_fingerprint(source, expected_fingerprint) {
         return Err(AppError::new(
             "library_operation_stale_plan",
@@ -793,7 +967,7 @@ fn move_file_no_clobber(
         .is_ok_and(|metadata| metadata.file_type().is_file() && !metadata.file_type().is_symlink())
         && file_fingerprint(destination) == Some(expected_fingerprint)
         && source_identity
-            .zip(file_identity(source))
+            .zip(file_identity(destination))
             .is_none_or(|(expected, current)| expected == current);
     if !destination_is_valid {
         let _ = fs::remove_file(destination);
@@ -802,13 +976,20 @@ fn move_file_no_clobber(
             "The source file changed while it was being moved. Nothing was removed.",
         ));
     }
-    if let Err(error) = fs::remove_file(source) {
+    let source_parent = source.parent().ok_or_else(|| {
+        AppError::new(
+            "invalid_library_source",
+            "The source file does not have a valid parent folder.",
+        )
+    })?;
+    let claim = source_parent.join(format!(".nice-downloader-move-{}.claim", Uuid::new_v4()));
+    if let Err(error) = fs::rename(source, &claim) {
         let rollback_error = fs::remove_file(destination).err();
         return Err(if let Some(rollback_error) = rollback_error {
             AppError::with_details(
                 "library_operation_cleanup_failed",
-                "The source could not be removed and the destination could not be rolled back. Run Verify files.",
-                format!("source removal: {error}; destination rollback: {rollback_error}"),
+                "The source could not be claimed and the destination could not be rolled back. Run Verify files.",
+                format!("source claim: {error}; destination rollback: {rollback_error}"),
             )
         } else {
             AppError::internal(
@@ -817,7 +998,57 @@ fn move_file_no_clobber(
             )
         });
     }
+    let claim_is_valid = is_regular_file_with_fingerprint(&claim, expected_fingerprint)
+        && source_identity
+            .zip(file_identity(&claim))
+            .is_none_or(|(expected, current)| expected == current);
+    if !claim_is_valid {
+        let destination_rollback = fs::remove_file(destination).err();
+        let restore_error = restore_claim_no_clobber(&claim, source).err();
+        return Err(AppError::with_details(
+            "library_operation_stale_plan",
+            "The source path changed during the move. No unverified file was deleted.",
+            format!(
+                "claim: {}; destination rollback: {}; source restore: {}",
+                claim.display(),
+                destination_rollback
+                    .map(|error| error.to_string())
+                    .unwrap_or_else(|| "ok".to_owned()),
+                restore_error
+                    .map(|error| error.to_string())
+                    .unwrap_or_else(|| "ok".to_owned())
+            ),
+        ));
+    }
+    if let Err(error) = fs::remove_file(&claim) {
+        let restore_error = restore_claim_no_clobber(&claim, source).err();
+        let destination_rollback = if restore_error.is_none() {
+            fs::remove_file(destination).err()
+        } else {
+            None
+        };
+        return Err(AppError::with_details(
+            "library_operation_cleanup_failed",
+            "The verified source claim could not be removed, so Nice Downloader attempted to roll back the move.",
+            format!(
+                "claim {}: {error}; source restore: {}; destination rollback: {}",
+                claim.display(),
+                restore_error
+                    .map(|error| error.to_string())
+                    .unwrap_or_else(|| "ok".to_owned()),
+                destination_rollback
+                    .map(|error| error.to_string())
+                    .unwrap_or_else(|| "ok".to_owned())
+            ),
+        ));
+    }
     Ok(())
+}
+
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+fn restore_claim_no_clobber(claim: &Path, source: &Path) -> io::Result<()> {
+    fs::hard_link(claim, source)?;
+    fs::remove_file(claim)
 }
 
 fn is_regular_file_with_fingerprint(path: &Path, expected: (u64, i64)) -> bool {
@@ -958,6 +1189,48 @@ mod tests {
                 updated_at: now,
             })
             .expect("catalog fixture")
+    }
+
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[test]
+    fn copy_fallback_moves_without_hard_links() {
+        let directory = tempdir().expect("temporary directory");
+        let source = directory.path().join("source.mp4");
+        let destination = directory.path().join("destination.mp4");
+        fs::write(&source, b"media fixture").expect("media fixture");
+        let fingerprint = file_fingerprint(&source).expect("source fingerprint");
+
+        move_file_by_copy_no_clobber(&source, &destination, fingerprint).expect("copy-backed move");
+
+        assert!(!source.exists());
+        assert_eq!(
+            fs::read(&destination).expect("destination contents"),
+            b"media fixture"
+        );
+    }
+
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[test]
+    fn copy_fallback_never_removes_an_existing_destination() {
+        let directory = tempdir().expect("temporary directory");
+        let source = directory.path().join("source.mp4");
+        let destination = directory.path().join("destination.mp4");
+        fs::write(&source, b"source fixture").expect("source fixture");
+        fs::write(&destination, b"existing fixture").expect("destination fixture");
+        let fingerprint = file_fingerprint(&source).expect("source fingerprint");
+
+        let error = move_file_by_copy_no_clobber(&source, &destination, fingerprint)
+            .expect_err("destination conflict");
+
+        assert_eq!(error.code, "library_operation_conflict");
+        assert_eq!(
+            fs::read(&source).expect("source remains"),
+            b"source fixture"
+        );
+        assert_eq!(
+            fs::read(&destination).expect("destination remains"),
+            b"existing fixture"
+        );
     }
 
     #[tokio::test]

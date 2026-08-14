@@ -81,7 +81,13 @@ pub fn run() {
             })?;
             managed::initialize(&data_directory, &resource_directory)?;
             let database = Database::open(&data_directory.join("nice-downloader.sqlite3"))?;
-            let media_server = media_server::start(database.clone()).unwrap_or_else(|error| {
+            let playback_cache_directory = app
+                .path()
+                .app_cache_dir()
+                .map(|path| path.join("library-playback"))
+                .unwrap_or_else(|_| data_directory.join("library-playback-cache"));
+            let media_server = media_server::start(database.clone(), playback_cache_directory)
+                .unwrap_or_else(|error| {
                 tracing::warn!(%error, "embedded playback is unavailable; system-player fallback remains enabled");
                 media_server::MediaServerState::unavailable(database.clone())
             });
@@ -164,14 +170,33 @@ pub fn run() {
             commands::query_library_items,
             commands::get_library_facets,
             commands::get_library_items_by_ids,
+            commands::prepare_library_image_view,
+            commands::inspect_library_playback,
             commands::prepare_library_playback,
+            commands::inspect_library_playback_fallback,
+            commands::prepare_library_playback_fallback,
+            commands::release_library_playback,
+            commands::get_library_playback_cache_status,
+            commands::clear_library_playback_cache,
             commands::save_library_playback_progress,
             commands::list_continue_watching,
+            commands::get_library_watch_state,
+            commands::set_library_watch_later,
+            commands::set_library_watched,
+            commands::list_library_watch_later,
+            commands::list_recently_watched,
             commands::import_library_files,
             commands::update_library_item,
             commands::list_library_collections,
             commands::save_library_collection,
             commands::delete_library_collection,
+            commands::list_library_playlists,
+            commands::save_library_playlist,
+            commands::delete_library_playlist,
+            commands::add_library_playlist_item,
+            commands::remove_library_playlist_item,
+            commands::move_library_playlist_item,
+            commands::list_library_playlist_items,
             commands::apply_library_bulk_action,
             commands::list_library_changes,
             commands::review_library_changes,

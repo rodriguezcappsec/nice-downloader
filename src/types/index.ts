@@ -107,6 +107,7 @@ export interface DesktopPreferences {
   reduceMotion: boolean;
   highContrast: boolean;
   interfaceScalePercent: 90 | 100 | 110 | 125;
+  playbackCompatibility: "ask" | "automatic" | "never";
 }
 export interface DesktopRuntimeStatus { trayAvailable: boolean; }
 
@@ -437,6 +438,7 @@ export interface LibraryItem {
 
 export type LibraryAvailabilityFilter = "all" | "available" | "missing";
 export type LibraryFolderScope = "tree" | "direct";
+export type LibrarySort = "recent" | "oldest" | "titleAsc" | "titleDesc" | "durationDesc" | "durationAsc" | "sizeDesc" | "sizeAsc" | "fileDateDesc" | "fileDateAsc";
 
 export interface LibraryQueryRequest {
   page: number;
@@ -456,6 +458,7 @@ export interface LibraryQueryRequest {
   rating?: string | null;
   collectionId?: string | null;
   favoriteOnly: boolean;
+  sort: LibrarySort;
 }
 
 export interface LibraryQueryResult {
@@ -507,6 +510,12 @@ export interface LibraryPlaybackEntry {
   playback: LibraryPlaybackState;
 }
 
+export interface LibraryWatchState {
+  itemId: string;
+  watchLater: boolean;
+  playback?: LibraryPlaybackState | null;
+}
+
 export interface LibrarySubtitleTrack {
   label: string;
   language?: string | null;
@@ -518,6 +527,32 @@ export interface LibraryPlaybackSession {
   url: string;
   playback?: LibraryPlaybackState | null;
   subtitles: LibrarySubtitleTrack[];
+  compatibilityMode: boolean;
+  compatibilityTranscoded: boolean;
+}
+
+export interface LibraryImageSession {
+  itemId: string;
+  url: string;
+}
+
+export interface LibraryPlaybackPreflight {
+  compatibilityRequired: boolean;
+  compatibilityCached: boolean;
+  unusuallyLarge: boolean;
+  reencodeRequired: boolean;
+  estimatedCopyBytes: number;
+  availableSpaceBytes?: number | null;
+  reason?: string | null;
+  preference: DesktopPreferences["playbackCompatibility"];
+  requiresConfirmation: boolean;
+}
+
+export interface LibraryPlaybackCacheStatus {
+  fileCount: number;
+  totalBytes: number;
+  maxFiles: number;
+  maxBytes: number;
 }
 
 export interface LibraryCacheResult {
@@ -543,6 +578,15 @@ export interface UpdateLibraryItemRequest {
 export interface LibraryCollection {
   id: string;
   name: string;
+  itemIds: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface LibraryPlaylist {
+  id: string;
+  name: string;
+  description: string;
   itemIds: string[];
   createdAt: string;
   updatedAt: string;
@@ -659,6 +703,12 @@ export interface LibraryBulkMoveResult {
 export interface SaveLibraryCollectionRequest {
   id?: string | null;
   name: string;
+}
+
+export interface SaveLibraryPlaylistRequest {
+  id?: string | null;
+  name: string;
+  description: string;
 }
 
 export type LibraryBulkAction =

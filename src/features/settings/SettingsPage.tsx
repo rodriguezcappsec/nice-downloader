@@ -3,7 +3,9 @@ import {
   CircleX,
   Cookie,
   DownloadCloud,
+  Eraser,
   Globe2,
+  HardDrive,
   Network,
   RefreshCw,
   RotateCcw,
@@ -19,11 +21,13 @@ import { Page } from "../../components/Page";
 import { Button, Field, Input, Select } from "../../components/ui";
 import { useAppStore } from "../../stores/app-store";
 import { api, normalizeError } from "../../lib/tauri";
+import { formatBytes } from "../../lib/format";
 import type {
   BrowserCookieSource,
   AuthenticationProfile,
   BrowserProfileInfo,
   DesktopPreferences,
+  LibraryPlaybackCacheStatus,
   EngineId,
   EngineUpdateCandidate,
   ManagedEngineStatus,
@@ -399,9 +403,11 @@ function DesktopSettings() {
   const setNotice = useAppStore((state) => state.setNotice);
   const [preferences, setPreferences] = useState<DesktopPreferences | null>(null);
   const [trayAvailable, setTrayAvailable] = useState(true);
+  const [playbackCache, setPlaybackCache] = useState<LibraryPlaybackCacheStatus | null>(null);
+  const [clearingPlaybackCache, setClearingPlaybackCache] = useState(false);
   useEffect(() => {
-    void Promise.all([api.getDesktopPreferences(), api.getDesktopRuntimeStatus()])
-      .then(([saved, runtime]) => { setPreferences(saved); setTrayAvailable(runtime.trayAvailable); })
+    void Promise.all([api.getDesktopPreferences(), api.getDesktopRuntimeStatus(), api.getLibraryPlaybackCacheStatus()])
+      .then(([saved, runtime, cache]) => { setPreferences(saved); setTrayAvailable(runtime.trayAvailable); setPlaybackCache(cache); })
       .catch((error) => setError(normalizeError(error)));
   }, [setError]);
   async function saveDesktop() {
@@ -414,6 +420,20 @@ function DesktopSettings() {
     }
     catch (error) { setError(normalizeError(error)); }
   }
+  async function clearPlaybackCache() {
+    if (clearingPlaybackCache) return;
+    setClearingPlaybackCache(true);
+    try {
+      const result = await api.clearLibraryPlaybackCache();
+      const status = await api.getLibraryPlaybackCacheStatus();
+      setPlaybackCache(status);
+      setNotice({ message: result.removedFiles > 0 ? `Cleared ${result.removedFiles} compatibility ${result.removedFiles === 1 ? "copy" : "copies"} (${formatBytes(result.freedBytes)}).` : "The compatibility cache is already empty.", view: "settings" });
+    } catch (error) {
+      setError(normalizeError(error));
+    } finally {
+      setClearingPlaybackCache(false);
+    }
+  }
   if (!preferences) return <div className="p-8 text-sm text-muted">Loading desktop preferences…</div>;
   return <section className="mb-8">
     <div className="mb-3 flex items-center gap-2"><Settings2 size={17} className="text-muted" /><h2 className="text-sm font-semibold">Desktop and accessibility</h2></div>
@@ -423,6 +443,10 @@ function DesktopSettings() {
         <div className="space-y-4 pt-1"><label className="flex items-start gap-3 text-sm text-muted"><input className="mt-1" type="checkbox" disabled={!trayAvailable} checked={preferences.startMinimized && trayAvailable} onChange={(event) => setPreferences({ ...preferences, startMinimized: event.target.checked })} /><span><strong className="block font-medium text-ink">Start in the background</strong>Open from the system tray when ready.</span></label><label className="flex items-start gap-3 text-sm text-muted"><input className="mt-1" type="checkbox" checked={preferences.notifyWhenBackgrounded} onChange={(event) => setPreferences({ ...preferences, notifyWhenBackgrounded: event.target.checked })} /><span><strong className="block font-medium text-ink">Background completion notices</strong>Use desktop notifications when supported.</span></label></div>
       </div>
       <div className="mt-6 grid gap-5 border-t border-line/60 pt-5 md:grid-cols-2"><Field label="Interface scale" hint="Enlarges the complete interface, including fixed-size controls and media details."><Select value={preferences.interfaceScalePercent} onChange={(event) => setPreferences({ ...preferences, interfaceScalePercent: Number(event.target.value) as DesktopPreferences["interfaceScalePercent"] })}><option value={90}>90% — Compact</option><option value={100}>100% — Default</option><option value={110}>110% — Large</option><option value={125}>125% — Extra large</option></Select></Field><div className="space-y-4 pt-1"><label className="flex items-start gap-3 text-sm text-muted"><input className="mt-1" type="checkbox" checked={preferences.reduceMotion} onChange={(event) => setPreferences({ ...preferences, reduceMotion: event.target.checked })} /><span><strong className="block font-medium text-ink">Reduce motion</strong>Stops decorative animation and minimizes transitions.</span></label><label className="flex items-start gap-3 text-sm text-muted"><input className="mt-1" type="checkbox" checked={preferences.highContrast} onChange={(event) => setPreferences({ ...preferences, highContrast: event.target.checked })} /><span><strong className="block font-medium text-ink">Higher contrast</strong>Strengthens borders, muted text, and keyboard focus indicators.</span></label></div></div>
+      <div className="mt-6 grid gap-5 border-t border-line/60 pt-5 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+        <Field label="Embedded playback compatibility" hint="Controls whether Nice Downloader may make a temporary stream-copy when the Linux WebView cannot play a file reliably."><Select value={preferences.playbackCompatibility} onChange={(event) => setPreferences({ ...preferences, playbackCompatibility: event.target.value as DesktopPreferences["playbackCompatibility"] })}><option value="ask">Ask before creating a copy</option><option value="automatic">Create copies automatically</option><option value="never">Never create automatically</option></Select></Field>
+        <div className="rounded-[10px] border border-line/60 bg-elevated/35 p-4"><div className="flex items-start gap-3"><div className="grid size-9 shrink-0 place-items-center rounded-[8px] bg-elevated text-accent"><HardDrive size={16} /></div><div className="min-w-0 flex-1"><h3 className="text-xs font-semibold text-ink">Compatibility cache</h3><p className="mt-1 text-[11px] leading-5 text-muted">Timing copies use lossless stream-copy. Explicit H.264 fallbacks re-encode only when the WebView rejects that copy. Originals are never changed.</p>{playbackCache ? <p className="number-font mt-2 text-[10px] text-muted">{playbackCache.fileCount} {playbackCache.fileCount === 1 ? "copy" : "copies"} · {formatBytes(playbackCache.totalBytes)} of {formatBytes(playbackCache.maxBytes)} · {playbackCache.maxFiles} file limit</p> : <p className="mt-2 text-[10px] text-muted">Cache usage unavailable.</p>}</div></div><Button variant="secondary" className="mt-3 h-9 w-full text-xs" disabled={clearingPlaybackCache || !playbackCache || playbackCache.fileCount === 0} onClick={() => void clearPlaybackCache()}>{clearingPlaybackCache ? <RefreshCw className="animate-spin" size={14} /> : <Eraser size={14} />} Clear compatibility cache</Button></div>
+      </div>
       <div className="mt-5 flex items-center justify-between border-t border-line/60 pt-4"><p className="text-xs text-muted">System reduced-motion and increased-contrast preferences are also honored automatically.</p><Button onClick={() => void saveDesktop()}><Save size={15} /> Save preferences</Button></div>
     </div>
   </section>;

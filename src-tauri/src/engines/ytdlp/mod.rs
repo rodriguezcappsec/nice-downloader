@@ -10,9 +10,13 @@ use crate::{
     },
     utils::validation::{validate_filename_template, validate_media_url},
 };
-use std::collections::HashSet;
-use std::{path::PathBuf, time::Duration};
-use tokio::{process::Command, time::timeout};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+    sync::OnceLock,
+    time::Duration,
+};
+use tokio::{process::Command, sync::Mutex, time::timeout};
 
 pub use metadata::parse_metadata;
 
@@ -25,6 +29,9 @@ pub struct YtDlpEngine {
 pub struct YtDlpRuntimeCapabilities {
     pub preferred_impersonation_target: Option<String>,
 }
+
+static RUNTIME_CAPABILITIES: OnceLock<Mutex<HashMap<PathBuf, YtDlpRuntimeCapabilities>>> =
+    OnceLock::new();
 
 impl YtDlpRuntimeCapabilities {
     pub fn impersonation_available(&self) -> bool {
@@ -400,13 +407,21 @@ fn with_fallback_details(mut initial_error: AppError, fallback_error: &str) -> A
 }
 
 pub async fn detect_runtime_capabilities(path: &std::path::Path) -> YtDlpRuntimeCapabilities {
+    let cache = RUNTIME_CAPABILITIES.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(capabilities) = cache.lock().await.get(path).cloned() {
+        return capabilities;
+    }
     let mut command = Command::new(path);
     crate::utils::process::sanitize_tokio_command(&mut command);
-    let output = command
-        .args(["--ignore-config", "--list-impersonate-targets"])
-        .output()
-        .await;
-    let Ok(output) = output else {
+    command.kill_on_drop(true);
+    let output = timeout(
+        Duration::from_secs(5),
+        command
+            .args(["--ignore-config", "--list-impersonate-targets"])
+            .output(),
+    )
+    .await;
+    let Ok(Ok(output)) = output else {
         return YtDlpRuntimeCapabilities::default();
     };
     let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -414,9 +429,14 @@ pub async fn detect_runtime_capabilities(path: &std::path::Path) -> YtDlpRuntime
         text.push('\n');
         text.push_str(&String::from_utf8_lossy(&output.stderr));
     }
-    YtDlpRuntimeCapabilities {
+    let capabilities = YtDlpRuntimeCapabilities {
         preferred_impersonation_target: parse_impersonation_target(&text),
-    }
+    };
+    cache
+        .lock()
+        .await
+        .insert(path.to_path_buf(), capabilities.clone());
+    capabilities
 }
 
 fn parse_impersonation_target(value: &str) -> Option<String> {

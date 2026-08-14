@@ -88,7 +88,7 @@ export function SubscriptionsPage() {
       setError(normalizeError(error));
       void api.listSubscriptions().then(setSubscriptions).catch(() => undefined);
     } finally {
-      setChecking(null);
+      setChecking((current) => current === subscription.id ? null : current);
     }
   }
 
@@ -143,7 +143,7 @@ export function SubscriptionsPage() {
               <article key={subscription.id} className="grid grid-cols-[40px_minmax(0,1fr)_auto] items-center gap-4 p-4 transition-colors hover:bg-elevated/25">
                 <div className={`grid size-10 place-items-center rounded-[9px] ${subscription.enabled ? "bg-accent/10 text-accent" : "bg-elevated text-muted"}`}><Rss size={17} /></div>
                 <div className="min-w-0"><div className="flex items-center gap-2"><h3 className="truncate text-[13px] font-semibold">{subscription.name}</h3>{!subscription.enabled ? <span className="rounded-[4px] bg-elevated px-1.5 py-0.5 text-[9px] text-muted">Paused</span> : null}</div><p className="mt-1 truncate text-[11px] text-muted">{subscription.url}</p><div className="mt-2 flex flex-wrap gap-3 text-[10px] text-muted"><span className="flex items-center gap-1"><Clock3 size={11} /> Next {formatRelative(subscription.nextCheckAt)}</span><span>Every {formatInterval(subscription.checkIntervalMinutes)}</span><span>Up to {subscription.maxEntries} entries</span>{subscription.lastError ? <span className="text-red-400">{subscription.lastError}</span> : null}</div></div>
-                <div className="flex items-center gap-1"><Button variant="ghost" className="h-8 px-2.5" disabled={!subscription.enabled || checking === subscription.id} onClick={() => void checkNow(subscription)}><RefreshCw className={checking === subscription.id ? "animate-spin" : ""} size={14} /> Check now</Button><Button variant="ghost" className="h-8 px-2.5" onClick={() => void toggleSubscription(subscription)}>{subscription.enabled ? <Pause size={14} /> : <Play size={14} />}{subscription.enabled ? "Pause" : "Enable"}</Button><Button variant="danger" className="h-8 px-2" aria-label={`Delete ${subscription.name}`} onClick={() => void api.deleteSubscription(subscription.id).then(() => setSubscriptions((items) => items.filter((item) => item.id !== subscription.id))).catch((error) => setError(normalizeError(error)))}><Trash2 size={14} /></Button></div>
+                <div className="flex items-center gap-1"><Button variant="ghost" className="h-8 px-2.5" disabled={!subscription.enabled || checking !== null} onClick={() => void checkNow(subscription)}><RefreshCw className={checking === subscription.id ? "animate-spin" : ""} size={14} /> Check now</Button><Button variant="ghost" className="h-8 px-2.5" onClick={() => void toggleSubscription(subscription)}>{subscription.enabled ? <Pause size={14} /> : <Play size={14} />}{subscription.enabled ? "Pause" : "Enable"}</Button><Button variant="danger" className="h-8 px-2" disabled={checking === subscription.id} aria-label={`Delete ${subscription.name}`} onClick={() => void api.deleteSubscription(subscription.id).then(() => setSubscriptions((items) => items.filter((item) => item.id !== subscription.id))).catch((error) => setError(normalizeError(error)))}><Trash2 size={14} /></Button></div>
               </article>
             ))}
           </div>

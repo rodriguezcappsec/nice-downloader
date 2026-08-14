@@ -1,4 +1,5 @@
 mod operations;
+use crate::models::{LibraryPlaylist, SaveLibraryPlaylistRequest};
 
 use crate::{
     database::Database,
@@ -52,6 +53,7 @@ const MAX_LIBRARY_BACKUP_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_LIBRARY_BACKUP_ITEMS: usize = 100_000;
 const MAX_LIBRARY_BACKUP_SOURCES: usize = 1_000;
 const MAX_LIBRARY_BACKUP_COLLECTIONS: usize = 2_000;
+const MAX_LIBRARY_BACKUP_PLAYLISTS: usize = 2_000;
 const MAX_LIBRARY_BACKUP_MEMBERSHIPS: usize = 500_000;
 const MAX_ARTWORK_CACHE_FILES: usize = 20_000;
 const MAX_ARTWORK_CACHE_BYTES: u64 = 1024 * 1024 * 1024;
@@ -476,7 +478,7 @@ impl LibraryManager {
                 self.database
                     .get_library_item(id)
                     .ok()
-                    .filter(|item| !item.missing && Path::new(&item.path).is_file())
+                    .filter(|item| !item.missing && is_regular_non_symlink(Path::new(&item.path)))
             })
             .ok_or_else(|| {
                 AppError::new(
@@ -514,6 +516,7 @@ impl LibraryManager {
         let target_size = target.file_size_bytes.unwrap_or_default();
         tauri::async_runtime::spawn_blocking(move || {
             let token = CancellationToken::new();
+            let target_identity = file_identity(&target_path);
             if file_fingerprint(&target_path) != Some(target_fingerprint)
                 || file_fingerprint(&sibling_path) != Some(sibling_fingerprint)
             {
@@ -531,13 +534,67 @@ impl LibraryManager {
             {
                 return Err(duplicate_group_stale_error());
             }
-            trash::delete(&target_path).map_err(|error| {
-                AppError::with_details(
+
+            let parent = target_path.parent().ok_or_else(duplicate_group_stale_error)?;
+            let claim_directory = parent.join(format!(
+                ".nice-downloader-trash-{}",
+                Uuid::new_v4()
+            ));
+            std::fs::create_dir(&claim_directory).map_err(|error| {
+                AppError::internal("could not create duplicate trash claim", error)
+            })?;
+            let claim_path = claim_directory.join(
+                target_path
+                    .file_name()
+                    .ok_or_else(duplicate_group_stale_error)?,
+            );
+            if let Err(error) = std::fs::rename(&target_path, &claim_path) {
+                let _ = std::fs::remove_dir(&claim_directory);
+                return Err(AppError::internal(
+                    "could not claim duplicate before moving it to Trash",
+                    error,
+                ));
+            }
+
+            let claim_is_valid = file_fingerprint(&claim_path) == Some(target_fingerprint)
+                && target_identity
+                    .zip(file_identity(&claim_path))
+                    .is_none_or(|(expected, current)| expected == current)
+                && hash_regular_file(&claim_path, &token).is_ok_and(|hash| hash == expected_hash);
+            if !claim_is_valid {
+                let restore_error = restore_claimed_file(&claim_path, &target_path).err();
+                let _ = std::fs::remove_dir(&claim_directory);
+                return Err(AppError::with_details(
+                    "duplicate_group_stale",
+                    "The selected file changed before it could be moved to Trash. No unverified file was deleted.",
+                    restore_error
+                        .map(|error| error.to_string())
+                        .unwrap_or_else(|| "source restored".to_owned()),
+                ));
+            }
+
+            if let Err(error) = trash::delete(&claim_path) {
+                let restore_error = restore_claimed_file(&claim_path, &target_path).err();
+                let _ = std::fs::remove_dir(&claim_directory);
+                return Err(AppError::with_details(
                     "trash_failed",
                     "The file could not be moved to the system Trash.",
-                    error.to_string(),
-                )
-            })
+                    format!(
+                        "trash: {error}; restore: {}",
+                        restore_error
+                            .map(|error| error.to_string())
+                            .unwrap_or_else(|| "ok".to_owned())
+                    ),
+                ));
+            }
+            if let Err(error) = std::fs::remove_dir(&claim_directory) {
+                tracing::warn!(
+                    %error,
+                    path = %claim_directory.display(),
+                    "could not remove duplicate trash claim directory"
+                );
+            }
+            Ok(())
         })
         .await
         .map_err(|error| AppError::internal("duplicate trash task stopped", error))??;
@@ -1773,6 +1830,16 @@ fn file_fingerprint(path: &Path) -> Option<(u64, i64)> {
     Some((metadata.len(), modified_at_ms))
 }
 
+fn is_regular_non_symlink(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .is_ok_and(|metadata| metadata.file_type().is_file() && !metadata.file_type().is_symlink())
+}
+
+fn restore_claimed_file(claim: &Path, original: &Path) -> std::io::Result<()> {
+    std::fs::hard_link(claim, original)?;
+    std::fs::remove_file(claim)
+}
+
 #[cfg(unix)]
 fn file_identity(path: &Path) -> Option<LibraryFileIdentity> {
     use std::os::unix::fs::MetadataExt;
@@ -2381,7 +2448,7 @@ pub fn reconcile(database: &Database) -> Result<LibraryScanResult, AppError> {
     let items = database.list_library_items()?;
     let mut missing_count = 0;
     for item in &items {
-        let missing = !Path::new(&item.path).is_file();
+        let missing = !is_regular_non_symlink(Path::new(&item.path));
         if missing {
             missing_count += 1;
         }
@@ -2419,6 +2486,8 @@ struct LibraryBackup {
     items: Vec<LibraryItem>,
     #[serde(default)]
     collections: Vec<LibraryCollection>,
+    #[serde(default)]
+    playlists: Vec<LibraryPlaylist>,
 }
 
 pub fn export_backup(database: &Database, path: &str) -> Result<(), AppError> {
@@ -2431,6 +2500,7 @@ pub fn export_backup(database: &Database, path: &str) -> Result<(), AppError> {
         sources: database.list_library_sources()?,
         items: database.list_library_items_for_backup(MAX_LIBRARY_BACKUP_ITEMS + 1)?,
         collections: database.list_library_collections()?,
+        playlists: database.list_library_playlists()?,
     };
     validate_backup_shape(&backup)?;
     let bytes = serde_json::to_vec_pretty(&backup).map_err(|error| {
@@ -2478,6 +2548,13 @@ pub fn restore_backup(database: &Database, path: &str) -> Result<Vec<LibraryItem
     let mut prepared_items =
         prepare_backup_items(database, backup.items, &source_id_map, backup.version)?;
     let prepared_collections = prepare_backup_collections(backup.collections)?;
+    let video_backup_ids = prepared_items
+        .iter()
+        .filter(|(_, item)| item.media_kind == Some(LibraryMediaKind::Video))
+        .map(|(backup_id, _)| backup_id.clone())
+        .collect::<HashSet<_>>();
+    let prepared_playlists =
+        prepare_backup_playlists(database, backup.playlists, &video_backup_ids)?;
 
     for request in source_requests {
         database.save_library_source(request)?;
@@ -2510,6 +2587,18 @@ pub fn restore_backup(database: &Database, path: &str) -> Result<Vec<LibraryItem
             )?;
         }
     }
+    for playlist in prepared_playlists {
+        let stored = database.save_library_playlist(SaveLibraryPlaylistRequest {
+            id: Some(playlist.id),
+            name: playlist.name,
+            description: playlist.description,
+        })?;
+        for backup_item_id in playlist.item_ids {
+            if let Some(item_id) = item_id_map.get(&backup_item_id) {
+                database.add_library_playlist_item(&stored.id, item_id)?;
+            }
+        }
+    }
     Ok(restored_items)
 }
 
@@ -2521,13 +2610,19 @@ fn validate_backup_shape(backup: &LibraryBackup) -> Result<(), AppError> {
     let membership_count = backup
         .collections
         .iter()
-        .try_fold(0usize, |count, collection| {
-            count.checked_add(collection.item_ids.len())
-        });
+        .map(|collection| collection.item_ids.len())
+        .chain(
+            backup
+                .playlists
+                .iter()
+                .map(|playlist| playlist.item_ids.len()),
+        )
+        .try_fold(0usize, usize::checked_add);
     if !supported_version
         || backup.items.len() > MAX_LIBRARY_BACKUP_ITEMS
         || backup.sources.len() > MAX_LIBRARY_BACKUP_SOURCES
         || backup.collections.len() > MAX_LIBRARY_BACKUP_COLLECTIONS
+        || backup.playlists.len() > MAX_LIBRARY_BACKUP_PLAYLISTS
         || membership_count.is_none_or(|count| count > MAX_LIBRARY_BACKUP_MEMBERSHIPS)
     {
         return Err(AppError::new(
@@ -2706,6 +2801,73 @@ fn prepare_backup_collections(
             Ok(collection)
         })
         .collect()
+}
+
+fn prepare_backup_playlists(
+    database: &Database,
+    playlists: Vec<LibraryPlaylist>,
+    video_item_ids: &HashSet<String>,
+) -> Result<Vec<LibraryPlaylist>, AppError> {
+    let existing = database.list_library_playlists()?;
+    let existing_ids = existing
+        .iter()
+        .map(|playlist| playlist.id.as_str())
+        .collect::<HashSet<_>>();
+    let mut backup_ids = HashSet::new();
+    let mut names = HashSet::new();
+    let mut prepared = Vec::with_capacity(playlists.len());
+    for mut playlist in playlists {
+        if !backup_ids.insert(playlist.id.clone()) {
+            return Err(invalid_backup("Playlist identifiers must be unique."));
+        }
+        let name = playlist.name.trim();
+        if name.is_empty()
+            || name.chars().count() > 80
+            || name.chars().any(char::is_control)
+            || !names.insert(name.to_ascii_lowercase())
+        {
+            return Err(invalid_backup("Playlist names must be unique valid text."));
+        }
+        let description = playlist.description.trim();
+        if description.chars().count() > 500
+            || description
+                .chars()
+                .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+        {
+            return Err(invalid_backup("Playlist descriptions are invalid."));
+        }
+        let mut seen_items = HashSet::new();
+        playlist
+            .item_ids
+            .retain(|item_id| seen_items.insert(item_id.clone()));
+        if playlist.item_ids.len() > 500
+            || playlist
+                .item_ids
+                .iter()
+                .any(|item_id| !video_item_ids.contains(item_id))
+        {
+            return Err(invalid_backup(
+                "Playlists may contain no more than 500 backed-up videos.",
+            ));
+        }
+        playlist.id = existing
+            .iter()
+            .find(|existing| existing.name.eq_ignore_ascii_case(name))
+            .map(|existing| existing.id.clone())
+            .unwrap_or_else(|| {
+                if Uuid::parse_str(&playlist.id).is_ok()
+                    && !existing_ids.contains(playlist.id.as_str())
+                {
+                    playlist.id.clone()
+                } else {
+                    Uuid::new_v4().to_string()
+                }
+            });
+        playlist.name = name.to_owned();
+        playlist.description = description.to_owned();
+        prepared.push(playlist);
+    }
+    Ok(prepared)
 }
 
 fn normalize_backup_source_path(value: &str) -> Result<PathBuf, AppError> {
@@ -2888,6 +3050,32 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn reconcile_marks_symlinked_catalog_paths_missing() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempdir().expect("temporary directory");
+        let target = directory.path().join("target.mp4");
+        let link = directory.path().join("catalog.mp4");
+        std::fs::write(&target, b"media").expect("target media");
+        symlink(&target, &link).expect("catalog symlink");
+        let database =
+            Database::open(&directory.path().join("library.sqlite3")).expect("library database");
+        let item = database
+            .upsert_library_item(&backup_test_item(&link, None))
+            .expect("catalog item");
+
+        reconcile(&database).expect("reconcile library");
+
+        assert!(
+            database
+                .get_library_item(&item.id)
+                .expect("reconciled item")
+                .missing
+        );
+    }
+
     #[test]
     fn version_two_backup_restores_sources_collections_and_metadata() {
         let directory = tempdir().expect("temporary directory");
@@ -2931,6 +3119,16 @@ mod tests {
                 },
             )
             .expect("collection membership");
+        let playlist = source_database
+            .save_library_playlist(SaveLibraryPlaylistRequest {
+                id: None,
+                name: "Evening".to_owned(),
+                description: "Ordered viewing".to_owned(),
+            })
+            .expect("playlist");
+        source_database
+            .add_library_playlist_item(&playlist.id, &item.id)
+            .expect("playlist membership");
 
         let backup_path = directory.path().join("library.json");
         export_backup(&source_database, &backup_path.to_string_lossy()).expect("export");
@@ -2964,6 +3162,13 @@ mod tests {
         assert_eq!(restored_collections.len(), 1);
         assert_eq!(restored_collections[0].name, "Watch later");
         assert_eq!(restored_collections[0].item_ids, [restored[0].id.clone()]);
+        let restored_playlists = restored_database
+            .list_library_playlists()
+            .expect("playlists");
+        assert_eq!(restored_playlists.len(), 1);
+        assert_eq!(restored_playlists[0].name, "Evening");
+        assert_eq!(restored_playlists[0].description, "Ordered viewing");
+        assert_eq!(restored_playlists[0].item_ids, [restored[0].id.clone()]);
     }
 
     #[test]
@@ -3031,6 +3236,7 @@ mod tests {
             sources: Vec::new(),
             items: Vec::new(),
             collections: Vec::new(),
+            playlists: Vec::new(),
         };
         std::fs::write(
             &backup_path,

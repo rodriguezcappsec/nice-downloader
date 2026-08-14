@@ -166,7 +166,7 @@ export default function App() {
       <div className={view === "history" ? "" : "hidden"}><HistoryPage /></div>
       <div className={view === "subscriptions" ? "" : "hidden"}><SubscriptionsPage /></div>
       <div className={view === "transformations" ? "" : "hidden"}><TransformationsPage /></div>
-      <div className={view === "library" ? "" : "hidden"}><LibraryPage /></div>
+      <LibraryPage active={view === "library"} />
       <div className={view === "presets" ? "" : "hidden"}><PresetsPage /></div>
       <div className={view === "settings" ? "" : "hidden"}><SettingsPage /></div>
       {notice ? (

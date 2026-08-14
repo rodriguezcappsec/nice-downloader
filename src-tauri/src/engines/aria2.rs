@@ -96,14 +96,6 @@ pub fn prepare_direct(
             .and_then(Iterator::last)
             .unwrap_or("download"),
     );
-    let output_path = std::path::Path::new(&request.options.destination).join(&filename);
-    if output_path.exists() && request.options.output_conflict_policy == OutputConflictPolicy::Skip
-    {
-        return Err(AppError::new(
-            "output_exists",
-            "The direct-download output already exists. Choose overwrite or a different destination.",
-        ));
-    }
     if let Some(executable) = crate::engines::managed::resolve("aria2c") {
         let mut args = vec![
             "--continue=true".to_owned(),
@@ -113,7 +105,10 @@ pub fn prepare_direct(
             "--timeout=60".to_owned(),
             "--file-allocation=none".to_owned(),
             "--auto-file-renaming=false".to_owned(),
-            "--allow-overwrite=true".to_owned(),
+            format!(
+                "--allow-overwrite={}",
+                request.options.output_conflict_policy == OutputConflictPolicy::Overwrite
+            ),
             "--console-log-level=warn".to_owned(),
             "--summary-interval=1".to_owned(),
             format!("--out={filename}"),
@@ -148,6 +143,7 @@ pub fn prepare_direct(
         parsed,
         filename,
         preferences,
+        request.options.output_conflict_policy,
     ))
 }
 
@@ -156,6 +152,7 @@ fn build_curl_download(
     parsed: Url,
     filename: String,
     preferences: &EnginePreferences,
+    output_conflict_policy: OutputConflictPolicy,
 ) -> DirectHttpDownload {
     let mut args = vec![
         "--location".to_owned(),
@@ -167,6 +164,9 @@ fn build_curl_download(
         "--output".to_owned(),
         filename.clone(),
     ];
+    if output_conflict_policy == OutputConflictPolicy::Skip {
+        args.push("--no-clobber".to_owned());
+    }
     if let Some(proxy) = &preferences.proxy_url {
         args.extend(["--proxy".to_owned(), proxy.clone()]);
     }
@@ -227,6 +227,18 @@ mod tests {
     }
 
     #[test]
+    fn curl_skip_policy_never_clobbers_an_existing_output() {
+        let download = build_curl_download(
+            PathBuf::from("curl"),
+            Url::parse("https://example.com/video.mp4").unwrap(),
+            "video.mp4".to_owned(),
+            &EnginePreferences::default(),
+            OutputConflictPolicy::Skip,
+        );
+        assert!(download.args.iter().any(|arg| arg == "--no-clobber"));
+    }
+
+    #[test]
     fn integration_retries_a_rate_limited_transfer() {
         let Some(curl) = which::which("curl").ok() else {
             return;
@@ -242,6 +254,7 @@ mod tests {
             Url::parse(&request.url).unwrap(),
             "rate-limit.mp4".to_owned(),
             &EnginePreferences::default(),
+            OutputConflictPolicy::Overwrite,
         );
         let output = run_curl_attempts(&download, directory.path(), 2);
         let requests = server.finish();
@@ -276,6 +289,7 @@ mod tests {
             Url::parse(&request.url).unwrap(),
             "resume.mp4".to_owned(),
             &EnginePreferences::default(),
+            OutputConflictPolicy::Overwrite,
         );
         let output = run_curl_attempts(&download, directory.path(), 1);
         let requests = server.finish();
@@ -319,6 +333,7 @@ mod tests {
             Url::parse(&request.url).unwrap(),
             "interrupted.mp4".to_owned(),
             &EnginePreferences::default(),
+            OutputConflictPolicy::Overwrite,
         );
         let output = run_curl_attempts(&download, directory.path(), 2);
         let requests = server.finish();

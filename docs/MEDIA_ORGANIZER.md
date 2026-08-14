@@ -113,7 +113,7 @@ Status: implemented on `feat/media-organizer`.
 - The media details panel exposes typed Rename, Move, and Copy intent rather than raw filesystem access.
 - Rust validates the current catalog fingerprint, same-extension filename, absolute destination directory, and non-symlink source before creating a persisted preview plan.
 - Every preview shows the exact source and destination plus warnings. Execution accepts only the opaque persisted plan ID and revalidates it immediately before changing disk.
-- Publication is no-clobber: Copy uses a hidden staging file and atomic hard-link publication; Move/Rename uses a no-clobber hard-link transition on the same filesystem. Existing destinations are never overwritten.
+- Publication is no-clobber: Copy uses a hidden staging file. Linux Move/Rename uses atomic `renameat2(RENAME_NOREPLACE)` and falls back to a verified create-new copy/remove transition only when the same-filesystem mount does not support that operation. Other platforms retain their no-clobber adapter. Existing destinations are never overwritten.
 - Migration `0014_library_file_operations.sql` journals plans and the executing, completed, failed, or undone outcome. Library management shows the latest 100 confirmed operations.
 - Completed Move/Rename operations can be undone when the original path is free and the operated file fingerprint still matches. Copy undo moves the verified copy to system Trash.
 - Selection mode can preview and move up to 500 media files into one chosen subfolder. Rust validates the entire batch before moving the first file, rejects duplicate destination filenames, and leaves failed items selected if a race causes a partial result.
@@ -151,8 +151,84 @@ Status: implemented on `feat/media-organizer`.
 - The player provides native accessible controls, speed selection, fullscreen, previous/next navigation, and Space/K, J/L, arrow, M, F, and Escape shortcuts.
 - Matching WebVTT sidecars (`video.vtt` or `video.en.vtt`) are exposed as subtitle tracks through the same token and catalog boundary.
 - Open in system player remains visible in media details and the watch surface. It is the supported fallback when the platform WebView cannot decode a container or codec.
+- Reopening or manually retrying a video receives a fresh loopback session URL. This prevents WebKitGTK from reusing stale media-resource failures while preserving the same token and catalog-ID security boundary; retrying an existing compatibility copy does not duplicate it.
+- When WebKitGTK rejects the valid lossless timing copy, the error surface offers an explicit H.264/AAC fallback instead of repeating the same request. Its preflight clearly states that video will be re-encoded, shows a conservative size/free-space estimate, and always requires consent unless that exact fingerprinted fallback is already cached. The source remains unchanged.
 - Playback opens as an integrated Library watch workspace rather than a floating dialog. The main player and metadata occupy the primary column while a sticky, independently scrollable video rail supports debounced search, paginated browsing, and in-place video switching. An eight-second readiness timeout prevents a stalled WebKit media pipeline from trapping the UI.
+- Returning to the Library home or navigating to another workspace collapses the same live video element into an in-app bottom-right mini player. Playback, buffering, audio, native control state, and progress continue without reopening the media session. Accessible controls restore the full Watch workspace, open the original in the system player, or close and persist progress.
 - On Linux, Nice Downloader checks an available `gst-inspect-1.0` for WebKitGTK's `autoaudiosink` before mounting the player. Missing GStreamer audio-output plugins produce an actionable distribution-specific message and leave system-player playback available.
+- AV1-in-MP4 tracks with fractional time-base metadata that WebKitGTK/GStreamer can play ahead of audio are detected with structured ffprobe output. FFmpeg creates a fingerprinted, bounded Matroska stream-copy so GStreamer receives a concrete frame rate instead of the QuickTime demuxer's `0/1`; the UI identifies compatibility mode and the original remains untouched.
+- Preparation is split into a read-only preflight and an explicit execution command. For uncached copies the preflight returns the reason, estimated bytes, available space, saved Ask/Automatic/Never preference, and whether confirmation is mandatory. Ordinary copies may follow the Automatic preference, but copies of 2 GiB or larger always require one-time approval. The accessible confirmation dialog traps focus, restores it when dismissed, and keeps system-player fallback visible.
+- Settings reports compatibility-cache file count and bytes, exposes an explicit clear action, and documents the four-file/8 GiB oldest-first limit. Clearing removes only app-private derivatives, never cataloged originals.
+
+## Milestone 9 - Accessibility and large-library hardening
+
+Status: implementation in progress on `feat/library-accessibility-performance`.
+
+- Library scan announcements are intentionally bounded: start, each 100 newly discovered files, and completion/cancellation/failure. Rapid per-file events remain visual and never flood a screen reader.
+- Exact-duplicate analysis announces candidate discovery, 20% progress boundaries, and its terminal result. The visible meter exposes native progressbar semantics without becoming a second noisy live region.
+- Filter and pagination changes announce the exact visible result range. The Watch workspace separately announces its debounced search result page.
+- A keyboard-only and Orca checklist lives in [Library Accessibility QA](ACCESSIBILITY_QA.md), including scan, duplicate, Watch, fallback, scaling, contrast, and reduced-motion expectations.
+- Media details and Bulk Move now trap focus, preserve their invoking control, and use Library search/main content as a fallback when an operation removes that control. Add folder focuses its first action and restores focus when dismissed.
+- SQLite migration recovery now has an automated rollback test that forces a mid-chain migration failure, proves schema and version changes are atomic, repairs the obstruction, and completes the same database through migration 17.
+- An ignored, repeatable 10,000–250,000-item Rust profiling harness measures database open, transactional seeding, first-page query, text search, and facet generation. `NICE_DOWNLOADER_LIBRARY_PROFILE_DIR` places the synthetic database on a chosen local, removable, or network filesystem; see [Library Performance Profiling](LIBRARY_PROFILING.md).
+
+Remaining before completion:
+
+- Perform and record keyboard-only plus Orca verification on a Linux desktop; implementation-level focus handling is complete, but the current development environment does not include Orca.
+- Capture a comparable 50,000-item result from a representative network mount. The three-run removable exFAT baseline is recorded and did not expose a user-facing query bottleneck.
+
+## Milestone 10 - Library discovery controls
+
+Status: stable SQLite-backed sorting implemented on `feat/library-accessibility-performance`.
+
+- Library results can be sorted by newest or oldest addition, title in either direction, duration, or file size.
+- Rust maps the typed sort intent to static SQL clauses. React never supplies SQL or arbitrary field names.
+- Every order includes deterministic tie-breakers so pagination cannot duplicate or skip equal-valued records.
+- Media without inspected duration or file size stays after known values in both directions.
+- Choosing a non-default sort enters the paginated all-media view; Home resets to the browse-first shelves and newest order.
+- Database tests cover title, duration, and file-size ordering across the large-library fixture.
+
+## Milestone 11 - Integrated image viewing
+
+Status: implemented on `feat/library-accessibility-performance`.
+
+- Full-resolution JPEG, PNG, WebP, GIF, and AVIF files open inside a dedicated Library image workspace; system-viewer fallback remains available.
+- Rust issues fresh process-token-protected loopback URLs containing catalog IDs rather than filesystem paths. Every request revalidates the current SQLite record, media kind, regular-file status, symlink policy, and allowlisted content type.
+- The viewer supports fit, actual size, bounded 10%–800% zoom, drag-to-pan, quarter-turn rotation, previous/next navigation, and a 3/5/10-second slideshow without modifying originals.
+- Browser-native image orientation is honored, and decoded dimensions are shown separately from indexed metadata.
+- Images at or above 100 MiB or 100 megapixels require a one-time in-viewer confirmation before WebView decoding, with system-viewer fallback kept visible.
+- Keyboard controls cover previous/next, zoom, fit, rotation, slideshow, and close. Viewer shortcuts pause while Media details owns focus.
+- Image navigation follows the current visible Library order. Stable sorting, filters, source/folder scope, and current pagination therefore remain authoritative.
+- An active video keeps playing in the existing mini player while images are viewed. Restoring full Watch closes the image workspace so two full media surfaces cannot overlap.
+- Missing, moved, unsupported, or WebView-undecodable images fail with retry and explicit system-viewer actions.
+
+## Milestone 12 - Watch Later and playback history
+
+Status: implemented on `feat/library-accessibility-performance`.
+
+- Migration `0016_library_watch_later.sql` persists an ordered, cascade-safe Watch Later list without modifying source files.
+- Video cards expose a direct Watch Later action. The Watch workspace shows the current saved state and supports removing it again.
+- Home derives bounded Watch Later and Recently Watched shelves from SQLite. Playback history is private to the local application database and excludes missing media.
+- Users can mark a video watched, mark it unwatched, or reset incomplete progress. These actions update Continue Watching and Recently Watched from the same authoritative playback record.
+- Optional Autoplay advances only to a real next video in the current watch browser. It never wraps the final item into an endless loop and its preference persists locally.
+- Rust validates catalog UUIDs and video media kind for every mutation. React never supplies filesystem paths or authoritative playback state.
+
+Acceptance: save a video before watching it, relaunch and find it in Watch Later, remove it, inspect private recently watched activity, reset progress, and optionally advance to the next available video when playback completes.
+
+## Milestone 13 - Persistent ordered playlists
+
+Status: implemented on `feat/library-accessibility-performance`.
+
+- Migration `0017_library_playlists.sql` stores named playlists and ordered membership with catalog-delete cascading.
+- Playlists are video-only, case-insensitively named, limited to 500 unique items, and validated by Rust before every mutation.
+- Library Home supports create, open, and confirmed delete. Playlist workspaces support Play all, individual playback, details, remove, and deterministic move up/down controls.
+- The Watch workspace can add the current video to any playlist and clearly identifies existing membership.
+- Playback uses persisted playlist order for Up next, Previous, Next, and Autoplay. Playlist playback never wraps at either boundary.
+- Missing files remain visible for organization but are skipped for playback. Removing a catalog item automatically removes dangling membership.
+- Version 2 Library backup/restore includes playlists and ordered membership. Restore validates untrusted data, remaps conflicting IDs, merges without deleting current data, and never modifies original media.
+- Async playlist loads and mutations are guarded so stale responses and rapid reorder/remove input cannot overwrite newer UI state.
+
+Acceptance: create a playlist, add videos from Watch, reorder and remove entries, relaunch with the same order, play continuously without looping, restore the playlist from backup, and delete the playlist without changing any source video.
 
 ## Explicitly deferred
 

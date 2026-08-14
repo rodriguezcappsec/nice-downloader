@@ -2,8 +2,12 @@ use crate::{
     engines::ytdlp::detect_runtime_capabilities,
     models::{EngineCapability, EngineId, EngineInfo},
 };
+use futures_util::future::join_all;
 use std::path::Path;
-use tokio::process::Command;
+use tokio::{
+    process::Command,
+    time::{timeout, Duration},
+};
 
 struct EngineDefinition {
     id: EngineId,
@@ -59,11 +63,7 @@ const ENGINES: [EngineDefinition; 6] = [
 ];
 
 pub async fn detect_all() -> Vec<EngineInfo> {
-    let mut results = Vec::with_capacity(ENGINES.len());
-    for definition in ENGINES {
-        results.push(detect(definition).await);
-    }
-    results
+    join_all(ENGINES.into_iter().map(detect)).await
 }
 
 async fn detect(definition: EngineDefinition) -> EngineInfo {
@@ -163,7 +163,11 @@ async fn detect(definition: EngineDefinition) -> EngineInfo {
 async fn read_version(path: &Path, version_arg: &str) -> Option<String> {
     let mut command = Command::new(path);
     crate::utils::process::sanitize_tokio_command(&mut command);
-    let output = command.arg(version_arg).output().await.ok()?;
+    command.kill_on_drop(true);
+    let output = timeout(Duration::from_secs(5), command.arg(version_arg).output())
+        .await
+        .ok()?
+        .ok()?;
     let text = if output.stdout.is_empty() {
         String::from_utf8_lossy(&output.stderr)
     } else {

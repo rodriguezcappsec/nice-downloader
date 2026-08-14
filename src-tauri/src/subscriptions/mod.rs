@@ -9,12 +9,30 @@ use crate::{
     },
     queue::QueueManager,
 };
-use std::{sync::OnceLock, time::Duration};
+use std::{
+    collections::HashSet,
+    sync::{Mutex as StdMutex, OnceLock},
+    time::Duration,
+};
 use tauri::AppHandle;
 use tokio::sync::Mutex;
 use tokio::time::{interval, MissedTickBehavior};
 
 static CHECK_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static ACTIVE_CHECKS: OnceLock<StdMutex<HashSet<String>>> = OnceLock::new();
+
+struct ActiveCheckGuard(String);
+
+impl Drop for ActiveCheckGuard {
+    fn drop(&mut self) {
+        if let Ok(mut active) = ACTIVE_CHECKS
+            .get_or_init(|| StdMutex::new(HashSet::new()))
+            .lock()
+        {
+            active.remove(&self.0);
+        }
+    }
+}
 
 pub fn spawn_scheduler(app: AppHandle, database: Database, queue: QueueManager) {
     tauri::async_runtime::spawn(async move {
@@ -52,6 +70,17 @@ pub async fn check_subscription(
             "Another subscription check is already in progress.",
         ));
     };
+    ACTIVE_CHECKS
+        .get_or_init(|| StdMutex::new(HashSet::new()))
+        .lock()
+        .map_err(|_| {
+            AppError::new(
+                "subscription_unavailable",
+                "Subscription state is temporarily unavailable.",
+            )
+        })?
+        .insert(subscription_id.to_owned());
+    let _active_guard = ActiveCheckGuard(subscription_id.to_owned());
     let subscription = database.load_subscription(subscription_id)?;
     let result = check_inner(app, database, queue, &subscription).await;
     match result {
@@ -71,6 +100,26 @@ pub async fn check_subscription(
     }
 }
 
+pub fn delete_subscription(database: &Database, subscription_id: &str) -> Result<(), AppError> {
+    let active = ACTIVE_CHECKS
+        .get_or_init(|| StdMutex::new(HashSet::new()))
+        .lock()
+        .map_err(|_| {
+            AppError::new(
+                "subscription_unavailable",
+                "Subscription state is temporarily unavailable.",
+            )
+        })?;
+    if active.contains(subscription_id) {
+        return Err(AppError::new(
+            "subscription_check_in_progress",
+            "Wait for this subscription check to finish before deleting it.",
+        ));
+    }
+    drop(active);
+    database.delete_subscription(subscription_id)
+}
+
 async fn check_inner(
     app: AppHandle,
     database: &Database,
@@ -82,6 +131,9 @@ async fn check_inner(
             "subscription_disabled",
             "Enable this subscription before checking it.",
         ));
+    }
+    if !database.load_subscription(&subscription.id)?.enabled {
+        return Ok((0, 0, 0));
     }
     let preset = database
         .list_presets()?
@@ -109,6 +161,9 @@ async fn check_inner(
     let mut queued_urls = queue.non_terminal_urls().await;
 
     for url in urls {
+        if !database.load_subscription(&subscription.id)?.enabled {
+            break;
+        }
         let mut entry_preferences = database.load_engine_preferences()?;
         authentication::apply_profile(database, &url, &mut entry_preferences)?;
         let analysis = match router::analyze(&url, &entry_preferences).await {
@@ -136,6 +191,9 @@ async fn check_inner(
             analysis,
             scheduled_for: None,
         };
+        if !database.load_subscription(&subscription.id)?.enabled {
+            break;
+        }
         match queue.enqueue(app.clone(), request, entry_preferences).await {
             Ok(_) => {
                 queued_urls.insert(download_url);

@@ -7,13 +7,14 @@ use crate::{
         LibraryFacetRequest, LibraryFacets, LibraryFileIdentity, LibraryFileOperation,
         LibraryFileOperationKind, LibraryFileOperationState, LibraryFolderFacet,
         LibraryFolderScope, LibraryItem, LibraryMediaKind, LibraryMetadataState,
-        LibraryPlaybackEntry, LibraryPlaybackState, LibraryProbeResult, LibraryQueryRequest,
-        LibraryQueryResult, LibraryScanJob, LibraryScanState, LibrarySource, LibrarySourceStatus,
-        Preset, PresetIntent, QueueSettings, SaveAuthenticationProfileRequest,
-        SaveLibraryCollectionRequest, SaveLibraryPlaybackRequest, SaveLibrarySourceRequest,
-        SavePresetRequest, SaveSitePresetRuleRequest, SaveSubscriptionRequest, SitePresetRule,
-        StartDownloadRequest, Subscription, TransformationOperation, TransformationState,
-        TransformationTask, UpdateLibraryItemRequest,
+        LibraryPlaybackEntry, LibraryPlaybackState, LibraryPlaylist, LibraryProbeResult,
+        LibraryQueryRequest, LibraryQueryResult, LibraryScanJob, LibraryScanState, LibrarySort,
+        LibrarySource, LibrarySourceStatus, LibraryWatchState, Preset, PresetIntent, QueueSettings,
+        SaveAuthenticationProfileRequest, SaveLibraryCollectionRequest, SaveLibraryPlaybackRequest,
+        SaveLibraryPlaylistRequest, SaveLibrarySourceRequest, SavePresetRequest,
+        SaveSitePresetRuleRequest, SaveSubscriptionRequest, SitePresetRule, StartDownloadRequest,
+        Subscription, TransformationOperation, TransformationState, TransformationTask,
+        UpdateLibraryItemRequest,
     },
     utils::validation::{
         normalize_engine_preferences, validate_destination, validate_engine_preferences,
@@ -44,6 +45,8 @@ const MIGRATION_0012: &str = include_str!("migrations/0012_library_reconciliatio
 const MIGRATION_0013: &str = include_str!("migrations/0013_library_duplicate_hashes.sql");
 const MIGRATION_0014: &str = include_str!("migrations/0014_library_file_operations.sql");
 const MIGRATION_0015: &str = include_str!("migrations/0015_library_playback.sql");
+const MIGRATION_0016: &str = include_str!("migrations/0016_library_watch_later.sql");
+const MIGRATION_0017: &str = include_str!("migrations/0017_library_playlists.sql");
 const ENGINE_PREFERENCES_KEY: &str = "engine.preferences";
 const QUEUE_SETTINGS_KEY: &str = "queue.settings";
 const DESKTOP_PREFERENCES_KEY: &str = "desktop.preferences";
@@ -92,6 +95,8 @@ impl Database {
             (13, MIGRATION_0013),
             (14, MIGRATION_0014),
             (15, MIGRATION_0015),
+            (16, MIGRATION_0016),
+            (17, MIGRATION_0017),
         ] {
             let migrated: bool = transaction.query_row(
                 "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = ?1)",
@@ -126,13 +131,14 @@ impl Database {
             .map_err(|error| AppError::internal("could not serialize download request", error))?;
         let diagnostics_json = serde_json::to_string(&job.diagnostics)
             .map_err(|error| AppError::internal("could not serialize job diagnostics", error))?;
-        let connection = self.connection.lock().map_err(|_| {
+        let mut connection = self.connection.lock().map_err(|_| {
             AppError::new(
                 "database_unavailable",
                 "The download history database is unavailable.",
             )
         })?;
-        connection.execute(
+        let transaction = connection.transaction()?;
+        transaction.execute(
             "INSERT OR REPLACE INTO downloads (
                 id, url, title, thumbnail, state, progress_percent, downloaded_bytes,
                 total_bytes, speed_bytes_per_second, eta_seconds, selected_quality,
@@ -171,7 +177,7 @@ impl Database {
             ],
         )?;
         if job.state == DownloadState::Completed {
-            connection.execute(
+            transaction.execute(
                 "INSERT INTO download_archive (url, destination, output_path, completed_at)
                  VALUES (?1, ?2, ?3, ?4)
                  ON CONFLICT(url, destination) DO UPDATE SET
@@ -196,7 +202,7 @@ impl Database {
                     "selectedQuality": job.selected_quality,
                     "outputFormat": job.output_format,
                 });
-                connection.execute(
+                transaction.execute(
                     "INSERT INTO media_library
                         (id, path, title, source_url, thumbnail, duration_seconds, site,
                          tags_json, metadata_json, missing, added_at, updated_at, media_kind)
@@ -216,6 +222,9 @@ impl Database {
                 )?;
             }
         }
+        transaction.commit().map_err(|error| {
+            AppError::internal("could not commit the download state update", error)
+        })?;
         Ok(())
     }
 
@@ -718,6 +727,26 @@ impl Database {
                 "Save the selected preset before creating this rule.",
             ));
         }
+        if request.enabled {
+            let conflicting_rule: Option<String> = connection
+                .query_row(
+                    "SELECT name FROM site_preset_rules
+                     WHERE enabled = 1 AND host_suffix = ?1
+                       AND COALESCE(path_prefix, '') = COALESCE(?2, '') AND id != ?3
+                     LIMIT 1",
+                    params![host_suffix, path_prefix, id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(name) = conflicting_rule {
+                return Err(AppError::new(
+                    "duplicate_site_rule",
+                    format!(
+                        "An enabled site rule named ‘{name}’ already handles the same host and path."
+                    ),
+                ));
+            }
+        }
         connection.execute(
             "INSERT INTO site_preset_rules
                 (id, name, host_suffix, path_prefix, preset_id, enabled, created_at, updated_at)
@@ -796,6 +825,20 @@ impl Database {
                 rule.path_prefix.as_deref().map_or(0, str::len),
             ))
         });
+        if rules.len() > 1 {
+            let specificity = |rule: &SitePresetRule| {
+                (
+                    rule.host_suffix.len(),
+                    rule.path_prefix.as_deref().map_or(0, str::len),
+                )
+            };
+            if specificity(&rules[0]) == specificity(&rules[1]) {
+                return Err(AppError::new(
+                    "ambiguous_site_rules",
+                    "Multiple enabled site rules match this URL equally. Disable or edit one of them.",
+                ));
+            }
+        }
         Ok(rules.into_iter().next())
     }
 
@@ -1289,6 +1332,7 @@ impl Database {
         let mut item_parameters = parameters;
         item_parameters.push(SqlValue::Integer(i64::from(request.page_size)));
         item_parameters.push(SqlValue::Integer(i64::try_from(offset).unwrap_or(i64::MAX)));
+        let order_by = library_order_by(request.sort);
         let sql = format!(
             "SELECT media_library.id, path, title, source_url, thumbnail, duration_seconds, site,
                     tags_json, metadata_json, missing, added_at, media_library.updated_at, source_id,
@@ -1298,7 +1342,7 @@ impl Database {
              FROM media_library
              LEFT JOIN library_media_metadata ON item_id = media_library.id
              {where_clause}
-             ORDER BY added_at DESC, media_library.id DESC
+             ORDER BY {order_by}
              LIMIT ?{} OFFSET ?{}",
             item_parameters.len() - 1,
             item_parameters.len()
@@ -1507,7 +1551,8 @@ impl Database {
         if !request.position_seconds.is_finite()
             || !request.duration_seconds.is_finite()
             || request.position_seconds < 0.0
-            || request.duration_seconds <= 0.0
+            || request.duration_seconds < 0.0
+            || (!request.completed && request.duration_seconds == 0.0)
             || request.duration_seconds > 365.0 * 24.0 * 60.0 * 60.0
             || request.position_seconds > request.duration_seconds + 30.0
         {
@@ -1544,7 +1589,10 @@ impl Database {
              ON CONFLICT(item_id) DO UPDATE SET
                 position_seconds = excluded.position_seconds,
                 duration_seconds = excluded.duration_seconds,
-                completed = excluded.completed,
+                 completed = CASE
+                    WHEN library_playback.completed = 1 AND excluded.completed = 0 THEN 1
+                    ELSE excluded.completed
+                 END,
                 updated_at = excluded.updated_at",
             params![
                 request.item_id,
@@ -1554,25 +1602,21 @@ impl Database {
                 now
             ],
         )?;
-        Ok(LibraryPlaybackState {
-            item_id: request.item_id,
-            position_seconds: request.position_seconds,
-            duration_seconds: request.duration_seconds,
-            completed,
-            updated_at: timestamp_or_epoch(now),
-        })
+        connection
+            .query_row(
+                "SELECT item_id, position_seconds, duration_seconds, completed, updated_at
+                 FROM library_playback WHERE item_id = ?1",
+                [&request.item_id],
+                |row| library_playback_from_row(row, 0),
+            )
+            .map_err(AppError::from)
     }
 
     pub fn list_continue_watching(
         &self,
         limit: usize,
     ) -> Result<Vec<LibraryPlaybackEntry>, AppError> {
-        if !(1..=24).contains(&limit) {
-            return Err(AppError::new(
-                "invalid_library_playback_limit",
-                "Continue Watching can contain between 1 and 24 items.",
-            ));
-        }
+        validate_library_shelf_limit(limit)?;
         let connection = self.connection.lock().map_err(|_| {
             AppError::new("database_unavailable", "The media library is unavailable.")
         })?;
@@ -1603,6 +1647,193 @@ impl Database {
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
+        Ok(entries)
+    }
+
+    pub fn get_library_watch_state(&self, item_id: &str) -> Result<LibraryWatchState, AppError> {
+        validate_uuid(item_id, "library item")?;
+        let playback = self.get_library_playback(item_id)?;
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "The media library is unavailable.")
+        })?;
+        let media_kind = connection
+            .query_row(
+                "SELECT media_kind FROM media_library WHERE id = ?1",
+                [item_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if media_kind.as_deref() != Some("video") {
+            return Err(AppError::new(
+                "library_video_not_found",
+                "The selected library video was not found.",
+            ));
+        }
+        let watch_later = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM library_watch_later WHERE item_id = ?1)",
+            [item_id],
+            |row| row.get(0),
+        )?;
+        Ok(LibraryWatchState {
+            item_id: item_id.to_owned(),
+            watch_later,
+            playback,
+        })
+    }
+
+    pub fn set_library_watch_later(
+        &self,
+        item_id: &str,
+        watch_later: bool,
+    ) -> Result<LibraryWatchState, AppError> {
+        validate_uuid(item_id, "library item")?;
+        {
+            let connection = self.connection.lock().map_err(|_| {
+                AppError::new("database_unavailable", "The media library is unavailable.")
+            })?;
+            let media_kind = connection
+                .query_row(
+                    "SELECT media_kind FROM media_library WHERE id = ?1",
+                    [item_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?;
+            if media_kind.as_deref() != Some("video") {
+                return Err(AppError::new(
+                    "library_video_not_found",
+                    "The selected library video was not found.",
+                ));
+            }
+            if watch_later {
+                connection.execute(
+                    "INSERT INTO library_watch_later (item_id, added_at) VALUES (?1, ?2)
+                     ON CONFLICT(item_id) DO NOTHING",
+                    params![item_id, Utc::now().timestamp_millis()],
+                )?;
+            } else {
+                connection.execute(
+                    "DELETE FROM library_watch_later WHERE item_id = ?1",
+                    [item_id],
+                )?;
+            }
+        }
+        self.get_library_watch_state(item_id)
+    }
+
+    pub fn set_library_watched(
+        &self,
+        item_id: &str,
+        watched: bool,
+    ) -> Result<LibraryWatchState, AppError> {
+        validate_uuid(item_id, "library item")?;
+        if watched {
+            let duration_seconds = {
+                let connection = self.connection.lock().map_err(|_| {
+                    AppError::new("database_unavailable", "The media library is unavailable.")
+                })?;
+                connection
+                    .query_row(
+                        "SELECT duration_seconds FROM media_library
+                         WHERE id = ?1 AND media_kind = 'video'",
+                        [item_id],
+                        |row| row.get::<_, Option<f64>>(0),
+                    )
+                    .optional()?
+                    .ok_or_else(|| {
+                        AppError::new(
+                            "library_video_not_found",
+                            "The selected library video was not found.",
+                        )
+                    })?
+                    .unwrap_or(0.0)
+            };
+            self.save_library_playback(SaveLibraryPlaybackRequest {
+                item_id: item_id.to_owned(),
+                position_seconds: duration_seconds,
+                duration_seconds,
+                completed: true,
+            })?;
+        } else {
+            let connection = self.connection.lock().map_err(|_| {
+                AppError::new("database_unavailable", "The media library is unavailable.")
+            })?;
+            let media_kind = connection
+                .query_row(
+                    "SELECT media_kind FROM media_library WHERE id = ?1",
+                    [item_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?;
+            if media_kind.as_deref() != Some("video") {
+                return Err(AppError::new(
+                    "library_video_not_found",
+                    "The selected library video was not found.",
+                ));
+            }
+            connection.execute("DELETE FROM library_playback WHERE item_id = ?1", [item_id])?;
+        }
+        self.get_library_watch_state(item_id)
+    }
+
+    pub fn list_library_watch_later(&self, limit: usize) -> Result<Vec<LibraryItem>, AppError> {
+        validate_library_shelf_limit(limit)?;
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "The media library is unavailable.")
+        })?;
+        let mut statement = connection.prepare(
+            "SELECT media_library.id, path, title, source_url, thumbnail,
+                    media_library.duration_seconds, site, tags_json, metadata_json, missing,
+                    media_library.added_at, media_library.updated_at, source_id, relative_path, media_kind,
+                    file_size_bytes, modified_at_ms, width, height, fps, video_codec, audio_codec,
+                    container, dynamic_range, COALESCE(state, 'pending'), error, favorite, rating
+             FROM library_watch_later
+             JOIN media_library ON media_library.id = library_watch_later.item_id
+             LEFT JOIN library_media_metadata ON library_media_metadata.item_id = media_library.id
+             WHERE media_library.missing = 0 AND media_library.media_kind = 'video'
+             ORDER BY library_watch_later.added_at DESC, media_library.id ASC
+             LIMIT ?1",
+        )?;
+        let items = statement
+            .query_map([i64::try_from(limit).unwrap_or(24)], library_item_from_row)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(AppError::from)?;
+        Ok(items)
+    }
+
+    pub fn list_recently_watched(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<LibraryPlaybackEntry>, AppError> {
+        validate_library_shelf_limit(limit)?;
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "The media library is unavailable.")
+        })?;
+        let mut statement = connection.prepare(
+            "SELECT media_library.id, path, title, source_url, thumbnail,
+                    media_library.duration_seconds, site, tags_json, metadata_json, missing,
+                    added_at, media_library.updated_at, source_id, relative_path, media_kind,
+                    file_size_bytes, modified_at_ms, width, height, fps, video_codec, audio_codec,
+                    container, dynamic_range, COALESCE(state, 'pending'), error, favorite, rating,
+                    library_playback.item_id, library_playback.position_seconds,
+                    library_playback.duration_seconds, library_playback.completed,
+                    library_playback.updated_at
+             FROM library_playback
+             JOIN media_library ON media_library.id = library_playback.item_id
+             LEFT JOIN library_media_metadata ON library_media_metadata.item_id = media_library.id
+             WHERE media_library.missing = 0 AND media_library.media_kind = 'video'
+               AND (library_playback.completed = 1 OR library_playback.position_seconds >= 5)
+             ORDER BY library_playback.updated_at DESC, media_library.id ASC
+             LIMIT ?1",
+        )?;
+        let entries = statement
+            .query_map([i64::try_from(limit).unwrap_or(24)], |row| {
+                Ok(LibraryPlaybackEntry {
+                    item: library_item_from_row(row)?,
+                    playback: library_playback_from_row(row, 28)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(AppError::from)?;
         Ok(entries)
     }
 
@@ -1860,6 +2091,257 @@ impl Database {
             ));
         }
         Ok(())
+    }
+
+    pub fn list_library_playlists(&self) -> Result<Vec<LibraryPlaylist>, AppError> {
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "Library playlists are unavailable.")
+        })?;
+        let mut statement = connection.prepare(
+            "SELECT id, name, description, created_at, updated_at
+             FROM library_playlists ORDER BY updated_at DESC, name COLLATE NOCASE",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
+        })?;
+        let base = rows.collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        let mut membership = connection.prepare(
+            "SELECT item_id FROM library_playlist_items
+             WHERE playlist_id = ?1 ORDER BY position ASC, added_at ASC, item_id ASC",
+        )?;
+        let mut playlists = Vec::with_capacity(base.len());
+        for (id, name, description, created_at, updated_at) in base {
+            let item_ids = membership
+                .query_map([&id], |row| row.get(0))?
+                .collect::<Result<Vec<String>, _>>()?;
+            playlists.push(LibraryPlaylist {
+                id,
+                name,
+                description,
+                item_ids,
+                created_at: timestamp_or_epoch(created_at),
+                updated_at: timestamp_or_epoch(updated_at),
+            });
+        }
+        Ok(playlists)
+    }
+
+    pub fn save_library_playlist(
+        &self,
+        request: SaveLibraryPlaylistRequest,
+    ) -> Result<LibraryPlaylist, AppError> {
+        let name = validate_playlist_name(&request.name)?;
+        let description = validate_playlist_description(&request.description)?;
+        let id = match request.id {
+            Some(id) => parse_uuid(
+                &id,
+                "invalid_library_playlist",
+                "The playlist identifier is invalid.",
+            )?,
+            None => Uuid::new_v4().to_string(),
+        };
+        let now = Utc::now().timestamp_millis();
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "Library playlists are unavailable.")
+        })?;
+        let duplicate: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM library_playlists
+             WHERE name = ?1 COLLATE NOCASE AND id <> ?2)",
+            params![name, id],
+            |row| row.get(0),
+        )?;
+        if duplicate {
+            return Err(AppError::new(
+                "library_playlist_name_exists",
+                "Choose a different playlist name.",
+            ));
+        }
+        connection.execute(
+            "INSERT INTO library_playlists (id, name, description, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?4)
+             ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                description = excluded.description,
+                updated_at = excluded.updated_at",
+            params![id, name, description, now],
+        )?;
+        drop(connection);
+        self.list_library_playlists()?
+            .into_iter()
+            .find(|playlist| playlist.id == id)
+            .ok_or_else(|| {
+                AppError::new(
+                    "library_playlist_not_found",
+                    "The library playlist was not found.",
+                )
+            })
+    }
+
+    pub fn delete_library_playlist(&self, id: &str) -> Result<(), AppError> {
+        validate_uuid(id, "playlist")?;
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "Library playlists are unavailable.")
+        })?;
+        if connection.execute("DELETE FROM library_playlists WHERE id = ?1", [id])? == 0 {
+            return Err(AppError::new(
+                "library_playlist_not_found",
+                "The library playlist was not found.",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn add_library_playlist_item(
+        &self,
+        playlist_id: &str,
+        item_id: &str,
+    ) -> Result<LibraryPlaylist, AppError> {
+        validate_uuid(playlist_id, "playlist")?;
+        validate_uuid(item_id, "library item")?;
+        let now = Utc::now().timestamp_millis();
+        let mut connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "Library playlists are unavailable.")
+        })?;
+        let transaction = connection.transaction()?;
+        ensure_playlist_exists(&transaction, playlist_id)?;
+        ensure_library_video_exists(&transaction, item_id)?;
+        let (count, last_position): (i64, i64) = transaction.query_row(
+            "SELECT COUNT(*), COALESCE(MAX(position), -1)
+             FROM library_playlist_items WHERE playlist_id = ?1",
+            [playlist_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let already_added: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM library_playlist_items
+             WHERE playlist_id = ?1 AND item_id = ?2)",
+            params![playlist_id, item_id],
+            |row| row.get(0),
+        )?;
+        if !already_added && count >= 500 {
+            return Err(AppError::new(
+                "library_playlist_full",
+                "Playlists are limited to 500 videos.",
+            ));
+        }
+        transaction.execute(
+            "INSERT OR IGNORE INTO library_playlist_items
+             (playlist_id, item_id, position, added_at) VALUES (?1, ?2, ?3, ?4)",
+            params![playlist_id, item_id, last_position.saturating_add(1), now],
+        )?;
+        transaction.execute(
+            "UPDATE library_playlists SET updated_at = ?2 WHERE id = ?1",
+            params![playlist_id, now],
+        )?;
+        transaction.commit()?;
+        drop(connection);
+        self.library_playlist(playlist_id)
+    }
+
+    pub fn remove_library_playlist_item(
+        &self,
+        playlist_id: &str,
+        item_id: &str,
+    ) -> Result<LibraryPlaylist, AppError> {
+        validate_uuid(playlist_id, "playlist")?;
+        validate_uuid(item_id, "library item")?;
+        let now = Utc::now().timestamp_millis();
+        let mut connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "Library playlists are unavailable.")
+        })?;
+        let transaction = connection.transaction()?;
+        ensure_playlist_exists(&transaction, playlist_id)?;
+        transaction.execute(
+            "DELETE FROM library_playlist_items WHERE playlist_id = ?1 AND item_id = ?2",
+            params![playlist_id, item_id],
+        )?;
+        normalize_playlist_positions(&transaction, playlist_id)?;
+        transaction.execute(
+            "UPDATE library_playlists SET updated_at = ?2 WHERE id = ?1",
+            params![playlist_id, now],
+        )?;
+        transaction.commit()?;
+        drop(connection);
+        self.library_playlist(playlist_id)
+    }
+
+    pub fn move_library_playlist_item(
+        &self,
+        playlist_id: &str,
+        item_id: &str,
+        new_index: usize,
+    ) -> Result<LibraryPlaylist, AppError> {
+        validate_uuid(playlist_id, "playlist")?;
+        validate_uuid(item_id, "library item")?;
+        let now = Utc::now().timestamp_millis();
+        let mut connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "Library playlists are unavailable.")
+        })?;
+        let transaction = connection.transaction()?;
+        ensure_playlist_exists(&transaction, playlist_id)?;
+        let mut item_ids = playlist_item_ids(&transaction, playlist_id)?;
+        let old_index = item_ids
+            .iter()
+            .position(|id| id == item_id)
+            .ok_or_else(|| {
+                AppError::new(
+                    "library_playlist_item_not_found",
+                    "This video is not in the selected playlist.",
+                )
+            })?;
+        let moved = item_ids.remove(old_index);
+        let index = new_index.min(item_ids.len());
+        item_ids.insert(index, moved);
+        for (position, id) in item_ids.iter().enumerate() {
+            transaction.execute(
+                "UPDATE library_playlist_items SET position = ?3
+                 WHERE playlist_id = ?1 AND item_id = ?2",
+                params![playlist_id, id, i64::try_from(position).unwrap_or(i64::MAX)],
+            )?;
+        }
+        transaction.execute(
+            "UPDATE library_playlists SET updated_at = ?2 WHERE id = ?1",
+            params![playlist_id, now],
+        )?;
+        transaction.commit()?;
+        drop(connection);
+        self.library_playlist(playlist_id)
+    }
+
+    pub fn list_library_playlist_items(
+        &self,
+        playlist_id: &str,
+    ) -> Result<Vec<LibraryItem>, AppError> {
+        let playlist = self.library_playlist(playlist_id)?;
+        let items = self.list_library_items_by_ids(playlist.item_ids.clone())?;
+        let mut by_id = items
+            .into_iter()
+            .map(|item| (item.id.clone(), item))
+            .collect::<HashMap<_, _>>();
+        Ok(playlist
+            .item_ids
+            .iter()
+            .filter_map(|id| by_id.remove(id))
+            .collect())
+    }
+
+    fn library_playlist(&self, id: &str) -> Result<LibraryPlaylist, AppError> {
+        validate_uuid(id, "playlist")?;
+        self.list_library_playlists()?
+            .into_iter()
+            .find(|playlist| playlist.id == id)
+            .ok_or_else(|| {
+                AppError::new(
+                    "library_playlist_not_found",
+                    "The library playlist was not found.",
+                )
+            })
     }
 
     pub fn apply_library_bulk_action(
@@ -2572,6 +3054,24 @@ impl Database {
                 "Authentication profiles are unavailable.",
             )
         })?;
+        if request.enabled {
+            let conflicting_profile: Option<String> = connection
+                .query_row(
+                    "SELECT name FROM authentication_profiles
+                     WHERE enabled = 1 AND host_suffix = ?1 AND id != ?2 LIMIT 1",
+                    params![request.host_suffix, id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(name) = conflicting_profile {
+                return Err(AppError::new(
+                    "duplicate_auth_profile",
+                    format!(
+                        "An enabled authentication profile named ‘{name}’ already handles this hostname."
+                    ),
+                ));
+            }
+        }
         connection.execute(
             "INSERT INTO authentication_profiles
                 (id, name, host_suffix, browser_cookie_source, browser_profile, proxy_url,
@@ -2638,7 +3138,7 @@ impl Database {
         let Some(host) = host else {
             return Ok(None);
         };
-        Ok(self
+        let profiles = self
             .list_authentication_profiles()?
             .into_iter()
             .filter(|profile| {
@@ -2646,7 +3146,22 @@ impl Database {
                     && (host == profile.host_suffix
                         || host.ends_with(&format!(".{}", profile.host_suffix)))
             })
-            .max_by_key(|profile| profile.host_suffix.len()))
+            .collect::<Vec<_>>();
+        let max_specificity = profiles
+            .iter()
+            .map(|profile| profile.host_suffix.len())
+            .max();
+        let mut matches = profiles
+            .into_iter()
+            .filter(|profile| Some(profile.host_suffix.len()) == max_specificity)
+            .collect::<Vec<_>>();
+        if matches.len() > 1 {
+            return Err(AppError::new(
+                "ambiguous_auth_profiles",
+                "Multiple enabled authentication profiles match this hostname. Disable or edit one of them.",
+            ));
+        }
+        Ok(matches.pop())
     }
 
     pub fn delete_authentication_profile(&self, id: &str) -> Result<Option<String>, AppError> {
@@ -2772,6 +3287,37 @@ fn library_playback_from_row(
         completed: row.get(offset + 3)?,
         updated_at: timestamp_or_epoch(row.get(offset + 4)?),
     })
+}
+
+fn library_order_by(sort: LibrarySort) -> &'static str {
+    match sort {
+        LibrarySort::Recent => "added_at DESC, media_library.id DESC",
+        LibrarySort::Oldest => "added_at ASC, media_library.id ASC",
+        LibrarySort::TitleAsc => {
+            "title COLLATE NOCASE ASC, added_at DESC, media_library.id DESC"
+        }
+        LibrarySort::TitleDesc => {
+            "title COLLATE NOCASE DESC, added_at DESC, media_library.id DESC"
+        }
+        LibrarySort::DurationDesc => {
+            "duration_seconds IS NULL ASC, duration_seconds DESC, added_at DESC, media_library.id DESC"
+        }
+        LibrarySort::DurationAsc => {
+            "duration_seconds IS NULL ASC, duration_seconds ASC, added_at DESC, media_library.id DESC"
+        }
+        LibrarySort::SizeDesc => {
+            "file_size_bytes IS NULL ASC, file_size_bytes DESC, added_at DESC, media_library.id DESC"
+        }
+        LibrarySort::SizeAsc => {
+            "file_size_bytes IS NULL ASC, file_size_bytes ASC, added_at DESC, media_library.id DESC"
+        }
+        LibrarySort::FileDateDesc => {
+            "modified_at_ms IS NULL ASC, modified_at_ms DESC, added_at DESC, media_library.id DESC"
+        }
+        LibrarySort::FileDateAsc => {
+            "modified_at_ms IS NULL ASC, modified_at_ms ASC, added_at DESC, media_library.id DESC"
+        }
+    }
 }
 
 fn build_library_query(request: &LibraryQueryRequest) -> Result<(String, Vec<SqlValue>), AppError> {
@@ -3064,6 +3610,16 @@ fn validate_collection_name(value: &str) -> Result<String, AppError> {
     Ok(value.to_owned())
 }
 
+fn validate_library_shelf_limit(limit: usize) -> Result<(), AppError> {
+    if !(1..=24).contains(&limit) {
+        return Err(AppError::new(
+            "invalid_library_playback_limit",
+            "Library media shelves can contain between 1 and 24 items.",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_library_rating(rating: Option<u8>) -> Result<(), AppError> {
     if rating.is_some_and(|value| !(1..=5).contains(&value)) {
         return Err(AppError::new(
@@ -3147,6 +3703,105 @@ fn ensure_collection_exists(
             "The library collection was not found.",
         ))
     }
+}
+
+fn ensure_playlist_exists(
+    transaction: &rusqlite::Transaction<'_>,
+    id: &str,
+) -> Result<(), AppError> {
+    validate_uuid(id, "playlist")?;
+    let exists: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM library_playlists WHERE id = ?1)",
+        [id],
+        |row| row.get(0),
+    )?;
+    if exists {
+        Ok(())
+    } else {
+        Err(AppError::new(
+            "library_playlist_not_found",
+            "The library playlist was not found.",
+        ))
+    }
+}
+
+fn ensure_library_video_exists(
+    transaction: &rusqlite::Transaction<'_>,
+    id: &str,
+) -> Result<(), AppError> {
+    let media_kind: Option<String> = transaction
+        .query_row(
+            "SELECT media_kind FROM media_library WHERE id = ?1",
+            [id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match media_kind.as_deref() {
+        Some("video") => Ok(()),
+        Some(_) => Err(AppError::new(
+            "library_playlist_video_required",
+            "Only videos can be added to a playlist.",
+        )),
+        None => Err(library_item_not_found()),
+    }
+}
+
+fn playlist_item_ids(
+    transaction: &rusqlite::Transaction<'_>,
+    playlist_id: &str,
+) -> Result<Vec<String>, AppError> {
+    let mut statement = transaction.prepare(
+        "SELECT item_id FROM library_playlist_items
+         WHERE playlist_id = ?1 ORDER BY position ASC, added_at ASC, item_id ASC",
+    )?;
+    let item_ids = statement
+        .query_map([playlist_id], |row| row.get(0))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(AppError::from)?;
+    Ok(item_ids)
+}
+
+fn normalize_playlist_positions(
+    transaction: &rusqlite::Transaction<'_>,
+    playlist_id: &str,
+) -> Result<(), AppError> {
+    for (position, id) in playlist_item_ids(transaction, playlist_id)?
+        .iter()
+        .enumerate()
+    {
+        transaction.execute(
+            "UPDATE library_playlist_items SET position = ?3
+             WHERE playlist_id = ?1 AND item_id = ?2",
+            params![playlist_id, id, i64::try_from(position).unwrap_or(i64::MAX)],
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_playlist_name(value: &str) -> Result<String, AppError> {
+    let value = value.trim();
+    if value.is_empty() || value.chars().count() > 80 || value.chars().any(char::is_control) {
+        return Err(AppError::new(
+            "invalid_library_playlist_name",
+            "Playlist names must contain between 1 and 80 printable characters.",
+        ));
+    }
+    Ok(value.to_owned())
+}
+
+fn validate_playlist_description(value: &str) -> Result<String, AppError> {
+    let value = value.trim();
+    if value.chars().count() > 500
+        || value
+            .chars()
+            .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+    {
+        return Err(AppError::new(
+            "invalid_library_playlist_description",
+            "Playlist descriptions must contain no more than 500 characters.",
+        ));
+    }
+    Ok(value.to_owned())
 }
 
 fn save_library_metadata(connection: &Connection, item: &LibraryItem) -> Result<(), AppError> {
@@ -3600,6 +4255,7 @@ mod tests {
         AudioQuality, DownloadOptions, MediaAnalysis, OutputConflictPolicy, OutputContainer,
         QualityKind, QualityOption, VideoCodecPreference,
     };
+    use std::time::Instant;
     use tempfile::tempdir;
 
     #[test]
@@ -3752,7 +4408,7 @@ mod tests {
 
     #[test]
     fn persists_desktop_preferences_and_onboarding() {
-        use crate::models::{CloseBehavior, DesktopPreferences};
+        use crate::models::{CloseBehavior, DesktopPreferences, PlaybackCompatibilityPreference};
         let directory = tempdir().expect("temporary directory");
         let database = Database::open(&directory.path().join("desktop.sqlite3")).expect("database");
         assert!(!database.onboarding_completed().expect("onboarding status"));
@@ -3763,6 +4419,7 @@ mod tests {
             reduce_motion: true,
             high_contrast: true,
             interface_scale_percent: 110,
+            playback_compatibility: PlaybackCompatibilityPreference::Automatic,
         };
         database
             .save_desktop_preferences(&preferences)
@@ -3826,12 +4483,48 @@ mod tests {
             .match_site_preset_rule("https://www.youtube.com/watch?v=example")
             .expect("path mismatch")
             .is_none());
+        let duplicate = database
+            .save_site_preset_rule(SaveSitePresetRuleRequest {
+                id: None,
+                name: "Duplicate YouTube shorts".to_owned(),
+                host_suffix: "youtube.com".to_owned(),
+                path_prefix: Some("/shorts/".to_owned()),
+                preset_id: preset.id.clone(),
+                enabled: true,
+            })
+            .expect_err("duplicate enabled site rule");
+        assert_eq!(duplicate.code, "duplicate_site_rule");
         database.delete_preset(&preset.id).expect("delete preset");
         assert!(database.list_presets().expect("list presets").is_empty());
         assert!(database
             .list_site_preset_rules()
             .expect("cascade site rules")
             .is_empty());
+    }
+
+    #[test]
+    fn rejects_duplicate_enabled_authentication_hosts() {
+        use crate::models::{BrowserCookieSource, SaveAuthenticationProfileRequest};
+        let directory = tempdir().expect("temporary directory");
+        let database = Database::open(&directory.path().join("auth.sqlite3")).expect("database");
+        let request = |name: &str| SaveAuthenticationProfileRequest {
+            id: None,
+            name: name.to_owned(),
+            host_suffix: "reddit.com".to_owned(),
+            browser_cookie_source: BrowserCookieSource::Firefox,
+            browser_profile: None,
+            proxy_url: None,
+            cookie_file_path: None,
+            clear_cookie_file: false,
+            enabled: true,
+        };
+        database
+            .save_authentication_profile(request("Primary"), None)
+            .expect("primary profile");
+        let duplicate = database
+            .save_authentication_profile(request("Duplicate"), None)
+            .expect_err("duplicate enabled authentication host");
+        assert_eq!(duplicate.code, "duplicate_auth_profile");
     }
 
     #[test]
@@ -3914,6 +4607,106 @@ mod tests {
             )
             .expect("migration column");
         assert!(has_request_json);
+    }
+
+    #[test]
+    fn rolls_back_a_failed_migration_and_recovers_on_the_next_open() {
+        let directory = tempdir().expect("temporary directory");
+        let path = directory.path().join("migration-recovery.sqlite3");
+        {
+            let mut connection = Connection::open(&path).expect("legacy database");
+            let transaction = connection.transaction().expect("legacy transaction");
+            transaction
+                .execute_batch(
+                    "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY NOT NULL);",
+                )
+                .expect("migration registry");
+            for (version, migration) in [
+                (1, MIGRATION_0001),
+                (2, MIGRATION_0002),
+                (3, MIGRATION_0003),
+                (4, MIGRATION_0004),
+                (5, MIGRATION_0005),
+                (6, MIGRATION_0006),
+                (7, MIGRATION_0007),
+                (8, MIGRATION_0008),
+            ] {
+                transaction
+                    .execute_batch(migration)
+                    .expect("legacy migration");
+                transaction
+                    .execute(
+                        "INSERT INTO schema_migrations(version) VALUES (?1)",
+                        [version],
+                    )
+                    .expect("legacy migration version");
+            }
+            transaction.commit().expect("legacy commit");
+            connection
+                .execute_batch("CREATE TABLE library_sources (id TEXT PRIMARY KEY NOT NULL);")
+                .expect("malformed future table");
+        }
+
+        let error = match Database::open(&path) {
+            Ok(_) => panic!("malformed migration unexpectedly succeeded"),
+            Err(error) => error,
+        };
+        assert!(error.message.contains("database") || error.details.is_some());
+
+        {
+            let connection = Connection::open(&path).expect("inspect rolled-back database");
+            let latest_version: i64 = connection
+                .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                    row.get(0)
+                })
+                .expect("latest migration");
+            assert_eq!(latest_version, 8);
+            let has_scan_jobs: bool = connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'library_scan_jobs')",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("scan job table state");
+            let has_source_id: bool = connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('media_library') WHERE name = 'source_id')",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("source column state");
+            assert!(!has_scan_jobs);
+            assert!(!has_source_id);
+            connection
+                .execute("DROP TABLE library_sources", [])
+                .expect("remove malformed table");
+        }
+
+        let database = Database::open(&path).expect("migration recovery");
+        let connection = database.connection.lock().expect("database lock");
+        let latest_version: i64 = connection
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
+            .expect("recovered migration version");
+        assert_eq!(latest_version, 17);
+        let has_playback: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'library_playback')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("playback table state");
+        assert!(has_playback);
+        let has_playlists: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master
+                 WHERE type = 'table' AND name = 'library_playlists')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("playlist table state");
+        assert!(has_playlists);
     }
 
     #[test]
@@ -4178,6 +4971,206 @@ mod tests {
     }
 
     #[test]
+    fn persists_watch_later_and_private_playback_history() {
+        let directory = tempdir().expect("temporary directory");
+        let database =
+            Database::open(&directory.path().join("watch-history.sqlite3")).expect("database");
+        let now = Utc::now();
+        let item = LibraryItem {
+            id: Uuid::new_v4().to_string(),
+            path: directory
+                .path()
+                .join("movie.mp4")
+                .to_string_lossy()
+                .into_owned(),
+            source_id: None,
+            relative_path: None,
+            media_kind: Some(LibraryMediaKind::Video),
+            title: "Local movie".to_owned(),
+            source_url: None,
+            thumbnail: None,
+            duration_seconds: None,
+            site: None,
+            tags: Vec::new(),
+            metadata: serde_json::json!({}),
+            file_size_bytes: Some(1024),
+            modified_at_ms: Some(1_700_000_000_000),
+            width: Some(1920),
+            height: Some(1080),
+            fps: Some(30.0),
+            video_codec: Some("h264".to_owned()),
+            audio_codec: Some("aac".to_owned()),
+            container: Some("mp4".to_owned()),
+            dynamic_range: None,
+            metadata_state: LibraryMetadataState::Ready,
+            metadata_error: None,
+            favorite: false,
+            rating: None,
+            missing: false,
+            added_at: now,
+            updated_at: now,
+        };
+        database.upsert_library_item(&item).expect("library item");
+
+        assert!(
+            !database
+                .get_library_watch_state(&item.id)
+                .expect("initial watch state")
+                .watch_later
+        );
+        assert!(
+            database
+                .set_library_watch_later(&item.id, true)
+                .expect("save for later")
+                .watch_later
+        );
+        assert_eq!(
+            database.list_library_watch_later(12).expect("watch later")[0].id,
+            item.id
+        );
+
+        let completed = database
+            .set_library_watched(&item.id, true)
+            .expect("mark watched");
+        assert!(completed.playback.expect("playback state").completed);
+        assert!(
+            database
+                .save_library_playback(SaveLibraryPlaybackRequest {
+                    item_id: item.id.clone(),
+                    position_seconds: 10.0,
+                    duration_seconds: 120.0,
+                    completed: false,
+                })
+                .expect("replayed progress")
+                .completed
+        );
+        assert_eq!(
+            database
+                .list_recently_watched(12)
+                .expect("recently watched")[0]
+                .item
+                .id,
+            item.id
+        );
+        assert!(database
+            .set_library_watched(&item.id, false)
+            .expect("reset history")
+            .playback
+            .is_none());
+        assert!(database
+            .list_recently_watched(12)
+            .expect("cleared recently watched")
+            .is_empty());
+    }
+
+    #[test]
+    fn persists_ordered_video_playlists_and_cascades_removed_items() {
+        let directory = tempdir().expect("temporary directory");
+        let database =
+            Database::open(&directory.path().join("playlists.sqlite3")).expect("database");
+        let now = Utc::now();
+        let first = LibraryItem {
+            id: Uuid::new_v4().to_string(),
+            path: directory
+                .path()
+                .join("first.mp4")
+                .to_string_lossy()
+                .into_owned(),
+            source_id: None,
+            relative_path: None,
+            media_kind: Some(LibraryMediaKind::Video),
+            title: "First".to_owned(),
+            source_url: None,
+            thumbnail: None,
+            duration_seconds: Some(30.0),
+            site: None,
+            tags: Vec::new(),
+            metadata: serde_json::json!({}),
+            file_size_bytes: Some(100),
+            modified_at_ms: Some(1),
+            width: Some(1920),
+            height: Some(1080),
+            fps: Some(30.0),
+            video_codec: Some("h264".to_owned()),
+            audio_codec: Some("aac".to_owned()),
+            container: Some("mp4".to_owned()),
+            dynamic_range: None,
+            metadata_state: LibraryMetadataState::Ready,
+            metadata_error: None,
+            favorite: false,
+            rating: None,
+            missing: false,
+            added_at: now,
+            updated_at: now,
+        };
+        let mut second = first.clone();
+        second.id = Uuid::new_v4().to_string();
+        second.title = "Second".to_owned();
+        second.path = directory
+            .path()
+            .join("second.mp4")
+            .to_string_lossy()
+            .into_owned();
+        let mut image = first.clone();
+        image.id = Uuid::new_v4().to_string();
+        image.title = "Image".to_owned();
+        image.path = directory
+            .path()
+            .join("image.jpg")
+            .to_string_lossy()
+            .into_owned();
+        image.media_kind = Some(LibraryMediaKind::Image);
+        database.upsert_library_item(&first).expect("first video");
+        database.upsert_library_item(&second).expect("second video");
+        database.upsert_library_item(&image).expect("image");
+
+        let playlist = database
+            .save_library_playlist(SaveLibraryPlaylistRequest {
+                id: None,
+                name: "Evening queue".to_owned(),
+                description: "A deliberate order".to_owned(),
+            })
+            .expect("playlist");
+        database
+            .add_library_playlist_item(&playlist.id, &first.id)
+            .expect("add first");
+        database
+            .add_library_playlist_item(&playlist.id, &second.id)
+            .expect("add second");
+        assert_eq!(
+            database
+                .list_library_playlist_items(&playlist.id)
+                .expect("playlist items")
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![first.id.as_str(), second.id.as_str()]
+        );
+        assert_eq!(
+            database
+                .move_library_playlist_item(&playlist.id, &second.id, 0)
+                .expect("move second")
+                .item_ids,
+            vec![second.id.clone(), first.id.clone()]
+        );
+        assert_eq!(
+            database
+                .add_library_playlist_item(&playlist.id, &image.id)
+                .expect_err("images are rejected")
+                .code,
+            "library_playlist_video_required"
+        );
+
+        database
+            .remove_library_item(&second.id)
+            .expect("remove catalog item");
+        assert_eq!(
+            database.list_library_playlists().expect("playlists")[0].item_ids,
+            vec![first.id]
+        );
+    }
+
+    #[test]
     fn round_trips_library_file_operation_history() {
         let directory = tempdir().expect("temporary directory");
         let database =
@@ -4265,6 +5258,7 @@ mod tests {
             rating: None,
             collection_id: None,
             favorite_only: false,
+            sort: LibrarySort::Recent,
         }
     }
 
@@ -4396,6 +5390,96 @@ mod tests {
         assert_eq!(first_page.items.len(), 60);
         assert_eq!(first_page.total_pages, 86);
 
+        let mut title_ascending = library_query_request();
+        title_ascending.sort = LibrarySort::TitleAsc;
+        let title_ascending = database
+            .query_library_items(title_ascending)
+            .expect("title ascending");
+        assert!(title_ascending
+            .items
+            .windows(2)
+            .all(|pair| { pair[0].title.to_lowercase() <= pair[1].title.to_lowercase() }));
+
+        let mut title_descending = library_query_request();
+        title_descending.sort = LibrarySort::TitleDesc;
+        let title_descending = database
+            .query_library_items(title_descending)
+            .expect("title descending");
+        assert!(title_descending
+            .items
+            .windows(2)
+            .all(|pair| { pair[0].title.to_lowercase() >= pair[1].title.to_lowercase() }));
+
+        let mut shortest_first = library_query_request();
+        shortest_first.sort = LibrarySort::DurationAsc;
+        let shortest_first = database
+            .query_library_items(shortest_first)
+            .expect("shortest first");
+        assert_eq!(shortest_first.items[0].duration_seconds, Some(120.0));
+
+        let mut longest_first = library_query_request();
+        longest_first.sort = LibrarySort::DurationDesc;
+        let longest_first = database
+            .query_library_items(longest_first)
+            .expect("longest first");
+        assert_eq!(longest_first.items[0].duration_seconds, Some(1_900.0));
+
+        {
+            let connection = database.connection.lock().expect("database lock");
+            connection
+                .execute(
+                    "UPDATE library_media_metadata SET file_size_bytes = 1 WHERE item_id = ?1",
+                    [&ids[0]],
+                )
+                .expect("smallest item");
+            connection
+                .execute(
+                    "UPDATE library_media_metadata SET file_size_bytes = 9999 WHERE item_id = ?1",
+                    [&ids[1]],
+                )
+                .expect("largest item");
+            connection
+                .execute(
+                    "UPDATE library_media_metadata SET modified_at_ms = ?2 WHERE item_id = ?1",
+                    params![&ids[0], now - 1],
+                )
+                .expect("oldest file date");
+            connection
+                .execute(
+                    "UPDATE library_media_metadata SET modified_at_ms = ?2 WHERE item_id = ?1",
+                    params![&ids[1], now + 1],
+                )
+                .expect("newest file date");
+        }
+
+        let mut smallest_first = library_query_request();
+        smallest_first.sort = LibrarySort::SizeAsc;
+        let smallest_first = database
+            .query_library_items(smallest_first)
+            .expect("smallest first");
+        assert_eq!(smallest_first.items[0].id, ids[0]);
+
+        let mut largest_first = library_query_request();
+        largest_first.sort = LibrarySort::SizeDesc;
+        let largest_first = database
+            .query_library_items(largest_first)
+            .expect("largest first");
+        assert_eq!(largest_first.items[0].id, ids[1]);
+
+        let mut oldest_file_first = library_query_request();
+        oldest_file_first.sort = LibrarySort::FileDateAsc;
+        let oldest_file_first = database
+            .query_library_items(oldest_file_first)
+            .expect("oldest file first");
+        assert_eq!(oldest_file_first.items[0].id, ids[0]);
+
+        let mut newest_file_first = library_query_request();
+        newest_file_first.sort = LibrarySort::FileDateDesc;
+        let newest_file_first = database
+            .query_library_items(newest_file_first)
+            .expect("newest file first");
+        assert_eq!(newest_file_first.items[0].id, ids[1]);
+
         let mut last_request = library_query_request();
         last_request.page = 86;
         let last_page = database
@@ -4511,6 +5595,41 @@ mod tests {
         let continuing = database.list_continue_watching(12).expect("continue shelf");
         assert_eq!(continuing.len(), 1);
         assert_eq!(continuing[0].item.id, ids[42]);
+        let watch_state = database
+            .set_library_watch_later(&ids[42], true)
+            .expect("save for later");
+        assert!(watch_state.watch_later);
+        assert_eq!(
+            database
+                .list_library_watch_later(12)
+                .expect("watch later shelf")[0]
+                .id,
+            ids[42]
+        );
+        let watched = database
+            .set_library_watched(&ids[42], true)
+            .expect("mark watched");
+        assert!(watched.playback.expect("watched playback").completed);
+        assert!(database
+            .list_continue_watching(12)
+            .expect("watched continue shelf")
+            .is_empty());
+        assert_eq!(
+            database
+                .list_recently_watched(12)
+                .expect("recently watched shelf")[0]
+                .item
+                .id,
+            ids[42]
+        );
+        let reset = database
+            .set_library_watched(&ids[42], false)
+            .expect("reset playback");
+        assert!(reset.playback.is_none());
+        assert!(database
+            .list_recently_watched(12)
+            .expect("reset recently watched shelf")
+            .is_empty());
         database
             .save_library_playback(SaveLibraryPlaybackRequest {
                 item_id: ids[42].clone(),
@@ -4531,6 +5650,150 @@ mod tests {
                 completed: false,
             })
             .is_err());
+        assert!(
+            !database
+                .set_library_watch_later(&ids[42], false)
+                .expect("remove from watch later")
+                .watch_later
+        );
+        assert!(database
+            .list_library_watch_later(12)
+            .expect("empty watch later shelf")
+            .is_empty());
+    }
+
+    #[test]
+    #[ignore = "manual large-library profile; optionally set NICE_DOWNLOADER_LIBRARY_PROFILE_DIR"]
+    fn profiles_large_library_queries_on_a_selected_filesystem() {
+        let temporary_directory = tempdir().expect("temporary directory");
+        let external_directory =
+            std::env::var_os("NICE_DOWNLOADER_LIBRARY_PROFILE_DIR").map(std::path::PathBuf::from);
+        let profile_directory = external_directory
+            .as_deref()
+            .unwrap_or_else(|| temporary_directory.path());
+        assert!(
+            profile_directory.is_dir(),
+            "NICE_DOWNLOADER_LIBRARY_PROFILE_DIR must be an existing directory"
+        );
+        let item_count = std::env::var("NICE_DOWNLOADER_LIBRARY_PROFILE_ITEMS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(50_000);
+        assert!(
+            (10_000..=250_000).contains(&item_count),
+            "profile item count must be between 10,000 and 250,000"
+        );
+        let path = profile_directory.join(format!(
+            "nice-downloader-profile-{}.sqlite3",
+            Uuid::new_v4()
+        ));
+        let opened_at = Instant::now();
+        let database = Database::open(&path).expect("profile database");
+        let open_elapsed = opened_at.elapsed();
+        let source = database
+            .save_library_source(SaveLibrarySourceRequest {
+                id: None,
+                name: "Profile archive".to_owned(),
+                path: profile_directory.to_string_lossy().into_owned(),
+                media_kind: LibraryMediaKind::Video,
+                recursive: true,
+                watch_enabled: false,
+                private: false,
+                include_patterns: vec![],
+                exclude_patterns: vec![],
+            })
+            .expect("profile source");
+
+        let seeded_at = Instant::now();
+        {
+            let mut connection = database.connection.lock().expect("database lock");
+            let transaction = connection.transaction().expect("profile transaction");
+            {
+                let mut statement = transaction
+                    .prepare(
+                        "INSERT INTO media_library
+                         (id, path, title, tags_json, metadata_json, missing, added_at,
+                          updated_at, source_id, relative_path, media_kind, favorite)
+                         VALUES (?1, ?2, ?3, ?4, '{}', 0, ?5, ?5, ?6, ?7, 'video', 0)",
+                    )
+                    .expect("profile insert statement");
+                for index in 0..item_count {
+                    let relative_path = format!(
+                        "collection-{}/season-{}/video-{index}.mp4",
+                        index % 100,
+                        index % 12
+                    );
+                    let title = if index % 1_000 == 0 {
+                        format!("Profile needle video {index}")
+                    } else {
+                        format!("Profile video {index}")
+                    };
+                    statement
+                        .execute(params![
+                            format!("00000000-0000-4000-8000-{index:012x}"),
+                            profile_directory.join(&relative_path).to_string_lossy(),
+                            title,
+                            if index % 20 == 0 {
+                                "[\"profile\"]"
+                            } else {
+                                "[]"
+                            },
+                            i64::try_from(index).expect("profile timestamp"),
+                            &source.id,
+                            relative_path,
+                        ])
+                        .expect("insert profile item");
+                }
+            }
+            transaction.commit().expect("commit profile catalog");
+        }
+        let seed_elapsed = seeded_at.elapsed();
+
+        let first_page_at = Instant::now();
+        let first_page = database
+            .query_library_items(library_query_request())
+            .expect("profile first page");
+        let first_page_elapsed = first_page_at.elapsed();
+        assert_eq!(first_page.total_items, item_count);
+        assert_eq!(first_page.items.len(), 60);
+
+        let search_at = Instant::now();
+        let mut search_request = library_query_request();
+        search_request.search = Some("Profile needle".to_owned());
+        let search_result = database
+            .query_library_items(search_request)
+            .expect("profile search");
+        let search_elapsed = search_at.elapsed();
+        assert_eq!(search_result.total_items, item_count.div_ceil(1_000));
+
+        let facets_at = Instant::now();
+        let facets = database
+            .library_facets(LibraryFacetRequest {
+                source_id: Some(source.id),
+                availability: LibraryAvailabilityFilter::Available,
+            })
+            .expect("profile facets");
+        let facets_elapsed = facets_at.elapsed();
+        assert_eq!(facets.total_items, item_count);
+        assert!(facets.tags.iter().any(|tag| tag == "profile"));
+        assert!(facets.folders.len() >= 100);
+
+        let database_size = std::fs::metadata(&path)
+            .map(|metadata| metadata.len())
+            .unwrap_or_default();
+        println!(
+            "library-profile items={item_count} filesystem={} database={} bytes open_ms={} seed_ms={} first_page_ms={} search_ms={} facets_ms={}",
+            profile_directory.display(),
+            database_size,
+            open_elapsed.as_millis(),
+            seed_elapsed.as_millis(),
+            first_page_elapsed.as_millis(),
+            search_elapsed.as_millis(),
+            facets_elapsed.as_millis(),
+        );
+        if external_directory.is_some() {
+            println!("library-profile database retained at {}", path.display());
+        }
     }
 
     #[test]
