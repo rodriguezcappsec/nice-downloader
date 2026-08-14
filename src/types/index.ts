@@ -104,6 +104,9 @@ export interface DesktopPreferences {
   closeBehavior: "ask" | "background" | "quit";
   startMinimized: boolean;
   notifyWhenBackgrounded: boolean;
+  reduceMotion: boolean;
+  highContrast: boolean;
+  interfaceScalePercent: 90 | 100 | 110 | 125;
 }
 export interface DesktopRuntimeStatus { trayAvailable: boolean; }
 
@@ -404,6 +407,9 @@ export interface TransformationTask {
 export interface LibraryItem {
   id: string;
   path: string;
+  sourceId?: string | null;
+  relativePath?: string | null;
+  mediaKind?: LibraryMediaKind | null;
   title: string;
   sourceUrl?: string | null;
   thumbnail?: string | null;
@@ -411,20 +417,310 @@ export interface LibraryItem {
   site?: string | null;
   tags: string[];
   metadata: Record<string, unknown>;
+  fileSizeBytes?: number | null;
+  modifiedAtMs?: number | null;
+  width?: number | null;
+  height?: number | null;
+  fps?: number | null;
+  videoCodec?: string | null;
+  audioCodec?: string | null;
+  container?: string | null;
+  dynamicRange?: string | null;
+  metadataState: "pending" | "ready" | "failed" | "unavailable";
+  metadataError?: string | null;
+  favorite: boolean;
+  rating?: number | null;
   missing: boolean;
   addedAt: string;
   updatedAt: string;
+}
+
+export type LibraryAvailabilityFilter = "all" | "available" | "missing";
+export type LibraryFolderScope = "tree" | "direct";
+
+export interface LibraryQueryRequest {
+  page: number;
+  pageSize: number;
+  search?: string | null;
+  sourceId?: string | null;
+  folderSourceId?: string | null;
+  folderPath?: string | null;
+  folderScope: LibraryFolderScope;
+  mediaKind?: Exclude<LibraryMediaKind, "both"> | null;
+  resolution?: string | null;
+  container?: string | null;
+  duration?: string | null;
+  dateAdded?: string | null;
+  availability: LibraryAvailabilityFilter;
+  tag?: string | null;
+  rating?: string | null;
+  collectionId?: string | null;
+  favoriteOnly: boolean;
+}
+
+export interface LibraryQueryResult {
+  items: LibraryItem[];
+  totalItems: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+}
+
+export interface LibraryFacetRequest {
+  sourceId?: string | null;
+  availability: LibraryAvailabilityFilter;
+}
+
+export interface LibraryFolderFacet {
+  sourceId: string;
+  path: string;
+  directCount: number;
+  treeCount: number;
+}
+
+export interface LibraryFacets {
+  totalItems: number;
+  availableItems: number;
+  missingItems: number;
+  containers: string[];
+  tags: string[];
+  folders: LibraryFolderFacet[];
+}
+
+export interface LibraryPlaybackState {
+  itemId: string;
+  positionSeconds: number;
+  durationSeconds: number;
+  completed: boolean;
+  updatedAt: string;
+}
+
+export interface SaveLibraryPlaybackRequest {
+  itemId: string;
+  positionSeconds: number;
+  durationSeconds: number;
+  completed: boolean;
+}
+
+export interface LibraryPlaybackEntry {
+  item: LibraryItem;
+  playback: LibraryPlaybackState;
+}
+
+export interface LibrarySubtitleTrack {
+  label: string;
+  language?: string | null;
+  url: string;
+}
+
+export interface LibraryPlaybackSession {
+  item: LibraryItem;
+  url: string;
+  playback?: LibraryPlaybackState | null;
+  subtitles: LibrarySubtitleTrack[];
+}
+
+export interface LibraryCacheResult {
+  removedFiles: number;
+  freedBytes: number;
+}
+
+export interface LibraryArtworkCacheStatus {
+  fileCount: number;
+  totalBytes: number;
+  maxFiles: number;
+  maxBytes: number;
 }
 
 export interface UpdateLibraryItemRequest {
   id: string;
   title: string;
   tags: string[];
+  favorite: boolean;
+  rating?: number | null;
 }
+
+export interface LibraryCollection {
+  id: string;
+  name: string;
+  itemIds: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type LibraryChangeKind = "added" | "modified" | "renamed" | "missing" | "restored";
+
+export interface LibraryChange {
+  id: string;
+  itemId: string;
+  sourceId?: string | null;
+  kind: LibraryChangeKind;
+  previousPath?: string | null;
+  detectedAt: string;
+  reviewedAt?: string | null;
+}
+
+export type LibraryDuplicateAnalysisState = "running" | "completed" | "cancelled" | "failed";
+
+export interface LibraryDuplicateAnalysisJob {
+  id: string;
+  state: LibraryDuplicateAnalysisState;
+  examinedItems: number;
+  candidateItems: number;
+  hashedItems: number;
+  skippedItems: number;
+  totalCandidateBytes: number;
+  hashedBytes: number;
+  groupsFound: number;
+  currentTitle?: string | null;
+  error?: string | null;
+  startedAt: string;
+  updatedAt: string;
+  completedAt?: string | null;
+}
+
+export interface LibraryDuplicateGroup {
+  id: string;
+  itemIds: string[];
+  fileSizeBytes: number;
+  potentialReclaimBytes: number;
+}
+
+export interface LibraryDuplicateTrashResult {
+  itemId: string;
+  groupId: string;
+  remainingItemIds: string[];
+  movedBytes: number;
+}
+
+export type LibraryFileOperationKind = "move" | "copy" | "rename";
+export type LibraryFileOperationState = "planned" | "executing" | "completed" | "failed" | "undone";
+
+export interface PreviewLibraryFileOperationRequest {
+  itemId: string;
+  kind: LibraryFileOperationKind;
+  destinationDirectory?: string | null;
+  newFileName?: string | null;
+}
+
+export interface LibraryFileOperation {
+  id: string;
+  itemId: string;
+  outputItemId?: string | null;
+  kind: LibraryFileOperationKind;
+  state: LibraryFileOperationState;
+  sourcePath: string;
+  destinationPath: string;
+  sourceSizeBytes: number;
+  sourceModifiedAtMs: number;
+  error?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string | null;
+}
+
+export interface LibraryFileOperationPlan {
+  operation: LibraryFileOperation;
+  sourceDisplayName: string;
+  destinationDisplayName: string;
+  warnings: string[];
+}
+
+export interface LibraryFileOperationResult {
+  operation: LibraryFileOperation;
+  items: LibraryItem[];
+}
+
+export interface PreviewLibraryBulkMoveRequest {
+  itemIds: string[];
+  destinationDirectory: string;
+}
+
+export interface LibraryBulkMovePlan {
+  operations: LibraryFileOperationPlan[];
+  destinationDirectory: string;
+  totalSizeBytes: number;
+  warnings: string[];
+}
+
+export interface LibraryBulkMoveFailure {
+  operationId: string;
+  itemId: string;
+  code: string;
+  message: string;
+  details?: string | null;
+}
+
+export interface LibraryBulkMoveResult {
+  results: LibraryFileOperationResult[];
+  failures: LibraryBulkMoveFailure[];
+}
+
+export interface SaveLibraryCollectionRequest {
+  id?: string | null;
+  name: string;
+}
+
+export type LibraryBulkAction =
+  | { type: "setFavorite"; favorite: boolean }
+  | { type: "setRating"; rating?: number | null }
+  | { type: "addTags"; tags: string[] }
+  | { type: "addToCollection"; collectionId: string }
+  | { type: "removeFromCollection"; collectionId: string };
 
 export interface LibraryScanResult {
   checkedCount: number;
   missingCount: number;
+}
+
+export type LibraryMediaKind = "video" | "image" | "both";
+export type LibrarySourceStatus = "online" | "offline" | "scanning" | "error";
+
+export interface LibrarySource {
+  id: string;
+  name: string;
+  path: string;
+  mediaKind: LibraryMediaKind;
+  recursive: boolean;
+  watchEnabled: boolean;
+  private: boolean;
+  includePatterns: string[];
+  excludePatterns: string[];
+  status: LibrarySourceStatus;
+  lastError?: string | null;
+  lastScannedAt?: string | null;
+  itemCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SaveLibrarySourceRequest {
+  id?: string | null;
+  name: string;
+  path: string;
+  mediaKind: LibraryMediaKind;
+  recursive: boolean;
+  watchEnabled: boolean;
+  private: boolean;
+  includePatterns: string[];
+  excludePatterns: string[];
+}
+
+export type LibraryScanState = "running" | "completed" | "cancelled" | "failed";
+
+export interface LibraryScanJob {
+  id: string;
+  sourceId: string;
+  state: LibraryScanState;
+  discoveredCount: number;
+  indexedCount: number;
+  skippedCount: number;
+  warningCount: number;
+  currentPath?: string | null;
+  warnings: string[];
+  startedAt: string;
+  updatedAt: string;
+  completedAt?: string | null;
 }
 
 export type HistoryEntry = DownloadJob;

@@ -26,6 +26,28 @@ pub fn sanitize_tokio_command(command: &mut tokio::process::Command) {
     }
 }
 
+pub fn sanitize_std_command(command: &mut std::process::Command) {
+    let Some(app_dir) = env::var_os("APPDIR") else {
+        return;
+    };
+    let app_dir = Path::new(&app_dir);
+
+    sanitize_python_home(app_dir, |key| {
+        command.env_remove(key);
+    });
+
+    for key in ["PYTHONPATH", "LD_LIBRARY_PATH"] {
+        match filtered_path_variable(key, app_dir) {
+            Some(value) => {
+                command.env(key, value);
+            }
+            None => {
+                command.env_remove(key);
+            }
+        }
+    }
+}
+
 fn sanitize_python_home(app_dir: &Path, mut remove: impl FnMut(&str)) {
     if env::var_os("PYTHONHOME")
         .as_deref()

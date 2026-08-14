@@ -1,6 +1,7 @@
 import { AlertTriangle, CheckCircle2, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { AppShell } from "./components/AppShell";
 import { OnboardingDialog } from "./components/OnboardingDialog";
 import { DownloadsPage } from "./features/downloads/DownloadsPage";
@@ -110,6 +111,14 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (!desktopPreferences) return;
+    document.documentElement.classList.toggle("reduce-motion", desktopPreferences.reduceMotion);
+    document.documentElement.classList.toggle("high-contrast", desktopPreferences.highContrast);
+    void getCurrentWebview().setZoom(desktopPreferences.interfaceScalePercent / 100)
+      .catch((error) => setError(normalizeError(error)));
+  }, [desktopPreferences, setError]);
+
+  useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (!(event.ctrlKey || event.metaKey)) return;
       if (event.key.toLocaleLowerCase() === "n") {
@@ -134,7 +143,7 @@ export default function App() {
   return (
     <AppShell>
       {error ? (
-        <div className="sticky top-0 z-20 border-b border-red-500/25 bg-[#36181c]/95 px-8 py-3.5 text-[13px] text-red-100 shadow-[0_12px_28px_rgb(0_0_0/0.16)] backdrop-blur-xl">
+        <div className="sticky top-0 z-20 border-b border-red-500/25 bg-[#36181c]/95 px-8 py-3.5 text-[13px] text-red-100 shadow-[0_12px_28px_rgb(0_0_0/0.16)] backdrop-blur-xl" role="alert" aria-live="assertive">
           <div className="mx-auto flex max-w-[1340px] items-start gap-3">
             <div className="grid size-8 shrink-0 place-items-center rounded-[7px] bg-red-400/10 text-red-300"><AlertTriangle size={16} /></div>
             <div className="min-w-0 flex-1">
@@ -161,7 +170,7 @@ export default function App() {
       <div className={view === "presets" ? "" : "hidden"}><PresetsPage /></div>
       <div className={view === "settings" ? "" : "hidden"}><SettingsPage /></div>
       {notice ? (
-        <div className="panel-shadow fixed bottom-6 right-6 z-40 flex min-w-80 items-center gap-3 rounded-[10px] border border-line/70 bg-panel/95 p-3.5 backdrop-blur-xl">
+        <div className="panel-shadow fixed bottom-6 right-6 z-40 flex min-w-80 items-center gap-3 rounded-[10px] border border-line/70 bg-panel/95 p-3.5 backdrop-blur-xl" role="status" aria-live="polite">
           <div className="grid size-8 place-items-center rounded-[7px] bg-accent/10 text-accent"><CheckCircle2 size={17} /></div>
           <span className="flex-1 text-[13px] font-medium">{notice.message}</span>
           {notice.view ? <button className="text-[11px] font-semibold text-accent transition hover:brightness-125" onClick={() => { setView(notice.view!); setNotice(null); }}>View</button> : null}

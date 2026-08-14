@@ -410,19 +410,20 @@ function DesktopSettings() {
       const saved = await api.updateDesktopPreferences(preferences);
       setPreferences(saved);
       window.dispatchEvent(new CustomEvent("nice-downloader:desktop-preferences", { detail: saved }));
-      setNotice({ message: "Desktop behavior saved.", view: "settings" });
+      setNotice({ message: "Desktop and accessibility settings saved.", view: "settings" });
     }
     catch (error) { setError(normalizeError(error)); }
   }
   if (!preferences) return <div className="p-8 text-sm text-muted">Loading desktop preferences…</div>;
   return <section className="mb-8">
-    <div className="mb-3 flex items-center gap-2"><Settings2 size={17} className="text-muted" /><h2 className="text-sm font-semibold">Desktop lifecycle</h2></div>
+    <div className="mb-3 flex items-center gap-2"><Settings2 size={17} className="text-muted" /><h2 className="text-sm font-semibold">Desktop and accessibility</h2></div>
     <div className="panel-shadow border border-line/60 bg-panel/75 p-5">
       <div className="grid gap-5 md:grid-cols-2">
         <Field label="When closing the window" hint={trayAvailable ? "Background mode keeps the Rust queue alive and leaves the app available from the tray." : "The system tray is unavailable, so closing must quit the application."}><Select value={preferences.closeBehavior} onChange={(event) => setPreferences({ ...preferences, closeBehavior: event.target.value as DesktopPreferences["closeBehavior"] })}><option value="ask">Ask while downloads are active</option><option value="background" disabled={!trayAvailable}>Keep running in system tray</option><option value="quit">Quit the application</option></Select></Field>
         <div className="space-y-4 pt-1"><label className="flex items-start gap-3 text-sm text-muted"><input className="mt-1" type="checkbox" disabled={!trayAvailable} checked={preferences.startMinimized && trayAvailable} onChange={(event) => setPreferences({ ...preferences, startMinimized: event.target.checked })} /><span><strong className="block font-medium text-ink">Start in the background</strong>Open from the system tray when ready.</span></label><label className="flex items-start gap-3 text-sm text-muted"><input className="mt-1" type="checkbox" checked={preferences.notifyWhenBackgrounded} onChange={(event) => setPreferences({ ...preferences, notifyWhenBackgrounded: event.target.checked })} /><span><strong className="block font-medium text-ink">Background completion notices</strong>Use desktop notifications when supported.</span></label></div>
       </div>
-      <div className="mt-5 flex items-center justify-between border-t border-line/60 pt-4"><p className="text-xs text-muted">Network interruptions retain partial files and use bounded retry; interrupted jobs recover on the next launch.</p><Button onClick={() => void saveDesktop()}><Save size={15} /> Save desktop behavior</Button></div>
+      <div className="mt-6 grid gap-5 border-t border-line/60 pt-5 md:grid-cols-2"><Field label="Interface scale" hint="Enlarges the complete interface, including fixed-size controls and media details."><Select value={preferences.interfaceScalePercent} onChange={(event) => setPreferences({ ...preferences, interfaceScalePercent: Number(event.target.value) as DesktopPreferences["interfaceScalePercent"] })}><option value={90}>90% — Compact</option><option value={100}>100% — Default</option><option value={110}>110% — Large</option><option value={125}>125% — Extra large</option></Select></Field><div className="space-y-4 pt-1"><label className="flex items-start gap-3 text-sm text-muted"><input className="mt-1" type="checkbox" checked={preferences.reduceMotion} onChange={(event) => setPreferences({ ...preferences, reduceMotion: event.target.checked })} /><span><strong className="block font-medium text-ink">Reduce motion</strong>Stops decorative animation and minimizes transitions.</span></label><label className="flex items-start gap-3 text-sm text-muted"><input className="mt-1" type="checkbox" checked={preferences.highContrast} onChange={(event) => setPreferences({ ...preferences, highContrast: event.target.checked })} /><span><strong className="block font-medium text-ink">Higher contrast</strong>Strengthens borders, muted text, and keyboard focus indicators.</span></label></div></div>
+      <div className="mt-5 flex items-center justify-between border-t border-line/60 pt-4"><p className="text-xs text-muted">System reduced-motion and increased-contrast preferences are also honored automatically.</p><Button onClick={() => void saveDesktop()}><Save size={15} /> Save preferences</Button></div>
     </div>
   </section>;
 }

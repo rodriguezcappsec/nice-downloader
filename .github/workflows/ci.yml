@@ -1,8 +1,14 @@
 name: CI
 
 on:
-  push:
-  pull_request:
+ push:
+  branches: [main]
+ pull_request:
+  branches: [main]
+
+concurrency:
+ group: ci-${{ github.event.pull_request.number || github.ref }}
+ cancel-in-progress: true
 
 jobs:
   validate:
@@ -24,4 +30,3 @@ jobs:
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
       - run: cargo test --manifest-path src-tauri/Cargo.toml --all-targets --no-fail-fast
-

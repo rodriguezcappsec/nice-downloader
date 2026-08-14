@@ -1,5 +1,9 @@
 # Nice Downloader Roadmap
 
+## Active: local media organizer
+
+Implementation is tracked in `docs/MEDIA_ORGANIZER.md`. Milestones 1–6 are implemented on `feat/media-organizer`: external folders, hierarchical folder filters with direct-only depth control, cancellable scans, structured metadata, curation, watching, removable-volume recovery, change review, exact SHA-256 duplicate cleanup, previewable Move/Copy/Rename operations, and preflighted bulk moves into a chosen subfolder. Milestone 7 includes SQLite-backed Library filtering and pagination, bounded Home shelves and facets, accessibility foundations, versioned recovery, and bounded artwork caching. Milestone 8 adds secure embedded HTML5 playback, byte-range streaming, resume state, Continue Watching, WebVTT sidecars, and explicit system-player fallback. Representative large-library profiling and deeper accessibility verification are next; perceptual similarity remains deferred.
+
 ## Maturity roadmap delivered
 
 - First-run engine/privacy onboarding and Linux AppImage/DEB plus Windows NSIS release workflows.

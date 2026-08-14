@@ -4,6 +4,7 @@ mod database;
 mod engines;
 mod errors;
 mod library;
+mod media_server;
 mod models;
 mod queue;
 mod subscriptions;
@@ -11,7 +12,7 @@ mod transformations;
 mod utils;
 
 use crate::{
-    database::Database, engines::managed, queue::QueueManager,
+    database::Database, engines::managed, library::LibraryManager, queue::QueueManager,
     transformations::TransformationManager,
 };
 use tauri::Manager;
@@ -80,6 +81,10 @@ pub fn run() {
             })?;
             managed::initialize(&data_directory, &resource_directory)?;
             let database = Database::open(&data_directory.join("nice-downloader.sqlite3"))?;
+            let media_server = media_server::start(database.clone()).unwrap_or_else(|error| {
+                tracing::warn!(%error, "embedded playback is unavailable; system-player fallback remains enabled");
+                media_server::MediaServerState::unavailable(database.clone())
+            });
             if tray_available && database.load_desktop_preferences()?.start_minimized {
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.hide();
@@ -87,6 +92,8 @@ pub fn run() {
             }
             let queue = QueueManager::new(database.clone())?;
             let transformations = TransformationManager::new(database.clone())?;
+            let library = LibraryManager::new(database.clone())?;
+            library.start_source_monitor(app.handle().clone());
             let recovery_queue = queue.clone();
             let recovery_app = app.handle().clone();
             let recovery_preferences = database.load_engine_preferences()?;
@@ -99,6 +106,8 @@ pub fn run() {
             app.manage(database);
             app.manage(queue);
             app.manage(transformations);
+            app.manage(library);
+            app.manage(media_server);
             tracing::info!(path = %data_directory.display(), "application backend initialized");
             Ok(())
         })
@@ -152,12 +161,45 @@ pub fn run() {
             commands::start_transformation,
             commands::cancel_transformation,
             commands::list_library_items,
+            commands::query_library_items,
+            commands::get_library_facets,
+            commands::get_library_items_by_ids,
+            commands::prepare_library_playback,
+            commands::save_library_playback_progress,
+            commands::list_continue_watching,
             commands::import_library_files,
             commands::update_library_item,
+            commands::list_library_collections,
+            commands::save_library_collection,
+            commands::delete_library_collection,
+            commands::apply_library_bulk_action,
+            commands::list_library_changes,
+            commands::review_library_changes,
+            commands::get_library_duplicate_analysis,
+            commands::list_library_duplicate_groups,
+            commands::start_library_duplicate_analysis,
+            commands::cancel_library_duplicate_analysis,
+            commands::trash_library_duplicate_item,
+            commands::preview_library_file_operation,
+            commands::execute_library_file_operation,
+            commands::preview_library_bulk_move,
+            commands::execute_library_bulk_move,
+            commands::undo_library_file_operation,
+            commands::list_library_file_operations,
             commands::remove_library_item,
+            commands::get_library_artwork,
+            commands::clear_library_artwork_cache,
+            commands::get_library_artwork_cache_status,
+            commands::open_library_item,
             commands::reconcile_library,
             commands::export_library,
             commands::restore_library,
+            commands::list_library_sources,
+            commands::save_library_source,
+            commands::remove_library_source,
+            commands::list_library_scan_jobs,
+            commands::start_library_scan,
+            commands::cancel_library_scan,
             commands::list_authentication_profiles,
             commands::save_authentication_profile,
             commands::delete_authentication_profile,

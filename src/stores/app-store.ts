@@ -61,7 +61,7 @@ const savedView = typeof window !== "undefined" ? window.localStorage.getItem("n
 let latestAnalysisRequest = "";
 
 export const useAppStore = create<AppStore>((set, get) => ({
-  view: savedView && ["new", "downloads", "queue", "history", "subscriptions", "transformations", "library", "presets", "settings"].includes(savedView) ? savedView : "new",
+  view: savedView && ["new", "downloads", "queue", "history", "subscriptions", "transformations", "library", "presets", "settings"].includes(savedView) ? savedView : "library",
   engines: [],
   enginePreferences: {
     browserCookieSource: "none",

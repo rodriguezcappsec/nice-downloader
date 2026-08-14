@@ -571,7 +571,7 @@ export function NewDownloadPage() {
                   <Field label="Quality">
                     <div className="flex flex-wrap gap-1 rounded-[8px] border border-line/50 bg-canvas/70 p-1">
                       {analysis.qualityOptions.map((quality) => (
-                        <button key={quality.id} type="button" onClick={() => setQualityId(quality.id)} className={`h-9 rounded-[6px] px-3 text-xs font-semibold transition ${quality.id === qualityId ? "bg-accent text-[#06251b] shadow-control" : "text-muted hover:bg-elevated hover:text-ink"}`}>{quality.label}</button>
+                        <button key={quality.id} type="button" onClick={() => setQualityId(quality.id)} className={`h-9 rounded-[6px] px-3 text-xs font-semibold transition ${quality.id === qualityId ? "bg-accent text-[#081426] shadow-control" : "text-muted hover:bg-elevated hover:text-ink"}`}>{quality.label}</button>
                       ))}
                     </div>
                   </Field>

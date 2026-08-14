@@ -8,7 +8,7 @@ export function Button({
   variant?: "primary" | "secondary" | "ghost" | "danger";
 }) {
   const variants = {
-    primary: "bg-accent text-[#06251b] hover:brightness-110 border-accent shadow-[0_8px_22px_rgb(var(--accent)/0.16)]",
+    primary: "bg-accent text-[#081426] hover:brightness-110 border-accent shadow-[0_8px_22px_rgb(var(--accent)/0.16)]",
     secondary: "bg-elevated/85 text-ink hover:bg-elevated hover:border-accent/35 border-line/80 shadow-control",
     ghost: "bg-transparent text-muted hover:text-ink hover:bg-elevated/70 border-transparent",
     danger: "bg-danger/10 text-red-400 hover:bg-danger/20 border-danger/25",
@@ -24,7 +24,7 @@ export function Button({
 export function Input({ className = "", ...props }: InputHTMLAttributes<HTMLInputElement>) {
   return (
     <input
-      className={`h-11 w-full rounded-[8px] border border-line/80 bg-canvas/70 px-3.5 text-[13px] text-ink shadow-[inset_0_1px_2px_rgb(0_0_0/0.08)] outline-none transition-[border-color,box-shadow,background-color] duration-200 placeholder:text-muted/60 hover:border-muted/50 focus:border-accent/80 focus:bg-panel focus:ring-2 focus:ring-accent/15 ${className}`}
+      className={`h-11 w-full rounded-[8px] border border-line/80 bg-canvas/70 px-3.5 text-[13px] text-ink shadow-[inset_0_1px_2px_rgb(0_0_0/0.08)] outline-none transition-[border-color,box-shadow,background-color] duration-200 placeholder:text-muted/80 hover:border-muted/60 focus:border-accent/80 focus:bg-panel focus:ring-2 focus:ring-accent/15 ${className}`}
       {...props}
     />
   );
@@ -33,7 +33,7 @@ export function Input({ className = "", ...props }: InputHTMLAttributes<HTMLInpu
 export function Textarea({ className = "", ...props }: TextareaHTMLAttributes<HTMLTextAreaElement>) {
   return (
     <textarea
-      className={`min-h-20 w-full resize-y rounded-[8px] border border-line/80 bg-canvas/70 px-3.5 py-3 text-[13px] leading-5 text-ink shadow-[inset_0_1px_2px_rgb(0_0_0/0.08)] outline-none transition-[border-color,box-shadow,background-color] duration-200 placeholder:text-muted/60 hover:border-muted/50 focus:border-accent/80 focus:bg-panel focus:ring-2 focus:ring-accent/15 ${className}`}
+      className={`min-h-20 w-full resize-y rounded-[8px] border border-line/80 bg-canvas/70 px-3.5 py-3 text-[13px] leading-5 text-ink shadow-[inset_0_1px_2px_rgb(0_0_0/0.08)] outline-none transition-[border-color,box-shadow,background-color] duration-200 placeholder:text-muted/80 hover:border-muted/60 focus:border-accent/80 focus:bg-panel focus:ring-2 focus:ring-accent/15 ${className}`}
       {...props}
     />
   );
@@ -85,7 +85,7 @@ export function EmptyState({ icon, title, description }: { icon: ReactNode; titl
         <div className="pt-0.5">
           <h3 className="text-[15px] font-semibold tracking-[-0.02em] text-ink">{title}</h3>
           <p className="mt-2 max-w-md text-[13px] leading-5 text-muted text-pretty">{description}</p>
-          <div className="mt-5 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-muted/70"><span className="size-1.5 rounded-full bg-accent/70" /> Waiting for activity</div>
+          <div className="mt-5 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-muted/90"><span className="size-1.5 rounded-full bg-accent/70" /> Waiting for activity</div>
         </div>
       </div>
     </div>

@@ -13,25 +13,26 @@
     "windows": [
       {
         "title": "Nice Downloader",
-        "width": 1180,
-        "height": 760,
-        "minWidth": 900,
-        "minHeight": 620,
+        "width": 1440,
+        "height": 900,
+        "minWidth": 1000,
+        "minHeight": 680,
+        "maximized": true,
         "resizable": true,
         "center": true
       }
     ],
     "security": {
-      "csp": "default-src 'self'; img-src 'self' data: asset: http: https:; connect-src ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'; script-src 'self'",
-      "devCsp": "default-src 'self'; img-src 'self' data: asset: http: https:; connect-src ipc: http://ipc.localhost http://localhost:* ws://localhost:*; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-eval'"
+      "csp": "default-src 'self'; img-src 'self' data: asset: http: https:; media-src 'self' http://127.0.0.1:*; connect-src ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'; script-src 'self'",
+      "devCsp": "default-src 'self'; img-src 'self' data: asset: http: https:; media-src 'self' http://127.0.0.1:*; connect-src ipc: http://ipc.localhost http://localhost:* ws://localhost:*; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-eval'"
     }
   },
   "bundle": {
     "active": true,
     "targets": ["deb", "appimage"],
     "category": "Utility",
-    "shortDescription": "Linux desktop media download manager",
-    "longDescription": "A Linux-first desktop orchestration layer for yt-dlp, FFmpeg, gallery-dl, aria2c, and curl.",
+    "shortDescription": "Private desktop media hub and download manager",
+    "longDescription": "A Linux-first local media library and desktop orchestration layer for yt-dlp, FFmpeg, gallery-dl, aria2c, and curl.",
     "icon": ["icons/icon.png", "icons/icon.ico"],
     "resources": {
       "resources/engines/": "engines/"
