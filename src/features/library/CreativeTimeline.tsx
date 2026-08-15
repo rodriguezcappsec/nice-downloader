@@ -4,6 +4,7 @@ import {
   Clock3,
   Download,
   Film,
+  FileText,
   Image as ImageIcon,
   LoaderCircle,
   Play,
@@ -59,6 +60,7 @@ export function CreativeTimeline({
   const [storyboardBusy, setStoryboardBusy] = useState(false);
   const [saving, setSaving] = useState(false);
   const [exportingId, setExportingId] = useState<string | null>(null);
+  const [exportingNotes, setExportingNotes] = useState(false);
   const [label, setLabel] = useState("");
   const [note, setNote] = useState("");
   const [color, setColor] = useState<LibraryMomentColor>("accent");
@@ -187,6 +189,26 @@ export function CreativeTimeline({
     }
   }
 
+  async function exportNotes(format: "markdown" | "csv") {
+    if (exportingNotes || moments.length === 0) return;
+    const extension = format === "markdown" ? "md" : "csv";
+    const outputPath = await save({
+      title: "Export saved moment notes",
+      defaultPath: `${safeFileStem(item.title)}-moments.${extension}`,
+      filters: [{ name: format === "markdown" ? "Markdown" : "CSV", extensions: [extension] }],
+    });
+    if (!outputPath) return;
+    setExportingNotes(true);
+    try {
+      const count = await api.exportLibraryMoments({ itemId: item.id, outputPath, format });
+      setNotice({ message: `Exported ${count} saved moment${count === 1 ? "" : "s"}.` });
+    } catch (error) {
+      setError(normalizeError(error));
+    } finally {
+      setExportingNotes(false);
+    }
+  }
+
   return <section className="border-t border-white/10 bg-[#0a0d12] text-white" aria-labelledby="creative-tools-title">
     <header className="flex flex-wrap items-center gap-3 border-b border-white/10 px-5 py-3">
       <div><p className="text-[9px] font-semibold uppercase tracking-[0.13em] text-accent">Creative tools</p><h2 id="creative-tools-title" className="mt-0.5 text-xs font-semibold">Moments and storyboard</h2></div>
@@ -217,7 +239,7 @@ export function CreativeTimeline({
     </div>
 
     <div className="border-t border-white/10 px-5 py-4">
-      <div className="mb-3 flex items-center justify-between"><h3 className="text-xs font-semibold">Saved moments</h3><span className="number-font text-[9px] text-white/40">{moments.length}/500</span></div>
+      <div className="mb-3 flex flex-wrap items-center gap-2"><h3 className="text-xs font-semibold">Saved moments</h3><span className="number-font text-[9px] text-white/40">{moments.length}/500</span>{moments.length ? <div className="ml-auto flex gap-1"><Button variant="ghost" className="h-7 px-2 text-[9px] text-white/45" disabled={exportingNotes} onClick={() => void exportNotes("markdown")}>{exportingNotes ? <LoaderCircle className="animate-spin" size={10} /> : <FileText size={10} />} Markdown</Button><Button variant="ghost" className="h-7 px-2 text-[9px] text-white/45" disabled={exportingNotes} onClick={() => void exportNotes("csv")}><FileText size={10} /> CSV</Button></div> : null}</div>
       {loadingMoments ? <p className="flex items-center gap-2 text-[10px] text-white/45" role="status"><LoaderCircle className="animate-spin" size={12} /> Loading moments…</p> : sortedMoments.length ? <div className="grid gap-2 lg:grid-cols-2">{sortedMoments.map((moment) => <article key={moment.id} className="flex min-w-0 items-start gap-3 rounded-[7px] border border-white/10 bg-white/[0.035] p-3"><span className={`mt-1.5 size-2 shrink-0 rounded-full ${COLOR_CLASS[moment.color]}`} /><button className="min-w-0 flex-1 text-left" onClick={() => onSeek(moment.startSeconds)}><span className="flex flex-wrap items-center gap-2"><strong className="truncate text-[11px] font-semibold text-white/85">{moment.label}</strong><span className="number-font text-[9px] text-accent">{formatDuration(moment.startSeconds)}{moment.endSeconds != null ? `–${formatDuration(moment.endSeconds)}` : ""}</span></span>{moment.note ? <span className="mt-1 line-clamp-2 block text-[9px] leading-4 text-white/40">{moment.note}</span> : null}</button><button className="grid size-7 shrink-0 place-items-center rounded-[5px] text-white/40 hover:bg-white/10 hover:text-white" onClick={() => onSeek(moment.startSeconds)} aria-label={`Play ${moment.label}`}><Play size={11} fill="currentColor" /></button>{moment.endSeconds != null ? <button className="grid size-7 shrink-0 place-items-center rounded-[5px] text-white/40 hover:bg-white/10 hover:text-white disabled:opacity-35" disabled={exportingId != null} onClick={() => void exportMoment(moment)} aria-label={`Export ${moment.label}`}>{exportingId === moment.id ? <LoaderCircle className="animate-spin" size={11} /> : <Download size={11} />}</button> : null}<button className="grid size-7 shrink-0 place-items-center rounded-[5px] text-white/35 hover:bg-rose-400/10 hover:text-rose-300" onClick={() => void removeMoment(moment)} aria-label={`Delete ${moment.label}`}><Trash2 size={11} /></button></article>)}</div> : <p className="text-[10px] text-white/35">No saved moments. Pause at an interesting scene, add a label, and save it.</p>}
     </div>
   </section>;

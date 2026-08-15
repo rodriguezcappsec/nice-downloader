@@ -90,6 +90,8 @@ warning because current builds are not code-signed.
   compatibility consent per tile, and system-player fallbacks
 - Timestamped moments and clip ranges with notes, color markers, one-click
   seeking, cancellable FFmpeg clip exports, and cached storyboard navigation
+- Persistent named comparison sessions restore video order, positions, speeds,
+  audio focus, multi-audio intent, and review notes; moment notes export as Markdown or CSV
 - Integrated full-resolution image viewer with zoom, pan, rotation, keyboard
   browsing, slideshows, and explicit system-viewer fallback
 - Scheduled playlist/channel subscriptions with archive-aware deduplication

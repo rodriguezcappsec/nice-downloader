@@ -19,23 +19,25 @@ use crate::{
         AuthenticationProfile, BatchAnalysisItem, BatchAnalysisResponse, BatchDownloadFailure,
         BatchDownloadResult, BrowserProfileInfo, DesktopPreferences, DesktopRuntimeStatus,
         DiskSpaceInfo, DownloadArchiveMatch, DownloadJob, EngineId, EngineInfo, EnginePreferences,
-        GalleryItemList, LibraryArtworkCacheStatus, LibraryBulkAction, LibraryBulkMovePlan,
-        LibraryBulkMoveResult, LibraryCacheResult, LibraryChange, LibraryCollection,
-        LibraryDuplicateAnalysisJob, LibraryDuplicateGroup, LibraryDuplicateTrashResult,
-        LibraryFacetRequest, LibraryFacets, LibraryFileOperation, LibraryFileOperationPlan,
-        LibraryFileOperationResult, LibraryImageSession, LibraryItem, LibraryMediaKind,
-        LibraryMoment, LibraryPlaybackCacheStatus, LibraryPlaybackEntry, LibraryPlaybackPreflight,
+        ExportLibraryMomentsRequest, GalleryItemList, LibraryArtworkCacheStatus, LibraryBulkAction,
+        LibraryBulkMovePlan, LibraryBulkMoveResult, LibraryCacheResult, LibraryChange,
+        LibraryCollection, LibraryCompareSession, LibraryDuplicateAnalysisJob,
+        LibraryDuplicateGroup, LibraryDuplicateTrashResult, LibraryFacetRequest, LibraryFacets,
+        LibraryFileOperation, LibraryFileOperationPlan, LibraryFileOperationResult,
+        LibraryImageSession, LibraryItem, LibraryMediaKind, LibraryMoment,
+        LibraryPlaybackCacheStatus, LibraryPlaybackEntry, LibraryPlaybackPreflight,
         LibraryPlaybackSession, LibraryPlaybackState, LibraryQueryRequest, LibraryQueryResult,
         LibraryRichMetadata, LibraryScanJob, LibraryScanResult, LibrarySearchStatus,
         LibrarySmartView, LibrarySource, MediaAnalysis, OnboardingStatus, Preset,
         PreviewLibraryBulkMoveRequest, PreviewLibraryFileOperationRequest, QueueSettings,
         QueueSnapshot, SaveAuthenticationProfileRequest, SaveLibraryCollectionRequest,
-        SaveLibraryMomentRequest, SaveLibraryPlaybackRequest, SaveLibraryRichMetadataRequest,
-        SaveLibrarySmartViewRequest, SaveLibrarySourceRequest, SavePresetRequest,
-        SaveSitePresetRuleRequest, SaveSubscriptionRequest, SetLibraryArtworkRequest,
-        SitePresetRule, StartDownloadRequest, StartLibraryClipExportRequest,
-        StartTransformationRequest, Subscription, SubscriptionCheckResult, TransformationOperation,
-        TransformationTask, UpdateLibraryItemRequest,
+        SaveLibraryCompareSessionRequest, SaveLibraryMomentRequest, SaveLibraryPlaybackRequest,
+        SaveLibraryRichMetadataRequest, SaveLibrarySmartViewRequest, SaveLibrarySourceRequest,
+        SavePresetRequest, SaveSitePresetRuleRequest, SaveSubscriptionRequest,
+        SetLibraryArtworkRequest, SitePresetRule, StartDownloadRequest,
+        StartLibraryClipExportRequest, StartTransformationRequest, Subscription,
+        SubscriptionCheckResult, TransformationOperation, TransformationTask,
+        UpdateLibraryItemRequest,
     },
     queue::{disk_space, QueueManager},
     subscriptions,
@@ -428,6 +430,37 @@ pub fn save_library_moment(
 #[tauri::command]
 pub fn delete_library_moment(database: State<'_, Database>, id: String) -> Result<(), AppError> {
     database.delete_library_moment(&id)
+}
+
+#[tauri::command]
+pub fn list_library_compare_sessions(
+    database: State<'_, Database>,
+) -> Result<Vec<LibraryCompareSession>, AppError> {
+    database.list_library_compare_sessions()
+}
+
+#[tauri::command]
+pub fn save_library_compare_session(
+    database: State<'_, Database>,
+    request: SaveLibraryCompareSessionRequest,
+) -> Result<LibraryCompareSession, AppError> {
+    database.save_library_compare_session(request)
+}
+
+#[tauri::command]
+pub fn delete_library_compare_session(
+    database: State<'_, Database>,
+    id: String,
+) -> Result<(), AppError> {
+    database.delete_library_compare_session(&id)
+}
+
+#[tauri::command]
+pub fn export_library_moments(
+    creative: State<'_, CreativeManager>,
+    request: ExportLibraryMomentsRequest,
+) -> Result<usize, AppError> {
+    creative.export_moments(request)
 }
 
 #[tauri::command]

@@ -285,7 +285,15 @@ Acceptance: mark and revisit a timestamp, save and export a range without changi
 
 ## Milestone 18 - Saved comparison sessions and review annotations
 
-Persist named 2–4-video layouts, positions, speeds, audio focus, and notes. Reuse moments for timestamped review and add Markdown/CSV export.
+Status: implemented on `feat/library-creative-workspaces`.
+
+- Migration `0021_library_compare_sessions.sql` persists named sessions with normalized 2–4-video membership, order, playback positions, speeds, audio focus, multi-audio intent, and session notes.
+- Save validates unique available videos, bounded names and notes, finite playback state, active-audio membership, and case-insensitive name uniqueness in Rust.
+- Saved sessions are available from Compare even when its ephemeral grid is empty. Loading one updates existing live tiles in place, avoiding playback release/registration races.
+- Catalog deletion cascades membership and clears an affected audio focus. The UI exposes incomplete saved sessions so users can replace missing members rather than silently fabricating state.
+- Saved moment annotations export through Rust as atomic Markdown or spreadsheet-injection-resistant CSV files. Existing outputs are never overwritten implicitly.
+
+Acceptance: save a named comparison, reopen it after clearing the grid or relaunching, restore positions/speeds/audio intent, update or delete it, reconcile a deleted member, and export timestamped review notes.
 
 ## Milestone 19 - Image comparison and media stacks
 

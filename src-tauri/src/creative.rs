@@ -2,11 +2,15 @@ use crate::{
     database::Database,
     engines::managed,
     errors::AppError,
-    models::{LibraryMediaKind, LibraryStoryboard, LibraryStoryboardFrame},
+    models::{
+        ExportLibraryMomentsRequest, LibraryMediaKind, LibraryMomentExportFormat,
+        LibraryStoryboard, LibraryStoryboardFrame,
+    },
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chrono::Utc;
 use std::{
+    io::Write,
     path::{Path, PathBuf},
     process::Stdio,
     sync::Arc,
@@ -84,6 +88,126 @@ impl CreativeManager {
             generated_at: Utc::now(),
         })
     }
+
+    pub fn export_moments(&self, request: ExportLibraryMomentsRequest) -> Result<usize, AppError> {
+        let item = self.database.get_library_item(&request.item_id)?;
+        let moments = self.database.list_library_moments(&request.item_id)?;
+        if moments.is_empty() {
+            return Err(AppError::new(
+                "library_moments_empty",
+                "Save at least one moment before exporting notes.",
+            ));
+        }
+        let output = PathBuf::from(&request.output_path);
+        let expected_extension = match request.format {
+            LibraryMomentExportFormat::Markdown => "md",
+            LibraryMomentExportFormat::Csv => "csv",
+        };
+        if !output.is_absolute()
+            || output.parent().is_none_or(|parent| !parent.is_dir())
+            || output
+                .extension()
+                .and_then(|value| value.to_str())
+                .is_none_or(|extension| !extension.eq_ignore_ascii_case(expected_extension))
+        {
+            return Err(AppError::new(
+                "invalid_moment_export_path",
+                format!("Choose an existing folder and a .{expected_extension} output file."),
+            ));
+        }
+        if output.exists() {
+            return Err(AppError::new(
+                "moment_export_exists",
+                "That notes file already exists. Choose a new filename.",
+            ));
+        }
+        let body = match request.format {
+            LibraryMomentExportFormat::Markdown => render_moments_markdown(&item.title, &moments),
+            LibraryMomentExportFormat::Csv => render_moments_csv(&moments),
+        };
+        let file_name = output
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("notes");
+        let staging = output.with_file_name(format!(".{file_name}-{}.part", uuid::Uuid::new_v4()));
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staging)
+            .map_err(|error| {
+                AppError::internal("could not stage the moment notes export", error)
+            })?;
+        if let Err(error) = file
+            .write_all(body.as_bytes())
+            .and_then(|_| file.sync_all())
+        {
+            let _ = std::fs::remove_file(&staging);
+            return Err(AppError::internal(
+                "could not write the moment notes export",
+                error,
+            ));
+        }
+        drop(file);
+        if let Err(error) = std::fs::rename(&staging, &output) {
+            let _ = std::fs::remove_file(&staging);
+            return Err(AppError::internal(
+                "could not publish the moment notes export",
+                error,
+            ));
+        }
+        Ok(moments.len())
+    }
+}
+
+fn render_moments_markdown(title: &str, moments: &[crate::models::LibraryMoment]) -> String {
+    let mut body = format!("# {} - saved moments\n\n", title.replace(['\r', '\n'], " "));
+    for moment in moments {
+        let end = moment
+            .end_seconds
+            .map(|value| format!(" to {value:.3}s"))
+            .unwrap_or_default();
+        body.push_str(&format!(
+            "## {}\n\n- Time: {:.3}s{}\n- Color: {}\n",
+            moment.label.replace(['\r', '\n'], " "),
+            moment.start_seconds,
+            end,
+            moment.color
+        ));
+        if !moment.note.is_empty() {
+            body.push_str(&format!("\n{}\n", moment.note));
+        }
+        body.push('\n');
+    }
+    body
+}
+
+fn render_moments_csv(moments: &[crate::models::LibraryMoment]) -> String {
+    let mut body = "label,start_seconds,end_seconds,color,note\r\n".to_owned();
+    for moment in moments {
+        let cells = [
+            csv_cell(&moment.label),
+            format!("{:.3}", moment.start_seconds),
+            moment
+                .end_seconds
+                .map(|value| format!("{value:.3}"))
+                .unwrap_or_default(),
+            csv_cell(&moment.color),
+            csv_cell(&moment.note),
+        ];
+        body.push_str(&cells.join(","));
+        body.push_str("\r\n");
+    }
+    body
+}
+
+fn csv_cell(value: &str) -> String {
+    let normalized = value.replace(['\r', '\n'], " ");
+    let protected = if normalized.starts_with(['=', '+', '-', '@']) {
+        format!("'{normalized}")
+    } else {
+        normalized
+    };
+    format!("\"{}\"", protected.replace('"', "\"\""))
 }
 
 fn validate_storyboard_source(path: &Path) -> Result<(), AppError> {

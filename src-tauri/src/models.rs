@@ -1034,6 +1034,54 @@ pub struct LibraryStoryboard {
     pub generated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryCompareSessionItem {
+    pub item_id: String,
+    pub position: usize,
+    pub playback_position_seconds: f64,
+    pub playback_rate: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryCompareSession {
+    pub id: String,
+    pub name: String,
+    pub notes: String,
+    pub items: Vec<LibraryCompareSessionItem>,
+    pub active_audio_item_id: Option<String>,
+    pub multiple_audio: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveLibraryCompareSessionRequest {
+    pub id: Option<String>,
+    pub name: String,
+    pub notes: String,
+    pub items: Vec<LibraryCompareSessionItem>,
+    pub active_audio_item_id: Option<String>,
+    pub multiple_audio: bool,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LibraryMomentExportFormat {
+    Markdown,
+    Csv,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportLibraryMomentsRequest {
+    pub item_id: String,
+    pub output_path: String,
+    pub format: LibraryMomentExportFormat,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum LibraryChangeKind {

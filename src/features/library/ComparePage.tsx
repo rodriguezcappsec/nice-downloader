@@ -7,6 +7,7 @@ import {
   Pause,
   Play,
   RotateCcw,
+  Save as SaveIcon,
   SlidersHorizontal,
   Trash2,
   Volume2,
@@ -14,11 +15,13 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Button, Select } from "../../components/ui";
+import { Button, Input, Select, Textarea } from "../../components/ui";
 import { formatBytes, formatDuration } from "../../lib/format";
 import { api, normalizeError } from "../../lib/tauri";
 import { useAppStore } from "../../stores/app-store";
 import type {
+  LibraryCompareSession,
+  LibraryCompareSessionItem,
   LibraryItem,
   LibraryPlaybackPreflight,
   LibraryPlaybackSession,
@@ -44,7 +47,22 @@ export function ComparePage() {
   const [activeAudioId, setActiveAudioId] = useState<string | null>(itemIds[0] || null);
   const [multipleAudio, setMultipleAudio] = useState(false);
   const [readyIds, setReadyIds] = useState<Set<string>>(() => new Set());
+  const [savedSessions, setSavedSessions] = useState<LibraryCompareSession[]>([]);
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [sessionName, setSessionName] = useState("");
+  const [sessionNotes, setSessionNotes] = useState("");
+  const [saveOpen, setSaveOpen] = useState(false);
+  const [sessionBusy, setSessionBusy] = useState(false);
+  const [restoreItems, setRestoreItems] = useState<Map<string, LibraryCompareSessionItem>>(() => new Map());
   const players = useRef<Map<string, HTMLVideoElement>>(new Map());
+
+  useEffect(() => {
+    let disposed = false;
+    void api.listLibraryCompareSessions()
+      .then((sessions) => { if (!disposed) setSavedSessions(sessions); })
+      .catch(() => {});
+    return () => { disposed = true; };
+  }, []);
 
   useEffect(() => {
     window.dispatchEvent(new Event("nice-downloader:compare-start"));
@@ -175,11 +193,78 @@ export function ComparePage() {
     pauseAll();
     clearCompareItems();
     setReadyIds(new Set());
+    setActiveSessionId(null);
+    setSessionName("");
+    setSessionNotes("");
+    setRestoreItems(new Map());
     window.setTimeout(() => document.getElementById("compare-choose-videos")?.focus(), 0);
   }
 
+  function openSavedSession(session: LibraryCompareSession) {
+    pauseAll();
+    const ordered = [...session.items].sort((left, right) => left.position - right.position);
+    setRestoreItems(new Map(ordered.map((item) => [item.itemId, item])));
+    setCompareItems(ordered.map((item) => item.itemId));
+    setActiveAudioId(session.activeAudioItemId || ordered[0]?.itemId || null);
+    setMultipleAudio(session.multipleAudio);
+    setActiveSessionId(session.id);
+    setSessionName(session.name);
+    setSessionNotes(session.notes);
+    setSaveOpen(false);
+  }
+
+  async function saveComparisonSession() {
+    if (sessionBusy || !sessionName.trim() || itemIds.length < 2) return;
+    setSessionBusy(true);
+    try {
+      const saved = await api.saveLibraryCompareSession({
+        id: activeSessionId,
+        name: sessionName.trim(),
+        notes: sessionNotes.trim(),
+        items: itemIds.map((itemId, position) => {
+          const player = players.current.get(itemId);
+          const restored = restoreItems.get(itemId);
+          return {
+            itemId,
+            position,
+            playbackPositionSeconds: player && Number.isFinite(player.currentTime) ? player.currentTime : restored?.playbackPositionSeconds || 0,
+            playbackRate: player?.playbackRate || restored?.playbackRate || 1,
+          };
+        }),
+        activeAudioItemId: activeAudioId,
+        multipleAudio,
+      });
+      setSavedSessions((sessions) => [saved, ...sessions.filter((session) => session.id !== saved.id)]);
+      setActiveSessionId(saved.id);
+      setSaveOpen(false);
+      setNotice({ message: `Saved comparison session “${saved.name}”.`, view: "compare" });
+    } catch (error) {
+      setLoadError(normalizeError(error).message);
+    } finally {
+      setSessionBusy(false);
+    }
+  }
+
+  async function deleteActiveSession() {
+    if (!activeSessionId || sessionBusy) return;
+    setSessionBusy(true);
+    try {
+      await api.deleteLibraryCompareSession(activeSessionId);
+      setSavedSessions((sessions) => sessions.filter((session) => session.id !== activeSessionId));
+      setActiveSessionId(null);
+      setSessionName("");
+      setSessionNotes("");
+      setSaveOpen(false);
+      setNotice({ message: "Deleted the saved comparison session." });
+    } catch (error) {
+      setLoadError(normalizeError(error).message);
+    } finally {
+      setSessionBusy(false);
+    }
+  }
+
   if (itemIds.length === 0) {
-    return <div className="mx-auto grid min-h-[calc(100dvh-80px)] w-full max-w-[1100px] place-items-center px-8 py-16"><section className="max-w-xl text-center"><div className="mx-auto grid size-16 place-items-center rounded-[16px] border border-accent/20 bg-accent/10 text-accent"><LayoutGrid size={28} /></div><h1 className="mt-6 text-[30px] font-semibold tracking-[-0.04em]">Compare videos side by side</h1><p className="mx-auto mt-3 max-w-lg text-sm leading-6 text-muted">Choose between two and four available Library videos. Each video keeps independent controls while shared controls help you compare the same moment.</p><Button id="compare-choose-videos" className="mt-7" onClick={chooseVideos}><Film size={16} /> Choose videos from Library</Button></section></div>;
+    return <div className="mx-auto grid min-h-[calc(100dvh-80px)] w-full max-w-[1100px] place-items-center px-8 py-16"><section className="w-full max-w-2xl text-center"><div className="mx-auto grid size-16 place-items-center rounded-[16px] border border-accent/20 bg-accent/10 text-accent"><LayoutGrid size={28} /></div><h1 className="mt-6 text-[30px] font-semibold tracking-[-0.04em]">Compare videos side by side</h1><p className="mx-auto mt-3 max-w-lg text-sm leading-6 text-muted">Choose between two and four available Library videos. Each video keeps independent controls while shared controls help you compare the same moment.</p><Button id="compare-choose-videos" className="mt-7" onClick={chooseVideos}><Film size={16} /> Choose videos from Library</Button>{savedSessions.length ? <div className="mt-10 border-t border-line/60 pt-6 text-left"><h2 className="text-xs font-semibold uppercase tracking-[0.11em] text-muted">Saved sessions</h2><div className="mt-3 grid gap-2 sm:grid-cols-2">{savedSessions.map((session) => <button key={session.id} className="rounded-[9px] border border-line/70 bg-panel/55 p-3 text-left transition hover:border-accent/35 hover:bg-elevated" onClick={() => openSavedSession(session)}><strong className="block truncate text-sm">{session.name}</strong><span className="mt-1 block text-[10px] text-muted">{session.items.length} video{session.items.length === 1 ? "" : "s"}{session.notes ? ` · ${session.notes}` : ""}</span></button>)}</div></div> : null}</section></div>;
   }
 
   return <div className="mx-auto w-full max-w-[1780px] px-6 pb-12 pt-5 xl:px-8">
@@ -187,8 +272,10 @@ export function ComparePage() {
       <button className="flex h-10 items-center gap-2 rounded-[8px] px-2.5 text-xs font-semibold text-muted transition hover:bg-elevated hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70" onClick={() => setView("library")}><ArrowLeft size={16} /> Library</button>
       <div className="h-6 w-px bg-line/70" />
       <div className="min-w-0"><p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-accent">Comparison workspace</p><h1 id="compare-workspace-heading" tabIndex={-1} className="truncate text-lg font-semibold tracking-[-0.025em] outline-none">{itemIds.length} video grid</h1></div>
-      <div className="ml-auto flex flex-wrap items-center gap-2"><Button id="compare-edit-selection" variant="secondary" className="h-9 text-xs" onClick={editSelection}><SlidersHorizontal size={14} /> Edit selection</Button><Button variant="ghost" className="h-9 text-xs" onClick={clearComparison}><Trash2 size={14} /> Clear grid</Button></div>
+      <div className="ml-auto flex flex-wrap items-center gap-2">{savedSessions.length ? <Select className="h-9 w-44 text-xs" value={activeSessionId || ""} onChange={(event) => { const session = savedSessions.find((candidate) => candidate.id === event.target.value); if (session) openSavedSession(session); }}><option value="">Saved sessions</option>{savedSessions.map((session) => <option key={session.id} value={session.id}>{session.name}</option>)}</Select> : null}<Button variant="secondary" className="h-9 text-xs" onClick={() => { if (!sessionName) setSessionName(`${items[0]?.title || "Video"} comparison`); setSaveOpen((open) => !open); }}><SaveIcon size={14} /> {activeSessionId ? "Update session" : "Save session"}</Button><Button id="compare-edit-selection" variant="secondary" className="h-9 text-xs" onClick={editSelection}><SlidersHorizontal size={14} /> Edit selection</Button><Button variant="ghost" className="h-9 text-xs" onClick={clearComparison}><Trash2 size={14} /> Clear grid</Button></div>
     </header>
+
+    {saveOpen ? <section className="mt-3 grid gap-2 border border-line/70 bg-panel/65 p-4 md:grid-cols-[minmax(180px,0.5fr)_minmax(260px,1fr)_auto]" aria-label="Save comparison session"><Input className="h-9 text-xs" maxLength={80} value={sessionName} onChange={(event) => setSessionName(event.target.value)} placeholder="Session name" autoFocus /><Textarea className="min-h-9 text-xs" maxLength={2000} value={sessionNotes} onChange={(event) => setSessionNotes(event.target.value)} placeholder="What are you comparing?" /><div className="flex items-start gap-2"><Button className="h-9 text-xs" disabled={sessionBusy || !sessionName.trim() || itemIds.length < 2} onClick={() => void saveComparisonSession()}>{sessionBusy ? <LoaderCircle className="animate-spin" size={13} /> : <SaveIcon size={13} />} Save</Button>{activeSessionId ? <Button variant="ghost" className="h-9 text-xs text-rose-300" disabled={sessionBusy} onClick={() => void deleteActiveSession()}><Trash2 size={13} /> Delete</Button> : null}</div></section> : null}
 
     <section className="mt-4 flex flex-wrap items-center gap-2 border-y border-line/55 bg-panel/35 px-3 py-3" aria-label="Shared comparison controls">
       <span className="mr-2 text-[10px] font-semibold uppercase tracking-[0.11em] text-muted">All players</span>
@@ -215,6 +302,7 @@ export function ComparePage() {
         sourceName={item.sourceId ? sourceNames.get(item.sourceId) || item.site || "Local media" : item.site || "Local media"}
         audible={multipleAudio || activeAudioId === item.id}
         multipleAudio={multipleAudio}
+        initialPlayback={restoreItems.get(item.id)}
         onRequestAudio={() => activateAudio(item.id)}
         onRegister={registerPlayer}
         onReady={setPlayerReady}
@@ -228,12 +316,13 @@ export function ComparePage() {
   </div>;
 }
 
-function CompareVideoTile({ item, position, sourceName, audible, multipleAudio, onRequestAudio, onRegister, onReady, onRemove }: {
+function CompareVideoTile({ item, position, sourceName, audible, multipleAudio, initialPlayback, onRequestAudio, onRegister, onReady, onRemove }: {
   item: LibraryItem;
   position: number;
   sourceName: string;
   audible: boolean;
   multipleAudio: boolean;
+  initialPlayback?: LibraryCompareSessionItem;
   onRequestAudio: () => void;
   onRegister: (itemId: string, video: HTMLVideoElement | null) => void;
   onReady: (itemId: string, ready: boolean) => void;
@@ -248,7 +337,19 @@ function CompareVideoTile({ item, position, sourceName, audible, multipleAudio, 
   const [loading, setLoading] = useState(!item.missing && item.mediaKind === "video");
   const [busy, setBusy] = useState(false);
   const [playbackError, setPlaybackError] = useState<string | null>(null);
-  const [playbackRate, setPlaybackRate] = useState(1);
+  const [playbackRate, setPlaybackRate] = useState(initialPlayback?.playbackRate || 1);
+
+  useEffect(() => {
+    if (!initialPlayback) return;
+    setPlaybackRate(initialPlayback.playbackRate);
+    const video = videoRef.current;
+    if (!video) return;
+    video.playbackRate = initialPlayback.playbackRate;
+    if (Number.isFinite(video.duration) && initialPlayback.playbackPositionSeconds < video.duration) {
+      video.currentTime = Math.max(0, initialPlayback.playbackPositionSeconds);
+      progress.current.position = video.currentTime;
+    }
+  }, [initialPlayback]);
 
   const registerVideo = useCallback((video: HTMLVideoElement | null) => {
     videoRef.current = video;
@@ -335,11 +436,17 @@ function CompareVideoTile({ item, position, sourceName, audible, multipleAudio, 
     setLoading(false);
     onReady(item.id, true);
     video.playbackRate = playbackRate;
+    const restoredPosition = initialPlayback?.playbackPositionSeconds;
     const saved = session?.playback;
-    if (saved && !saved.completed && saved.positionSeconds >= 5 && saved.positionSeconds < video.duration - 10) {
-      video.currentTime = saved.positionSeconds;
-      progress.current.position = saved.positionSeconds;
-      progress.current.lastSaved = saved.positionSeconds;
+    const position = restoredPosition != null && restoredPosition >= 0 && restoredPosition < video.duration
+      ? restoredPosition
+      : saved && !saved.completed && saved.positionSeconds >= 5 && saved.positionSeconds < video.duration - 10
+        ? saved.positionSeconds
+        : null;
+    if (position != null) {
+      video.currentTime = position;
+      progress.current.position = position;
+      progress.current.lastSaved = position;
     }
   }
 

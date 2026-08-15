@@ -693,6 +693,39 @@ export interface LibraryStoryboard {
   generatedAt: string;
 }
 
+export interface LibraryCompareSessionItem {
+  itemId: string;
+  position: number;
+  playbackPositionSeconds: number;
+  playbackRate: number;
+}
+
+export interface LibraryCompareSession {
+  id: string;
+  name: string;
+  notes: string;
+  items: LibraryCompareSessionItem[];
+  activeAudioItemId?: string | null;
+  multipleAudio: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SaveLibraryCompareSessionRequest {
+  id?: string | null;
+  name: string;
+  notes: string;
+  items: LibraryCompareSessionItem[];
+  activeAudioItemId?: string | null;
+  multipleAudio: boolean;
+}
+
+export interface ExportLibraryMomentsRequest {
+  itemId: string;
+  outputPath: string;
+  format: "markdown" | "csv";
+}
+
 export type LibraryChangeKind = "added" | "modified" | "renamed" | "missing" | "restored";
 
 export interface LibraryChange {

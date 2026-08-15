@@ -4,15 +4,16 @@ use crate::{
         AuthenticationProfile, BrowserCookieSource, DesktopPreferences, DownloadArchiveMatch,
         DownloadJob, DownloadState, EnginePreferences, LibraryAvailabilityFilter,
         LibraryBulkAction, LibraryChange, LibraryChangeKind, LibraryCollection,
-        LibraryFacetRequest, LibraryFacets, LibraryFileIdentity, LibraryFileOperation,
-        LibraryFileOperationKind, LibraryFileOperationState, LibraryFolderFacet,
-        LibraryFolderScope, LibraryItem, LibraryMediaKind, LibraryMetadataFields,
-        LibraryMetadataState, LibraryMoment, LibraryPlaybackEntry, LibraryPlaybackState,
-        LibraryPlaylist, LibraryProbeResult, LibraryQueryRequest, LibraryQueryResult,
-        LibraryRichMetadata, LibraryScanJob, LibraryScanState, LibrarySearchStatus,
-        LibrarySmartView, LibrarySmartViewQuery, LibrarySort, LibrarySource, LibrarySourceStatus,
-        LibraryWatchState, Preset, PresetIntent, QueueSettings, SaveAuthenticationProfileRequest,
-        SaveLibraryCollectionRequest, SaveLibraryMomentRequest, SaveLibraryPlaybackRequest,
+        LibraryCompareSession, LibraryCompareSessionItem, LibraryFacetRequest, LibraryFacets,
+        LibraryFileIdentity, LibraryFileOperation, LibraryFileOperationKind,
+        LibraryFileOperationState, LibraryFolderFacet, LibraryFolderScope, LibraryItem,
+        LibraryMediaKind, LibraryMetadataFields, LibraryMetadataState, LibraryMoment,
+        LibraryPlaybackEntry, LibraryPlaybackState, LibraryPlaylist, LibraryProbeResult,
+        LibraryQueryRequest, LibraryQueryResult, LibraryRichMetadata, LibraryScanJob,
+        LibraryScanState, LibrarySearchStatus, LibrarySmartView, LibrarySmartViewQuery,
+        LibrarySort, LibrarySource, LibrarySourceStatus, LibraryWatchState, Preset, PresetIntent,
+        QueueSettings, SaveAuthenticationProfileRequest, SaveLibraryCollectionRequest,
+        SaveLibraryCompareSessionRequest, SaveLibraryMomentRequest, SaveLibraryPlaybackRequest,
         SaveLibraryPlaylistRequest, SaveLibraryRichMetadataRequest, SaveLibrarySmartViewRequest,
         SaveLibrarySourceRequest, SavePresetRequest, SaveSitePresetRuleRequest,
         SaveSubscriptionRequest, SitePresetRule, StartDownloadRequest, Subscription,
@@ -52,6 +53,7 @@ const MIGRATION_0017: &str = include_str!("migrations/0017_library_playlists.sql
 const MIGRATION_0018: &str = include_str!("migrations/0018_library_rich_metadata.sql");
 const MIGRATION_0019: &str = include_str!("migrations/0019_library_smart_discovery.sql");
 const MIGRATION_0020: &str = include_str!("migrations/0020_library_moments.sql");
+const MIGRATION_0021: &str = include_str!("migrations/0021_library_compare_sessions.sql");
 const ENGINE_PREFERENCES_KEY: &str = "engine.preferences";
 const QUEUE_SETTINGS_KEY: &str = "queue.settings";
 const DESKTOP_PREFERENCES_KEY: &str = "desktop.preferences";
@@ -105,6 +107,7 @@ impl Database {
             (18, MIGRATION_0018),
             (19, MIGRATION_0019),
             (20, MIGRATION_0020),
+            (21, MIGRATION_0021),
         ] {
             let migrated: bool = transaction.query_row(
                 "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = ?1)",
@@ -2831,6 +2834,219 @@ impl Database {
         Ok(())
     }
 
+    pub fn list_library_compare_sessions(&self) -> Result<Vec<LibraryCompareSession>, AppError> {
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "Saved comparison sessions are unavailable.",
+            )
+        })?;
+        let mut statement = connection.prepare(
+            "SELECT id, name, notes, active_audio_item_id, multiple_audio, created_at, updated_at
+             FROM library_compare_sessions
+             ORDER BY updated_at DESC, name COLLATE NOCASE ASC
+             LIMIT 200",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, bool>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, i64>(6)?,
+            ))
+        })?;
+        let base = rows.collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        let mut item_statement = connection.prepare(
+            "SELECT item_id, position, playback_position_seconds, playback_rate
+             FROM library_compare_session_items
+             WHERE session_id = ?1
+             ORDER BY position ASC, item_id ASC",
+        )?;
+        let mut sessions = Vec::with_capacity(base.len());
+        for (id, name, notes, active_audio_item_id, multiple_audio, created_at, updated_at) in base
+        {
+            let items = item_statement
+                .query_map([&id], |row| {
+                    Ok(LibraryCompareSessionItem {
+                        item_id: row.get(0)?,
+                        position: usize::try_from(row.get::<_, i64>(1)?).unwrap_or(usize::MAX),
+                        playback_position_seconds: row.get(2)?,
+                        playback_rate: row.get(3)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            sessions.push(LibraryCompareSession {
+                id,
+                name,
+                notes,
+                items,
+                active_audio_item_id,
+                multiple_audio,
+                created_at: timestamp_or_epoch(created_at),
+                updated_at: timestamp_or_epoch(updated_at),
+            });
+        }
+        Ok(sessions)
+    }
+
+    pub fn save_library_compare_session(
+        &self,
+        request: SaveLibraryCompareSessionRequest,
+    ) -> Result<LibraryCompareSession, AppError> {
+        let id = request.id.unwrap_or_else(|| Uuid::new_v4().to_string());
+        validate_uuid(&id, "comparison session")?;
+        let name = validate_compare_session_name(&request.name)?;
+        let notes = validate_compare_session_notes(&request.notes)?;
+        if !(2..=4).contains(&request.items.len()) {
+            return Err(AppError::new(
+                "invalid_compare_session_items",
+                "A saved comparison must contain between 2 and 4 videos.",
+            ));
+        }
+        let mut items = request.items;
+        items.sort_by_key(|item| item.position);
+        let mut unique = HashSet::new();
+        for item in &items {
+            validate_uuid(&item.item_id, "comparison video")?;
+            if !unique.insert(item.item_id.clone())
+                || !item.playback_position_seconds.is_finite()
+                || item.playback_position_seconds < 0.0
+                || !item.playback_rate.is_finite()
+                || !(0.25..=4.0).contains(&item.playback_rate)
+            {
+                return Err(AppError::new(
+                    "invalid_compare_session_items",
+                    "Comparison videos and playback settings must be valid and unique.",
+                ));
+            }
+        }
+        if request
+            .active_audio_item_id
+            .as_ref()
+            .is_some_and(|active| !unique.contains(active))
+        {
+            return Err(AppError::new(
+                "invalid_compare_session_audio",
+                "The active audio video must belong to the saved comparison.",
+            ));
+        }
+        let now = Utc::now().timestamp_millis();
+        let mut connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "Saved comparison sessions are unavailable.",
+            )
+        })?;
+        let transaction = connection.transaction()?;
+        let duplicate: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM library_compare_sessions WHERE name = ?1 COLLATE NOCASE AND id <> ?2)",
+            params![name, id],
+            |row| row.get(0),
+        )?;
+        if duplicate {
+            return Err(AppError::new(
+                "compare_session_name_exists",
+                "Choose a different comparison session name.",
+            ));
+        }
+        for item in &items {
+            let catalog: Option<(String, bool, Option<f64>)> = transaction
+                .query_row(
+                    "SELECT COALESCE(media_kind, ''), missing, duration_seconds FROM media_library WHERE id = ?1",
+                    [&item.item_id],
+                    |row| Ok((row.get(0)?, row.get::<_, i64>(1)? != 0, row.get(2)?)),
+                )
+                .optional()?;
+            let Some((media_kind, missing, duration)) = catalog else {
+                return Err(library_item_not_found());
+            };
+            if media_kind != "video" || missing {
+                return Err(AppError::new(
+                    "compare_session_video_required",
+                    "Saved comparisons require available videos.",
+                ));
+            }
+            if duration
+                .filter(|value| value.is_finite() && *value > 0.0)
+                .is_some_and(|duration| item.playback_position_seconds > duration + 1.0)
+            {
+                return Err(AppError::new(
+                    "invalid_compare_session_items",
+                    "A saved playback position is outside the video's duration.",
+                ));
+            }
+        }
+        transaction.execute(
+            "INSERT INTO library_compare_sessions
+                (id, name, notes, active_audio_item_id, multiple_audio, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
+             ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                notes = excluded.notes,
+                active_audio_item_id = excluded.active_audio_item_id,
+                multiple_audio = excluded.multiple_audio,
+                updated_at = excluded.updated_at",
+            params![
+                id,
+                name,
+                notes,
+                request.active_audio_item_id,
+                request.multiple_audio,
+                now,
+            ],
+        )?;
+        transaction.execute(
+            "DELETE FROM library_compare_session_items WHERE session_id = ?1",
+            [&id],
+        )?;
+        for (position, item) in items.iter().enumerate() {
+            transaction.execute(
+                "INSERT INTO library_compare_session_items
+                    (session_id, item_id, position, playback_position_seconds, playback_rate)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    id,
+                    item.item_id,
+                    i64::try_from(position).unwrap_or(i64::MAX),
+                    item.playback_position_seconds,
+                    item.playback_rate,
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        drop(connection);
+        self.list_library_compare_sessions()?
+            .into_iter()
+            .find(|session| session.id == id)
+            .ok_or_else(|| {
+                AppError::new(
+                    "compare_session_not_found",
+                    "The comparison session could not be loaded after saving.",
+                )
+            })
+    }
+
+    pub fn delete_library_compare_session(&self, id: &str) -> Result<(), AppError> {
+        validate_uuid(id, "comparison session")?;
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "Saved comparison sessions are unavailable.",
+            )
+        })?;
+        if connection.execute("DELETE FROM library_compare_sessions WHERE id = ?1", [id])? == 0 {
+            return Err(AppError::new(
+                "compare_session_not_found",
+                "The saved comparison session was not found.",
+            ));
+        }
+        Ok(())
+    }
+
     pub fn add_library_playlist_item(
         &self,
         playlist_id: &str,
@@ -4982,6 +5198,32 @@ fn validate_moment_label(value: &str) -> Result<String, AppError> {
     Ok(value.to_owned())
 }
 
+fn validate_compare_session_name(value: &str) -> Result<String, AppError> {
+    let value = value.trim();
+    if value.is_empty() || value.chars().count() > 80 || value.chars().any(char::is_control) {
+        return Err(AppError::new(
+            "invalid_compare_session_name",
+            "Comparison session names must contain between 1 and 80 visible characters.",
+        ));
+    }
+    Ok(value.to_owned())
+}
+
+fn validate_compare_session_notes(value: &str) -> Result<String, AppError> {
+    let value = value.trim();
+    if value.chars().count() > 2_000
+        || value
+            .chars()
+            .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+    {
+        return Err(AppError::new(
+            "invalid_compare_session_notes",
+            "Comparison notes must contain no more than 2,000 characters.",
+        ));
+    }
+    Ok(value.to_owned())
+}
+
 fn validate_moment_note(value: &str) -> Result<String, AppError> {
     let value = value.trim();
     if value.chars().count() > 2_000
@@ -5925,7 +6167,7 @@ mod tests {
                 row.get(0)
             })
             .expect("recovered migration version");
-        assert_eq!(latest_version, 20);
+        assert_eq!(latest_version, 21);
         let has_playback: bool = connection
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'library_playback')",
@@ -5951,6 +6193,14 @@ mod tests {
             )
             .expect("moments table state");
         assert!(has_moments);
+        let has_compare_sessions: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'library_compare_sessions')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("comparison session table state");
+        assert!(has_compare_sessions);
         let has_rich_metadata: bool = connection
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM sqlite_master
@@ -7024,6 +7274,102 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM library_moments", [], |row| row.get(0))
             .expect("moment count");
         assert_eq!(remaining, 0);
+    }
+
+    #[test]
+    fn persists_validated_comparison_sessions_and_reconciles_deleted_videos() {
+        let directory = tempdir().expect("temporary directory");
+        let database =
+            Database::open(&directory.path().join("compare-sessions.sqlite3")).expect("database");
+        let now = Utc::now();
+        let first = LibraryItem {
+            id: Uuid::new_v4().to_string(),
+            path: directory
+                .path()
+                .join("first.mp4")
+                .to_string_lossy()
+                .into_owned(),
+            source_id: None,
+            relative_path: None,
+            media_kind: Some(LibraryMediaKind::Video),
+            title: "First".to_owned(),
+            source_url: None,
+            thumbnail: None,
+            duration_seconds: Some(60.0),
+            site: None,
+            tags: Vec::new(),
+            metadata: serde_json::json!({}),
+            file_size_bytes: Some(100),
+            modified_at_ms: Some(1),
+            width: Some(1920),
+            height: Some(1080),
+            fps: Some(30.0),
+            video_codec: Some("h264".to_owned()),
+            audio_codec: Some("aac".to_owned()),
+            container: Some("mp4".to_owned()),
+            dynamic_range: None,
+            metadata_state: LibraryMetadataState::Ready,
+            metadata_error: None,
+            favorite: false,
+            rating: None,
+            missing: false,
+            added_at: now,
+            updated_at: now,
+        };
+        let mut second = first.clone();
+        second.id = Uuid::new_v4().to_string();
+        second.title = "Second".to_owned();
+        second.path = directory
+            .path()
+            .join("second.mp4")
+            .to_string_lossy()
+            .into_owned();
+        database.upsert_library_item(&first).expect("first video");
+        database.upsert_library_item(&second).expect("second video");
+
+        let saved = database
+            .save_library_compare_session(SaveLibraryCompareSessionRequest {
+                id: None,
+                name: "Lighting comparison".to_owned(),
+                notes: "Compare both openings.".to_owned(),
+                items: vec![
+                    LibraryCompareSessionItem {
+                        item_id: first.id.clone(),
+                        position: 0,
+                        playback_position_seconds: 4.0,
+                        playback_rate: 1.0,
+                    },
+                    LibraryCompareSessionItem {
+                        item_id: second.id.clone(),
+                        position: 1,
+                        playback_position_seconds: 8.0,
+                        playback_rate: 0.75,
+                    },
+                ],
+                active_audio_item_id: Some(second.id.clone()),
+                multiple_audio: false,
+            })
+            .expect("save comparison");
+        assert_eq!(
+            database.list_library_compare_sessions().expect("sessions"),
+            vec![saved.clone()]
+        );
+
+        database
+            .remove_library_item(&second.id)
+            .expect("remove second video");
+        let reconciled = database
+            .list_library_compare_sessions()
+            .expect("reconciled sessions");
+        assert_eq!(reconciled[0].items.len(), 1);
+        assert!(reconciled[0].active_audio_item_id.is_none());
+        database
+            .delete_library_compare_session(&saved.id)
+            .expect("delete session");
+        assert!(database
+            .list_library_compare_sessions()
+            .expect("sessions")
+            .is_empty());
     }
 
     #[test]
