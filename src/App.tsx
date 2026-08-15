@@ -7,6 +7,9 @@ import { OnboardingDialog } from "./components/OnboardingDialog";
 import { DownloadsPage } from "./features/downloads/DownloadsPage";
 import { HistoryPage } from "./features/history/HistoryPage";
 import { LibraryPage } from "./features/library/LibraryPage";
+import { MontagePage } from "./features/library/MontagePage";
+import { SimilarityPage } from "./features/library/SimilarityPage";
+import { SharingPage } from "./features/library/SharingPage";
 import { NewDownloadPage } from "./features/new-download/NewDownloadPage";
 import { PresetsPage, SettingsPage } from "./features/settings/SettingsPage";
 import { SubscriptionsPage } from "./features/subscriptions/SubscriptionsPage";
@@ -174,6 +177,9 @@ export default function App() {
       {view === "compare" ? <Suspense fallback={<div className="grid min-h-[60vh] place-items-center text-sm text-muted" role="status">Opening comparison workspace…</div>}><ComparePage /></Suspense> : null}
       {view === "imageCompare" ? <Suspense fallback={<div className="grid min-h-[60vh] place-items-center text-sm text-muted" role="status">Opening image studio…</div>}><ImageComparePage /></Suspense> : null}
       {view === "curation" ? <Suspense fallback={<div className="grid min-h-[60vh] place-items-center text-sm text-muted" role="status">Opening curation workspace…</div>}><CurationPage /></Suspense> : null}
+      <div className={view === "montages" ? "" : "hidden"}><MontagePage /></div>
+      <div className={view === "similarity" ? "" : "hidden"}><SimilarityPage /></div>
+      <div className={view === "sharing" ? "" : "hidden"}><SharingPage /></div>
       <div className={view === "presets" ? "" : "hidden"}><PresetsPage /></div>
       <div className={view === "settings" ? "" : "hidden"}><SettingsPage /></div>
       {notice ? (

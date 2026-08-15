@@ -342,6 +342,7 @@ function CompareVideoTile({ item, position, sourceName, audible, multipleAudio, 
   const mounted = useRef(true);
   const progress = useRef({ position: 0, duration: 0, lastSaved: 0, completed: false });
   const playbackWatchdog = useRef<number | null>(null);
+  const playbackProgress = useRef<{ position: number; observedAt: number } | null>(null);
   const [session, setSession] = useState<LibraryPlaybackSession | null>(null);
   const [pending, setPending] = useState<PendingPlayback | null>(null);
   const [loading, setLoading] = useState(!item.missing && item.mediaKind === "video");
@@ -418,18 +419,48 @@ function CompareVideoTile({ item, position, sourceName, audible, multipleAudio, 
     playbackWatchdog.current = null;
   }
 
+  function notePlaybackProgress(video: HTMLVideoElement) {
+    if (!Number.isFinite(video.currentTime)) return;
+    const previous = playbackProgress.current;
+    if (!previous || Math.abs(video.currentTime - previous.position) >= 0.01) {
+      playbackProgress.current = { position: video.currentTime, observedAt: performance.now() };
+    }
+  }
+
   function armPlaybackWatchdog() {
-    clearPlaybackWatchdog();
-    playbackWatchdog.current = window.setTimeout(() => {
+    if (playbackWatchdog.current != null) return;
+    const checkProgress = () => {
       playbackWatchdog.current = null;
-      videoRef.current?.pause();
+      const video = videoRef.current;
+      if (!video || video.paused || video.ended) return;
+      notePlaybackProgress(video);
+      const observedAt = playbackProgress.current?.observedAt ?? performance.now();
+      const stalledFor = performance.now() - observedAt;
+      if (stalledFor < EMBEDDED_PLAYBACK_TIMEOUT_MS) {
+        playbackWatchdog.current = window.setTimeout(
+          checkProgress,
+          Math.max(50, EMBEDDED_PLAYBACK_TIMEOUT_MS - stalledFor),
+        );
+        return;
+      }
+      video.pause();
       onReady(item.id, false);
       setLoading(false);
       setPlaybackError(createPlaybackError(
         "embedded_playback_timeout",
         "Embedded playback stalled after starting. Try an H.264 copy or open the original in your system player.",
       ));
-    }, EMBEDDED_PLAYBACK_TIMEOUT_MS);
+    };
+    playbackWatchdog.current = window.setTimeout(checkProgress, EMBEDDED_PLAYBACK_TIMEOUT_MS);
+  }
+
+  function startPlaybackWatchdog() {
+    clearPlaybackWatchdog();
+    const video = videoRef.current;
+    if (video && Number.isFinite(video.currentTime)) {
+      playbackProgress.current = { position: video.currentTime, observedAt: performance.now() };
+    }
+    armPlaybackWatchdog();
   }
 
   function armPlaybackWatchdogWhilePlaying() {
@@ -437,7 +468,10 @@ function CompareVideoTile({ item, position, sourceName, audible, multipleAudio, 
     if (video && !video.paused && !video.ended) armPlaybackWatchdog();
   }
 
-  useEffect(() => () => clearPlaybackWatchdog(), [item.id, session?.url]);
+  useEffect(() => () => {
+    clearPlaybackWatchdog();
+    playbackProgress.current = null;
+  }, [item.id, session?.url]);
 
   useEffect(() => {
     if (!busy || !pending) {
@@ -625,11 +659,11 @@ function CompareVideoTile({ item, position, sourceName, audible, multipleAudio, 
           if (!multipleAudio && !audible && video && !video.muted) onRequestAudio();
         }}
         onLoadedMetadata={onLoadedMetadata}
-        onPlay={armPlaybackWatchdog}
+        onPlay={startPlaybackWatchdog}
         onPlaying={clearPlaybackWatchdog}
         onWaiting={armPlaybackWatchdogWhilePlaying}
         onStalled={armPlaybackWatchdogWhilePlaying}
-        onTimeUpdate={() => captureProgress(false)}
+        onTimeUpdate={() => { const video = videoRef.current; if (video) notePlaybackProgress(video); captureProgress(false); }}
         onPause={() => { clearPlaybackWatchdog(); captureProgress(false); }}
         onEnded={() => { clearPlaybackWatchdog(); captureProgress(true); }}
         onError={() => { clearPlaybackWatchdog(); onReady(item.id, false); setLoading(false); setPlaybackError(createPlaybackError("embedded_playback_decode_failed", "The WebView could not decode this container or codec.")); }}

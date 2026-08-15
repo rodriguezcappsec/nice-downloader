@@ -9,17 +9,20 @@ use crate::{
         LibraryFileOperation, LibraryFileOperationKind, LibraryFileOperationState,
         LibraryFolderFacet, LibraryFolderScope, LibraryItem, LibraryMediaKind, LibraryMediaStack,
         LibraryMediaStackMember, LibraryMediaStackRole, LibraryMetadataFields,
-        LibraryMetadataState, LibraryMoment, LibraryPlaybackEntry, LibraryPlaybackState,
-        LibraryPlaylist, LibraryProbeResult, LibraryQueryRequest, LibraryQueryResult,
-        LibraryRichMetadata, LibraryScanJob, LibraryScanState, LibrarySearchStatus,
-        LibrarySmartView, LibrarySmartViewQuery, LibrarySort, LibrarySource, LibrarySourceStatus,
-        LibraryWatchState, Preset, PresetIntent, QueueSettings, SaveAuthenticationProfileRequest,
-        SaveLibraryCollectionRequest, SaveLibraryCompareSessionRequest,
-        SaveLibraryMediaStackRequest, SaveLibraryMomentRequest, SaveLibraryPlaybackRequest,
-        SaveLibraryPlaylistRequest, SaveLibraryRichMetadataRequest, SaveLibrarySmartViewRequest,
-        SaveLibrarySourceRequest, SavePresetRequest, SaveSitePresetRuleRequest,
-        SaveSubscriptionRequest, SitePresetRule, StartDownloadRequest, Subscription,
-        TransformationOperation, TransformationState, TransformationTask, UpdateLibraryItemRequest,
+        LibraryMetadataState, LibraryMoment, LibraryMontage, LibraryMontageSegment,
+        LibraryPlaybackEntry, LibraryPlaybackState, LibraryPlaylist, LibraryProbeResult,
+        LibraryQueryRequest, LibraryQueryResult, LibraryRichMetadata, LibraryScanJob,
+        LibraryScanState, LibrarySearchStatus, LibrarySmartView, LibrarySmartViewQuery,
+        LibrarySort, LibrarySource, LibrarySourceStatus, LibraryTranscriptCue,
+        LibraryTranscriptIndexStatus, LibraryTranscriptMatch, LibraryVisualSimilarityMatch,
+        LibraryVisualSimilarityStatus, LibraryWatchState, Preset, PresetIntent, QueueSettings,
+        SaveAuthenticationProfileRequest, SaveLibraryCollectionRequest,
+        SaveLibraryCompareSessionRequest, SaveLibraryMediaStackRequest, SaveLibraryMomentRequest,
+        SaveLibraryMontageRequest, SaveLibraryPlaybackRequest, SaveLibraryPlaylistRequest,
+        SaveLibraryRichMetadataRequest, SaveLibrarySmartViewRequest, SaveLibrarySourceRequest,
+        SavePresetRequest, SaveSitePresetRuleRequest, SaveSubscriptionRequest, SitePresetRule,
+        StartDownloadRequest, Subscription, TransformationOperation, TransformationState,
+        TransformationTask, UpdateLibraryItemRequest,
     },
     utils::validation::{
         normalize_engine_preferences, validate_destination, validate_engine_preferences,
@@ -58,6 +61,9 @@ const MIGRATION_0020: &str = include_str!("migrations/0020_library_moments.sql")
 const MIGRATION_0021: &str = include_str!("migrations/0021_library_compare_sessions.sql");
 const MIGRATION_0022: &str = include_str!("migrations/0022_library_media_stacks.sql");
 const MIGRATION_0023: &str = include_str!("migrations/0023_library_curation_decisions.sql");
+const MIGRATION_0024: &str = include_str!("migrations/0024_library_transcripts.sql");
+const MIGRATION_0025: &str = include_str!("migrations/0025_library_montages.sql");
+const MIGRATION_0026: &str = include_str!("migrations/0026_library_visual_similarity.sql");
 const ENGINE_PREFERENCES_KEY: &str = "engine.preferences";
 const QUEUE_SETTINGS_KEY: &str = "queue.settings";
 const DESKTOP_PREFERENCES_KEY: &str = "desktop.preferences";
@@ -66,6 +72,17 @@ const ONBOARDING_COMPLETED_KEY: &str = "onboarding.completed";
 #[derive(Clone)]
 pub struct Database {
     connection: Arc<Mutex<Connection>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct VisualSignatureTarget {
+    pub id: String,
+    pub path: String,
+    pub title: String,
+    pub media_kind: String,
+    pub duration_seconds: Option<f64>,
+    pub file_size_bytes: Option<u64>,
+    pub modified_at_ms: Option<i64>,
 }
 
 impl Database {
@@ -114,6 +131,9 @@ impl Database {
             (21, MIGRATION_0021),
             (22, MIGRATION_0022),
             (23, MIGRATION_0023),
+            (24, MIGRATION_0024),
+            (25, MIGRATION_0025),
+            (26, MIGRATION_0026),
         ] {
             let migrated: bool = transaction.query_row(
                 "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = ?1)",
@@ -1284,6 +1304,268 @@ impl Database {
         rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
     }
 
+    pub fn list_library_transcript_targets_after(
+        &self,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<(String, String)>, AppError> {
+        if !(1..=1_000).contains(&limit) {
+            return Err(AppError::new(
+                "invalid_transcript_index_limit",
+                "Transcript indexing batches contain between 1 and 1,000 videos.",
+            ));
+        }
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "The media library is unavailable.")
+        })?;
+        let mut statement = connection.prepare(
+            "SELECT id, path
+             FROM media_library
+             WHERE missing = 0
+               AND media_kind IN ('video', 'both')
+               AND (?1 IS NULL OR id > ?1)
+             ORDER BY id
+             LIMIT ?2",
+        )?;
+        let rows = statement.query_map(
+            params![after_id, i64::try_from(limit).unwrap_or(1_000)],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+    }
+
+    pub fn list_visual_signature_targets_after(
+        &self,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<VisualSignatureTarget>, AppError> {
+        if !(1..=500).contains(&limit) {
+            return Err(AppError::new(
+                "invalid_visual_similarity_batch",
+                "Visual similarity batches contain between 1 and 500 items.",
+            ));
+        }
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "The visual similarity index is unavailable.",
+            )
+        })?;
+        let mut statement = connection.prepare(
+            "SELECT media.id, media.path, media.title, COALESCE(media.media_kind, ''),
+                    media.duration_seconds, metadata.file_size_bytes, metadata.modified_at_ms
+             FROM media_library media
+             LEFT JOIN library_media_metadata metadata ON metadata.item_id = media.id
+             LEFT JOIN library_visual_signatures signature ON signature.item_id = media.id
+             WHERE media.missing = 0
+               AND media.media_kind IN ('video', 'image', 'both')
+               AND (?1 IS NULL OR media.id > ?1)
+               AND (
+                    signature.item_id IS NULL
+                    OR NOT (
+                        signature.file_size_bytes IS metadata.file_size_bytes
+                        AND signature.modified_at_ms IS metadata.modified_at_ms
+                    )
+               )
+             ORDER BY media.id
+             LIMIT ?2",
+        )?;
+        let rows = statement.query_map(
+            params![after_id, i64::try_from(limit).unwrap_or(500)],
+            |row| {
+                Ok(VisualSignatureTarget {
+                    id: row.get(0)?,
+                    path: row.get(1)?,
+                    title: row.get(2)?,
+                    media_kind: row.get(3)?,
+                    duration_seconds: row.get(4)?,
+                    file_size_bytes: row.get(5)?,
+                    modified_at_ms: row.get(6)?,
+                })
+            },
+        )?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+    }
+
+    pub fn save_visual_signature(
+        &self,
+        target: &VisualSignatureTarget,
+        signature: u64,
+    ) -> Result<(), AppError> {
+        validate_uuid(&target.id, "library item")?;
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "The visual similarity index is unavailable.",
+            )
+        })?;
+        connection.execute(
+            "INSERT INTO library_visual_signatures
+                (item_id, signature, file_size_bytes, modified_at_ms, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(item_id) DO UPDATE SET
+                signature = excluded.signature,
+                file_size_bytes = excluded.file_size_bytes,
+                modified_at_ms = excluded.modified_at_ms,
+                updated_at = excluded.updated_at",
+            params![
+                target.id,
+                format!("{signature:016x}"),
+                target.file_size_bytes,
+                target.modified_at_ms,
+                Utc::now().timestamp()
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_visual_signature(&self, item_id: &str) -> Result<(), AppError> {
+        validate_uuid(item_id, "library item")?;
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "The visual similarity index is unavailable.",
+            )
+        })?;
+        connection.execute(
+            "DELETE FROM library_visual_signatures WHERE item_id = ?1",
+            [item_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn visual_similarity_status(&self) -> Result<LibraryVisualSimilarityStatus, AppError> {
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "The visual similarity index is unavailable.",
+            )
+        })?;
+        let eligible_items: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM media_library
+             WHERE missing = 0 AND media_kind IN ('video', 'image', 'both')",
+            [],
+            |row| row.get(0),
+        )?;
+        let indexed_items: i64 = connection.query_row(
+            "SELECT COUNT(*)
+             FROM media_library media
+             JOIN library_visual_signatures signature ON signature.item_id = media.id
+             LEFT JOIN library_media_metadata metadata ON metadata.item_id = media.id
+             WHERE media.missing = 0
+               AND media.media_kind IN ('video', 'image', 'both')
+               AND signature.file_size_bytes IS metadata.file_size_bytes
+               AND signature.modified_at_ms IS metadata.modified_at_ms",
+            [],
+            |row| row.get(0),
+        )?;
+        let eligible_items = usize::try_from(eligible_items).unwrap_or(usize::MAX);
+        let indexed_items = usize::try_from(indexed_items).unwrap_or(usize::MAX);
+        Ok(LibraryVisualSimilarityStatus {
+            eligible_items,
+            indexed_items,
+            stale_items: eligible_items.saturating_sub(indexed_items),
+        })
+    }
+
+    pub fn find_visually_similar_items(
+        &self,
+        item_id: &str,
+        limit: usize,
+        minimum_similarity_percent: f64,
+    ) -> Result<Vec<LibraryVisualSimilarityMatch>, AppError> {
+        validate_uuid(item_id, "library item")?;
+        if !(1..=50).contains(&limit)
+            || !minimum_similarity_percent.is_finite()
+            || !(50.0..=100.0).contains(&minimum_similarity_percent)
+        {
+            return Err(AppError::new(
+                "invalid_visual_similarity_query",
+                "Similarity queries return 1 to 50 matches with a threshold from 50 to 100 percent.",
+            ));
+        }
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "The visual similarity index is unavailable.",
+            )
+        })?;
+        let target: Option<String> = connection
+            .query_row(
+                "SELECT signature.signature
+                 FROM library_visual_signatures signature
+                 JOIN media_library media ON media.id = signature.item_id
+                 LEFT JOIN library_media_metadata metadata ON metadata.item_id = media.id
+                 WHERE signature.item_id = ?1
+                   AND media.missing = 0
+                   AND signature.file_size_bytes IS metadata.file_size_bytes
+                   AND signature.modified_at_ms IS metadata.modified_at_ms",
+                [item_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(target) = target.and_then(|value| u64::from_str_radix(&value, 16).ok()) else {
+            return Err(AppError::new(
+                "visual_similarity_not_indexed",
+                "Build or refresh the visual index before finding similar media.",
+            ));
+        };
+        let mut statement = connection.prepare(
+            "SELECT signature.item_id, signature.signature
+             FROM library_visual_signatures signature
+             JOIN media_library media ON media.id = signature.item_id
+             LEFT JOIN library_media_metadata metadata ON metadata.item_id = media.id
+             WHERE signature.item_id != ?1
+               AND media.missing = 0
+               AND media.media_kind IN ('video', 'image', 'both')
+               AND signature.file_size_bytes IS metadata.file_size_bytes
+               AND signature.modified_at_ms IS metadata.modified_at_ms
+             LIMIT 250000",
+        )?;
+        let rows = statement.query_map([item_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut scored = rows
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter_map(|(id, signature)| {
+                let signature = u64::from_str_radix(&signature, 16).ok()?;
+                let distance = (target ^ signature).count_ones();
+                let similarity = (1.0 - f64::from(distance) / 64.0) * 100.0;
+                (similarity >= minimum_similarity_percent).then_some((id, similarity, distance))
+            })
+            .collect::<Vec<_>>();
+        scored.sort_by(|left, right| {
+            right
+                .1
+                .total_cmp(&left.1)
+                .then_with(|| left.2.cmp(&right.2))
+                .then_with(|| left.0.cmp(&right.0))
+        });
+        scored.truncate(limit);
+        let ids = scored
+            .iter()
+            .map(|(id, _, _)| id.clone())
+            .collect::<Vec<_>>();
+        drop(statement);
+        drop(connection);
+        let items = self
+            .list_library_items_by_ids(ids)?
+            .into_iter()
+            .map(|item| (item.id.clone(), item))
+            .collect::<HashMap<_, _>>();
+        Ok(scored
+            .into_iter()
+            .filter_map(|(id, similarity_percent, hamming_distance)| {
+                Some(LibraryVisualSimilarityMatch {
+                    item: items.get(&id)?.clone(),
+                    similarity_percent,
+                    hamming_distance,
+                })
+            })
+            .collect())
+    }
+
     pub fn list_library_items_for_backup(
         &self,
         limit: usize,
@@ -2337,6 +2619,126 @@ impl Database {
         self.library_search_status()
     }
 
+    pub fn replace_library_transcript_cues(
+        &self,
+        item_id: &str,
+        cues: &[LibraryTranscriptCue],
+    ) -> Result<(), AppError> {
+        validate_uuid(item_id, "library item")?;
+        let mut connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "The transcript search index is unavailable.",
+            )
+        })?;
+        let transaction = connection.transaction()?;
+        transaction.execute(
+            "DELETE FROM library_transcript_search WHERE item_id = ?1",
+            [item_id],
+        )?;
+        {
+            let mut statement = transaction.prepare(
+                "INSERT INTO library_transcript_search
+                    (item_id, subtitle_name, language, start_seconds, end_seconds, cue_text)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )?;
+            for cue in cues.iter().take(50_000) {
+                if !cue.start_seconds.is_finite()
+                    || !cue.end_seconds.is_finite()
+                    || cue.start_seconds < 0.0
+                    || cue.end_seconds <= cue.start_seconds
+                    || cue.text.is_empty()
+                {
+                    continue;
+                }
+                statement.execute(params![
+                    item_id,
+                    cue.subtitle_name,
+                    cue.language,
+                    cue.start_seconds,
+                    cue.end_seconds,
+                    cue.text,
+                ])?;
+            }
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn search_library_transcripts(
+        &self,
+        search: &str,
+        limit: usize,
+    ) -> Result<Vec<LibraryTranscriptMatch>, AppError> {
+        let search = search.trim();
+        if search.chars().count() > 200 || search.chars().any(char::is_control) {
+            return Err(AppError::new(
+                "invalid_transcript_search",
+                "Transcript search text must be 200 characters or fewer.",
+            ));
+        }
+        if !(1..=50).contains(&limit) {
+            return Err(AppError::new(
+                "invalid_transcript_search_limit",
+                "Transcript search returns between 1 and 50 matches.",
+            ));
+        }
+        let query = library_fts_query(search)?;
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "The transcript search index is unavailable.",
+            )
+        })?;
+        let mut statement = connection.prepare(
+            "SELECT transcript.item_id, transcript.start_seconds, transcript.end_seconds,
+                    transcript.cue_text, NULLIF(transcript.language, '')
+             FROM library_transcript_search transcript
+             JOIN media_library ON media_library.id = transcript.item_id
+             WHERE library_transcript_search MATCH ?1
+               AND media_library.missing = 0
+               AND media_library.media_kind IN ('video', 'both')
+             ORDER BY bm25(library_transcript_search), transcript.start_seconds, transcript.rowid
+             LIMIT ?2",
+        )?;
+        let matches = statement
+            .query_map(params![query, i64::try_from(limit).unwrap_or(50)], |row| {
+                Ok(LibraryTranscriptMatch {
+                    item_id: row.get(0)?,
+                    start_seconds: row.get(1)?,
+                    end_seconds: row.get(2)?,
+                    text: row.get(3)?,
+                    language: row.get(4)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(matches)
+    }
+
+    pub fn library_transcript_index_status(
+        &self,
+    ) -> Result<LibraryTranscriptIndexStatus, AppError> {
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "The transcript search index is unavailable.",
+            )
+        })?;
+        let (cue_count, indexed_items): (i64, i64) = connection.query_row(
+            "SELECT COUNT(*), COUNT(DISTINCT transcript.item_id)
+             FROM library_transcript_search transcript
+             JOIN media_library ON media_library.id = transcript.item_id
+             WHERE media_library.missing = 0
+               AND media_library.media_kind IN ('video', 'both')",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        Ok(LibraryTranscriptIndexStatus {
+            indexed_items: usize::try_from(indexed_items).unwrap_or(usize::MAX),
+            cue_count: usize::try_from(cue_count).unwrap_or(usize::MAX),
+        })
+    }
+
     pub fn list_library_smart_views(&self) -> Result<Vec<LibrarySmartView>, AppError> {
         let connection = self.connection.lock().map_err(|_| {
             AppError::new("database_unavailable", "The media library is unavailable.")
@@ -2835,6 +3237,287 @@ impl Database {
             return Err(AppError::new(
                 "library_moment_not_found",
                 "The saved moment was not found.",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn list_library_montages(&self) -> Result<Vec<LibraryMontage>, AppError> {
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "Library montages are unavailable.")
+        })?;
+        let mut statement = connection.prepare(
+            "SELECT id, name, notes, fade_seconds, segment_count, created_at, updated_at
+             FROM library_montages
+             ORDER BY updated_at DESC, name COLLATE NOCASE ASC
+             LIMIT 200",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, f64>(3)?,
+                row.get::<_, usize>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, i64>(6)?,
+            ))
+        })?;
+        let headers = rows.collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        let mut segment_statement = connection.prepare(
+            "SELECT item_id, label, start_seconds, end_seconds
+             FROM library_montage_segments
+             WHERE montage_id = ?1
+             ORDER BY position ASC",
+        )?;
+        let mut montages = Vec::with_capacity(headers.len());
+        for (id, name, notes, fade_seconds, expected_segment_count, created_at, updated_at) in
+            headers
+        {
+            let segments = segment_statement
+                .query_map([&id], |row| {
+                    Ok(LibraryMontageSegment {
+                        item_id: row.get(0)?,
+                        label: row.get(1)?,
+                        start_seconds: row.get(2)?,
+                        end_seconds: row.get(3)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            let incomplete = segments.len() != expected_segment_count;
+            montages.push(LibraryMontage {
+                id,
+                name,
+                notes,
+                fade_seconds,
+                segments,
+                expected_segment_count,
+                incomplete,
+                created_at: timestamp_or_epoch(created_at),
+                updated_at: timestamp_or_epoch(updated_at),
+            });
+        }
+        Ok(montages)
+    }
+
+    pub fn get_library_montage(&self, id: &str) -> Result<LibraryMontage, AppError> {
+        validate_uuid(id, "montage")?;
+        self.list_library_montages()?
+            .into_iter()
+            .find(|montage| montage.id == id)
+            .ok_or_else(|| {
+                AppError::new(
+                    "library_montage_not_found",
+                    "The montage project was not found.",
+                )
+            })
+    }
+
+    pub fn save_library_montage(
+        &self,
+        request: SaveLibraryMontageRequest,
+    ) -> Result<LibraryMontage, AppError> {
+        let id = request.id.unwrap_or_else(|| Uuid::new_v4().to_string());
+        validate_uuid(&id, "montage")?;
+        let name = validate_montage_name(&request.name)?;
+        let notes = validate_montage_notes(&request.notes)?;
+        validate_montage_fade(request.fade_seconds)?;
+        validate_montage_segments(&request.segments)?;
+
+        let mut connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "Library montages are unavailable.")
+        })?;
+        let transaction = connection.transaction()?;
+        let exists: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM library_montages WHERE id = ?1)",
+            [&id],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            let count: i64 =
+                transaction.query_row("SELECT COUNT(*) FROM library_montages", [], |row| {
+                    row.get(0)
+                })?;
+            if count >= 200 {
+                return Err(AppError::new(
+                    "library_montage_limit",
+                    "The Library can store at most 200 montage projects.",
+                ));
+            }
+        }
+
+        let mut total_duration = 0.0;
+        for segment in &request.segments {
+            validate_uuid(&segment.item_id, "library item")?;
+            let item: Option<(String, bool, Option<f64>)> = transaction
+                .query_row(
+                    "SELECT COALESCE(media_kind, ''), missing, duration_seconds
+                     FROM media_library WHERE id = ?1",
+                    [&segment.item_id],
+                    |row| Ok((row.get(0)?, row.get::<_, i64>(1)? != 0, row.get(2)?)),
+                )
+                .optional()?;
+            let Some((media_kind, missing, duration)) = item else {
+                return Err(library_item_not_found());
+            };
+            if !matches!(media_kind.as_str(), "video" | "both") || missing {
+                return Err(AppError::new(
+                    "library_montage_video_required",
+                    "Montages can only use available Library videos.",
+                ));
+            }
+            if let Some(duration) = duration.filter(|value| value.is_finite() && *value > 0.0) {
+                if segment.end_seconds > duration + 1.0 {
+                    return Err(AppError::new(
+                        "invalid_library_montage_range",
+                        "Every montage segment must fit within its source video's duration.",
+                    ));
+                }
+            }
+            total_duration += segment.end_seconds - segment.start_seconds;
+        }
+        if total_duration > 21_600.0 {
+            return Err(AppError::new(
+                "library_montage_duration_limit",
+                "A montage can contain at most six hours of source video.",
+            ));
+        }
+
+        let now = Utc::now().timestamp();
+        transaction.execute(
+            "INSERT INTO library_montages
+                (id, name, notes, fade_seconds, segment_count, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
+             ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                notes = excluded.notes,
+                fade_seconds = excluded.fade_seconds,
+                segment_count = excluded.segment_count,
+                updated_at = excluded.updated_at",
+            params![
+                id,
+                name,
+                notes,
+                request.fade_seconds,
+                request.segments.len(),
+                now
+            ],
+        )?;
+        transaction.execute(
+            "DELETE FROM library_montage_segments WHERE montage_id = ?1",
+            [&id],
+        )?;
+        {
+            let mut statement = transaction.prepare(
+                "INSERT INTO library_montage_segments
+                    (montage_id, position, item_id, label, start_seconds, end_seconds)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )?;
+            for (position, segment) in request.segments.iter().enumerate() {
+                statement.execute(params![
+                    id,
+                    i64::try_from(position).unwrap_or(i64::MAX),
+                    segment.item_id,
+                    segment.label.trim(),
+                    segment.start_seconds,
+                    segment.end_seconds,
+                ])?;
+            }
+        }
+        transaction.commit()?;
+        drop(connection);
+        self.get_library_montage(&id)
+    }
+
+    pub fn restore_library_montage(
+        &self,
+        request: SaveLibraryMontageRequest,
+        expected_segment_count: usize,
+    ) -> Result<LibraryMontage, AppError> {
+        if expected_segment_count < request.segments.len() || expected_segment_count > 50 {
+            return Err(AppError::new(
+                "invalid_library_montage_segments",
+                "The restored montage has an invalid expected segment count.",
+            ));
+        }
+        if request.segments.is_empty() && expected_segment_count > 0 {
+            let id = request.id.unwrap_or_else(|| Uuid::new_v4().to_string());
+            validate_uuid(&id, "montage")?;
+            let name = validate_montage_name(&request.name)?;
+            let notes = validate_montage_notes(&request.notes)?;
+            validate_montage_fade(request.fade_seconds)?;
+            let mut connection = self.connection.lock().map_err(|_| {
+                AppError::new("database_unavailable", "Library montages are unavailable.")
+            })?;
+            let transaction = connection.transaction()?;
+            let exists: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM library_montages WHERE id = ?1)",
+                [&id],
+                |row| row.get(0),
+            )?;
+            let count: i64 =
+                transaction.query_row("SELECT COUNT(*) FROM library_montages", [], |row| {
+                    row.get(0)
+                })?;
+            if !exists && count >= 200 {
+                return Err(AppError::new(
+                    "library_montage_limit",
+                    "The Library can store at most 200 montage projects.",
+                ));
+            }
+            let now = Utc::now().timestamp();
+            transaction.execute(
+                "INSERT INTO library_montages
+                    (id, name, notes, fade_seconds, segment_count, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
+                 ON CONFLICT(id) DO UPDATE SET
+                    name = excluded.name,
+                    notes = excluded.notes,
+                    fade_seconds = excluded.fade_seconds,
+                    segment_count = excluded.segment_count,
+                    updated_at = excluded.updated_at",
+                params![
+                    id,
+                    name,
+                    notes,
+                    request.fade_seconds,
+                    expected_segment_count,
+                    now
+                ],
+            )?;
+            transaction.execute(
+                "DELETE FROM library_montage_segments WHERE montage_id = ?1",
+                [&id],
+            )?;
+            transaction.commit()?;
+            drop(connection);
+            return self.get_library_montage(&id);
+        }
+        let saved = self.save_library_montage(request)?;
+        if expected_segment_count != saved.segments.len() {
+            let connection = self.connection.lock().map_err(|_| {
+                AppError::new("database_unavailable", "Library montages are unavailable.")
+            })?;
+            connection.execute(
+                "UPDATE library_montages SET segment_count = ?2 WHERE id = ?1",
+                params![saved.id, expected_segment_count],
+            )?;
+            drop(connection);
+            return self.get_library_montage(&saved.id);
+        }
+        Ok(saved)
+    }
+
+    pub fn delete_library_montage(&self, id: &str) -> Result<(), AppError> {
+        validate_uuid(id, "montage")?;
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "Library montages are unavailable.")
+        })?;
+        if connection.execute("DELETE FROM library_montages WHERE id = ?1", [id])? == 0 {
+            return Err(AppError::new(
+                "library_montage_not_found",
+                "The montage project was not found.",
             ));
         }
         Ok(())
@@ -5675,6 +6358,68 @@ fn validate_moment_times(start_seconds: f64, end_seconds: Option<f64>) -> Result
     Ok(())
 }
 
+fn validate_montage_name(value: &str) -> Result<String, AppError> {
+    let value = value.trim();
+    if value.is_empty() || value.chars().count() > 100 || value.chars().any(char::is_control) {
+        return Err(AppError::new(
+            "invalid_library_montage_name",
+            "Montage names must contain 1 to 100 visible characters.",
+        ));
+    }
+    Ok(value.to_owned())
+}
+
+fn validate_montage_notes(value: &str) -> Result<String, AppError> {
+    let value = value.trim();
+    if value.chars().count() > 2_000
+        || value
+            .chars()
+            .any(|character| character.is_control() && character != '\n' && character != '\t')
+    {
+        return Err(AppError::new(
+            "invalid_library_montage_notes",
+            "Montage notes must be 2,000 characters or fewer.",
+        ));
+    }
+    Ok(value.to_owned())
+}
+
+fn validate_montage_fade(value: f64) -> Result<(), AppError> {
+    if !value.is_finite() || !(0.0..=5.0).contains(&value) {
+        return Err(AppError::new(
+            "invalid_library_montage_fade",
+            "Montage fades must be between zero and five seconds.",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_montage_segments(segments: &[LibraryMontageSegment]) -> Result<(), AppError> {
+    if segments.is_empty() || segments.len() > 50 {
+        return Err(AppError::new(
+            "invalid_library_montage_segments",
+            "A montage must contain between 1 and 50 segments.",
+        ));
+    }
+    for segment in segments {
+        let label = segment.label.trim();
+        if label.is_empty()
+            || label.chars().count() > 100
+            || label.chars().any(char::is_control)
+            || !segment.start_seconds.is_finite()
+            || !segment.end_seconds.is_finite()
+            || segment.start_seconds < 0.0
+            || segment.end_seconds - segment.start_seconds < 0.1
+        {
+            return Err(AppError::new(
+                "invalid_library_montage_segment",
+                "Each segment needs a label and a valid clip range of at least 0.1 seconds.",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn library_moment_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LibraryMoment> {
     Ok(LibraryMoment {
         id: row.get(0)?,
@@ -6616,7 +7361,7 @@ mod tests {
                 row.get(0)
             })
             .expect("recovered migration version");
-        assert_eq!(latest_version, 23);
+        assert_eq!(latest_version, 26);
         let has_playback: bool = connection
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'library_playback')",
@@ -7454,6 +8199,184 @@ mod tests {
     }
 
     #[test]
+    fn indexes_fingerprint_aware_approximate_visual_similarity() {
+        let directory = tempdir().expect("temporary directory");
+        let database =
+            Database::open(&directory.path().join("visual-similarity.sqlite3")).expect("database");
+        let first = database
+            .upsert_library_item(&media_stack_test_item(
+                directory.path(),
+                "First image",
+                LibraryMediaKind::Image,
+            ))
+            .expect("first image");
+        let second = database
+            .upsert_library_item(&media_stack_test_item(
+                directory.path(),
+                "Similar image",
+                LibraryMediaKind::Image,
+            ))
+            .expect("second image");
+        let third = database
+            .upsert_library_item(&media_stack_test_item(
+                directory.path(),
+                "Different image",
+                LibraryMediaKind::Image,
+            ))
+            .expect("third image");
+        let targets = database
+            .list_visual_signature_targets_after(None, 100)
+            .expect("targets");
+        assert_eq!(targets.len(), 3);
+        let by_id = targets
+            .into_iter()
+            .map(|target| (target.id.clone(), target))
+            .collect::<HashMap<_, _>>();
+        database
+            .save_visual_signature(&by_id[&first.id], 0)
+            .expect("first signature");
+        database
+            .save_visual_signature(&by_id[&second.id], 0b11)
+            .expect("similar signature");
+        database
+            .save_visual_signature(&by_id[&third.id], u64::MAX)
+            .expect("different signature");
+
+        let status = database.visual_similarity_status().expect("status");
+        assert_eq!(status.eligible_items, 3);
+        assert_eq!(status.indexed_items, 3);
+        let matches = database
+            .find_visually_similar_items(&first.id, 12, 90.0)
+            .expect("similar items");
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].item.id, second.id);
+        assert_eq!(matches[0].hamming_distance, 2);
+
+        let mut changed = second.clone();
+        changed.modified_at_ms = Some(2);
+        database
+            .upsert_library_item(&changed)
+            .expect("changed fingerprint");
+        let status = database.visual_similarity_status().expect("stale status");
+        assert_eq!(status.indexed_items, 2);
+        assert_eq!(status.stale_items, 1);
+        assert!(database
+            .find_visually_similar_items(&first.id, 12, 90.0)
+            .expect("stale item excluded")
+            .is_empty());
+
+        database
+            .remove_library_item(&first.id)
+            .expect("remove first image");
+        assert_eq!(
+            database
+                .visual_similarity_status()
+                .expect("cascade status")
+                .eligible_items,
+            2
+        );
+    }
+
+    #[test]
+    fn indexes_replaces_searches_and_cascades_library_transcript_cues() {
+        let directory = tempdir().expect("temporary directory");
+        let database =
+            Database::open(&directory.path().join("transcripts.sqlite3")).expect("database");
+        let item = media_stack_test_item(
+            directory.path(),
+            "Transcript fixture",
+            LibraryMediaKind::Video,
+        );
+        let item = database
+            .upsert_scanned_library_item(&item)
+            .expect("catalog video");
+
+        database
+            .replace_library_transcript_cues(
+                &item.id,
+                &[
+                    LibraryTranscriptCue {
+                        subtitle_name: "fixture.en.vtt".to_owned(),
+                        language: Some("en".to_owned()),
+                        start_seconds: 1.25,
+                        end_seconds: 3.5,
+                        text: "Aggressive tapping and face mask reveal".to_owned(),
+                    },
+                    LibraryTranscriptCue {
+                        subtitle_name: "fixture.en.vtt".to_owned(),
+                        language: Some("en".to_owned()),
+                        start_seconds: 5.0,
+                        end_seconds: 8.0,
+                        text: "Whispering ocean sounds".to_owned(),
+                    },
+                ],
+            )
+            .expect("index cues");
+
+        let status = database
+            .library_transcript_index_status()
+            .expect("transcript status");
+        assert_eq!(status.indexed_items, 1);
+        assert_eq!(status.cue_count, 2);
+        let matches = database
+            .search_library_transcripts("face mask", 12)
+            .expect("FTS transcript search");
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].item_id, item.id);
+        assert_eq!(matches[0].start_seconds, 1.25);
+        assert_eq!(matches[0].language.as_deref(), Some("en"));
+
+        database
+            .replace_library_transcript_cues(
+                &item.id,
+                &[LibraryTranscriptCue {
+                    subtitle_name: "fixture.vtt".to_owned(),
+                    language: None,
+                    start_seconds: 9.0,
+                    end_seconds: 11.0,
+                    text: "Soft rain on the window".to_owned(),
+                }],
+            )
+            .expect("replace cues");
+        assert!(database
+            .search_library_transcripts("aggressive", 12)
+            .expect("stale search")
+            .is_empty());
+        assert_eq!(
+            database
+                .search_library_transcripts("rain", 12)
+                .expect("replacement search")
+                .len(),
+            1
+        );
+        assert_eq!(
+            database
+                .library_transcript_index_status()
+                .expect("replacement status")
+                .cue_count,
+            1
+        );
+
+        let invalid_query = database
+            .search_library_transcripts(&"x".repeat(201), 12)
+            .expect_err("oversized transcript query");
+        assert_eq!(invalid_query.code, "invalid_transcript_search");
+        let invalid_limit = database
+            .search_library_transcripts("rain", 0)
+            .expect_err("invalid transcript limit");
+        assert_eq!(invalid_limit.code, "invalid_transcript_search_limit");
+
+        database
+            .remove_library_item(&item.id)
+            .expect("remove catalog item");
+        let status = database
+            .library_transcript_index_status()
+            .expect("cascade status");
+        assert_eq!(status.indexed_items, 0);
+        assert_eq!(status.cue_count, 0);
+    }
+
+    #[test]
     fn persists_watch_later_and_private_playback_history() {
         let directory = tempdir().expect("temporary directory");
         let database =
@@ -7731,6 +8654,76 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM library_moments", [], |row| row.get(0))
             .expect("moment count");
         assert_eq!(remaining, 0);
+    }
+
+    #[test]
+    fn persists_validated_montages_and_cascades_deleted_segments() {
+        let directory = tempdir().expect("temporary directory");
+        let database =
+            Database::open(&directory.path().join("montages.sqlite3")).expect("database");
+        let item =
+            media_stack_test_item(directory.path(), "Montage source", LibraryMediaKind::Video);
+        let item = database.upsert_library_item(&item).expect("catalog video");
+        let saved = database
+            .save_library_montage(SaveLibraryMontageRequest {
+                id: None,
+                name: "Release cut".to_owned(),
+                notes: "Opening and close".to_owned(),
+                fade_seconds: 0.25,
+                segments: vec![
+                    LibraryMontageSegment {
+                        item_id: item.id.clone(),
+                        label: "Opening".to_owned(),
+                        start_seconds: 1.0,
+                        end_seconds: 5.0,
+                    },
+                    LibraryMontageSegment {
+                        item_id: item.id.clone(),
+                        label: "Close".to_owned(),
+                        start_seconds: 20.0,
+                        end_seconds: 25.0,
+                    },
+                ],
+            })
+            .expect("save montage");
+        assert_eq!(saved.segments.len(), 2);
+        assert_eq!(
+            database.list_library_montages().expect("montages"),
+            vec![saved.clone()]
+        );
+
+        let invalid = database
+            .save_library_montage(SaveLibraryMontageRequest {
+                id: None,
+                name: "Invalid cut".to_owned(),
+                notes: String::new(),
+                fade_seconds: 0.0,
+                segments: vec![LibraryMontageSegment {
+                    item_id: item.id.clone(),
+                    label: "Past duration".to_owned(),
+                    start_seconds: 29.0,
+                    end_seconds: 40.0,
+                }],
+            })
+            .expect_err("reject range past duration");
+        assert_eq!(invalid.code, "invalid_library_montage_range");
+
+        database
+            .remove_library_item(&item.id)
+            .expect("remove video");
+        let remaining = database
+            .get_library_montage(&saved.id)
+            .expect("project remains");
+        assert!(remaining.segments.is_empty());
+        assert!(remaining.incomplete);
+        assert_eq!(remaining.expected_segment_count, 2);
+        database
+            .delete_library_montage(&saved.id)
+            .expect("delete montage");
+        assert!(database
+            .list_library_montages()
+            .expect("montages")
+            .is_empty());
     }
 
     #[test]

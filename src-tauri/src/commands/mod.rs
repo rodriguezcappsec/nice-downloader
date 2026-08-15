@@ -15,6 +15,7 @@ use crate::{
     },
     errors::AppError,
     library,
+    local_share::LocalShareManager,
     media_server::MediaServerState,
     models::{
         AuthenticationProfile, BatchAnalysisItem, BatchAnalysisResponse, BatchDownloadFailure,
@@ -26,28 +27,32 @@ use crate::{
         LibraryDuplicateAnalysisJob, LibraryDuplicateGroup, LibraryDuplicateTrashResult,
         LibraryFacetRequest, LibraryFacets, LibraryFileOperation, LibraryFileOperationPlan,
         LibraryFileOperationResult, LibraryImageSession, LibraryItem, LibraryMediaKind,
-        LibraryMediaStack, LibraryMoment, LibraryPlaybackCacheStatus, LibraryPlaybackEntry,
-        LibraryPlaybackPreflight, LibraryPlaybackSession, LibraryPlaybackState,
-        LibraryQueryRequest, LibraryQueryResult, LibraryRichMetadata, LibraryScanJob,
-        LibraryScanResult, LibrarySearchStatus, LibrarySmartView, LibrarySource, MediaAnalysis,
-        NativePlaybackSession, NativePlaybackStatus, OnboardingStatus, Preset,
+        LibraryMediaStack, LibraryMoment, LibraryMontage, LibraryPlaybackCacheStatus,
+        LibraryPlaybackEntry, LibraryPlaybackPreflight, LibraryPlaybackSession,
+        LibraryPlaybackState, LibraryQueryRequest, LibraryQueryResult, LibraryRichMetadata,
+        LibraryScanJob, LibraryScanResult, LibrarySearchStatus, LibrarySmartView, LibrarySource,
+        LibraryTranscriptIndexStatus, LibraryTranscriptMatch, LibraryVisualSimilarityJob,
+        LibraryVisualSimilarityMatch, LibraryVisualSimilarityStatus, LocalShareSession,
+        MediaAnalysis, NativePlaybackSession, NativePlaybackStatus, OnboardingStatus, Preset,
         PreviewLibraryBulkMoveRequest, PreviewLibraryFileOperationRequest, QueueSettings,
         QueueSnapshot, SaveAuthenticationProfileRequest, SaveLibraryCollectionRequest,
         SaveLibraryCompareSessionRequest, SaveLibraryMediaStackRequest, SaveLibraryMomentRequest,
-        SaveLibraryPlaybackRequest, SaveLibraryRichMetadataRequest, SaveLibrarySmartViewRequest,
-        SaveLibrarySourceRequest, SavePresetRequest, SaveSitePresetRuleRequest,
-        SaveSubscriptionRequest, SetLibraryArtworkRequest, SitePresetRule, StartDownloadRequest,
-        StartLibraryClipExportRequest, StartTransformationRequest, Subscription,
-        SubscriptionCheckResult, TransformationOperation, TransformationTask,
+        SaveLibraryMontageRequest, SaveLibraryPlaybackRequest, SaveLibraryRichMetadataRequest,
+        SaveLibrarySmartViewRequest, SaveLibrarySourceRequest, SavePresetRequest,
+        SaveSitePresetRuleRequest, SaveSubscriptionRequest, SetLibraryArtworkRequest,
+        SitePresetRule, StartDownloadRequest, StartLibraryClipExportRequest,
+        StartLibraryMontageExportRequest, StartLocalShareRequest, StartTransformationRequest,
+        Subscription, SubscriptionCheckResult, TransformationOperation, TransformationTask,
         UpdateLibraryItemRequest,
     },
     queue::{disk_space, QueueManager},
     subscriptions,
-    transformations::TransformationManager,
+    transformations::{MontageInput, TransformationManager},
     utils::validation::{
         normalize_engine_preferences, validate_destination, validate_destination_writable,
         validate_engine_preferences, validate_media_url,
     },
+    visual_similarity::VisualSimilarityManager,
 };
 use std::{collections::HashSet, sync::Arc};
 use tauri::{AppHandle, Manager, State};
@@ -110,6 +115,95 @@ pub fn get_library_items_by_ids(
     ids: Vec<String>,
 ) -> Result<Vec<LibraryItem>, AppError> {
     database.list_library_items_by_ids(ids)
+}
+
+#[tauri::command]
+pub fn search_library_transcripts(
+    database: State<'_, Database>,
+    search: String,
+    limit: usize,
+) -> Result<Vec<LibraryTranscriptMatch>, AppError> {
+    database.search_library_transcripts(&search, limit)
+}
+
+#[tauri::command]
+pub fn get_library_transcript_index_status(
+    database: State<'_, Database>,
+) -> Result<LibraryTranscriptIndexStatus, AppError> {
+    database.library_transcript_index_status()
+}
+
+#[tauri::command]
+pub async fn rebuild_library_transcript_index(
+    library: State<'_, library::LibraryManager>,
+) -> Result<LibraryTranscriptIndexStatus, AppError> {
+    let library = library.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || library.rebuild_transcript_index())
+        .await
+        .map_err(|error| AppError::internal("transcript indexing worker stopped", error))?
+}
+
+#[tauri::command]
+pub fn get_library_visual_similarity_status(
+    database: State<'_, Database>,
+) -> Result<LibraryVisualSimilarityStatus, AppError> {
+    database.visual_similarity_status()
+}
+
+#[tauri::command]
+pub fn get_library_visual_similarity_job(
+    visual_similarity: State<'_, VisualSimilarityManager>,
+) -> Result<Option<LibraryVisualSimilarityJob>, AppError> {
+    visual_similarity.job()
+}
+
+#[tauri::command]
+pub fn start_library_visual_similarity_index(
+    app: AppHandle,
+    visual_similarity: State<'_, VisualSimilarityManager>,
+) -> Result<LibraryVisualSimilarityJob, AppError> {
+    visual_similarity.start(app)
+}
+
+#[tauri::command]
+pub fn cancel_library_visual_similarity_index(
+    visual_similarity: State<'_, VisualSimilarityManager>,
+    job_id: String,
+) -> Result<(), AppError> {
+    visual_similarity.cancel(&job_id)
+}
+
+#[tauri::command]
+pub fn find_visually_similar_library_items(
+    database: State<'_, Database>,
+    item_id: String,
+    limit: usize,
+    minimum_similarity_percent: f64,
+) -> Result<Vec<LibraryVisualSimilarityMatch>, AppError> {
+    database.find_visually_similar_items(&item_id, limit, minimum_similarity_percent)
+}
+
+#[tauri::command]
+pub async fn get_local_share_status(
+    local_share: State<'_, LocalShareManager>,
+) -> Result<Option<LocalShareSession>, AppError> {
+    Ok(local_share.status().await)
+}
+
+#[tauri::command]
+pub async fn start_local_share(
+    local_share: State<'_, LocalShareManager>,
+    request: StartLocalShareRequest,
+) -> Result<LocalShareSession, AppError> {
+    local_share.start(request).await
+}
+
+#[tauri::command]
+pub async fn stop_local_share(
+    local_share: State<'_, LocalShareManager>,
+    id: String,
+) -> Result<(), AppError> {
+    local_share.stop(&id).await
 }
 
 #[tauri::command]
@@ -209,8 +303,9 @@ pub fn open_library_native_playback(
     library: State<'_, library::LibraryManager>,
     native_player: State<'_, NativePlayerManager>,
     id: String,
+    start_at_seconds: Option<f64>,
 ) -> Result<NativePlaybackSession, AppError> {
-    match native_player.open(&id) {
+    match native_player.open(&id, start_at_seconds) {
         Ok(session) => Ok(session),
         Err(error) if error.code == "library_file_not_found" => {
             if let Err(mark_error) = library.mark_item_missing(&app, &id) {
@@ -479,6 +574,80 @@ pub fn save_library_moment(
 #[tauri::command]
 pub fn delete_library_moment(database: State<'_, Database>, id: String) -> Result<(), AppError> {
     database.delete_library_moment(&id)
+}
+
+#[tauri::command]
+pub fn list_library_montages(
+    database: State<'_, Database>,
+) -> Result<Vec<LibraryMontage>, AppError> {
+    database.list_library_montages()
+}
+
+#[tauri::command]
+pub fn save_library_montage(
+    database: State<'_, Database>,
+    request: SaveLibraryMontageRequest,
+) -> Result<LibraryMontage, AppError> {
+    database.save_library_montage(request)
+}
+
+#[tauri::command]
+pub fn delete_library_montage(database: State<'_, Database>, id: String) -> Result<(), AppError> {
+    database.delete_library_montage(&id)
+}
+
+#[tauri::command]
+pub fn start_library_montage_export(
+    app: AppHandle,
+    database: State<'_, Database>,
+    transformations: State<'_, TransformationManager>,
+    request: StartLibraryMontageExportRequest,
+) -> Result<TransformationTask, AppError> {
+    let montage = database.get_library_montage(&request.montage_id)?;
+    if montage.incomplete {
+        return Err(AppError::new(
+            "library_montage_incomplete",
+            "A source was removed from this montage. Review and save the repaired timeline before exporting.",
+        ));
+    }
+    let mut inputs = Vec::with_capacity(montage.segments.len());
+    for segment in montage.segments {
+        let item = database.get_library_item(&segment.item_id)?;
+        if item.missing
+            || !matches!(
+                item.media_kind,
+                Some(LibraryMediaKind::Video | LibraryMediaKind::Both)
+            )
+        {
+            return Err(AppError::new(
+                "library_montage_source_missing",
+                "A montage source is no longer available. Repair or remove that segment.",
+            ));
+        }
+        if let Some(duration) = item
+            .duration_seconds
+            .filter(|value| value.is_finite() && *value > 0.0)
+        {
+            if segment.end_seconds > duration + 1.0 {
+                return Err(AppError::new(
+                    "invalid_library_montage_range",
+                    "A montage segment no longer fits within its source video's duration.",
+                ));
+            }
+        }
+        inputs.push(MontageInput {
+            path: item.path,
+            start_seconds: segment.start_seconds,
+            end_seconds: segment.end_seconds,
+        });
+    }
+    transformations.start_montage(
+        app,
+        request.output_path,
+        request.overwrite,
+        montage.fade_seconds,
+        inputs,
+    )
 }
 
 #[tauri::command]

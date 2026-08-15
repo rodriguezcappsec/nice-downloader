@@ -9,6 +9,9 @@ export type ViewId =
   | "compare"
   | "imageCompare"
   | "curation"
+  | "montages"
+  | "similarity"
+  | "sharing"
   | "presets"
   | "settings";
 
@@ -385,7 +388,8 @@ export type TransformationOperation =
   | { type: "trim"; startSeconds: number; endSeconds: number }
   | { type: "extractAudio"; codec: "mp3" | "aac" | "opus" }
   | { type: "transcode"; container: string; videoCodec: "copy" | "h264" | "hevc" | "vp9" | "av1"; audioCodec: "copy" | "aac" | "opus" }
-  | { type: "splitChapters" };
+  | { type: "splitChapters" }
+  | { type: "montage"; segmentCount: number; totalDurationSeconds: number; fadeSeconds: number };
 
 export interface StartTransformationRequest {
   inputPath: string;
@@ -607,6 +611,59 @@ export interface LibraryPlaybackPreflight {
   requiresConfirmation: boolean;
 }
 
+export interface LibraryTranscriptMatch {
+  itemId: string;
+  startSeconds: number;
+  endSeconds: number;
+  text: string;
+  language?: string | null;
+}
+
+export interface LibraryTranscriptIndexStatus {
+  indexedItems: number;
+  cueCount: number;
+}
+
+export type LibraryVisualSimilarityState = "running" | "completed" | "failed" | "cancelled";
+
+export interface LibraryVisualSimilarityJob {
+  id: string;
+  state: LibraryVisualSimilarityState;
+  checkedItems: number;
+  totalItems: number;
+  indexedItems: number;
+  failedItems: number;
+  currentTitle?: string | null;
+  error?: string | null;
+  startedAt: string;
+  updatedAt: string;
+}
+
+export interface LibraryVisualSimilarityStatus {
+  eligibleItems: number;
+  indexedItems: number;
+  staleItems: number;
+}
+
+export interface LibraryVisualSimilarityMatch {
+  item: LibraryItem;
+  similarityPercent: number;
+  hammingDistance: number;
+}
+
+export interface StartLocalShareRequest {
+  itemIds: string[];
+  expiresMinutes: number;
+}
+
+export interface LocalShareSession {
+  id: string;
+  url: string;
+  itemCount: number;
+  expiresAt: string;
+  reachableOnLan: boolean;
+}
+
 export interface LibraryPlaybackPreparationProgress {
   itemId: string;
   phase: "queued" | "copying" | "encoding" | "finalizing";
@@ -696,6 +753,39 @@ export interface SaveLibraryMomentRequest {
   startSeconds: number;
   endSeconds?: number | null;
   color: LibraryMomentColor;
+}
+
+export interface LibraryMontageSegment {
+  itemId: string;
+  label: string;
+  startSeconds: number;
+  endSeconds: number;
+}
+
+export interface LibraryMontage {
+  id: string;
+  name: string;
+  notes: string;
+  fadeSeconds: number;
+  segments: LibraryMontageSegment[];
+  expectedSegmentCount: number;
+  incomplete: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SaveLibraryMontageRequest {
+  id?: string | null;
+  name: string;
+  notes: string;
+  fadeSeconds: number;
+  segments: LibraryMontageSegment[];
+}
+
+export interface StartLibraryMontageExportRequest {
+  montageId: string;
+  outputPath: string;
+  overwrite: boolean;
 }
 
 export interface StartLibraryClipExportRequest {

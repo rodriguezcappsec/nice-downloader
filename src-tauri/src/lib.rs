@@ -5,17 +5,21 @@ mod database;
 mod engines;
 mod errors;
 mod library;
+mod local_share;
 mod media_server;
 mod models;
 mod native_player;
 mod queue;
 mod subscriptions;
+mod transcripts;
 mod transformations;
 mod utils;
+mod visual_similarity;
 
 use crate::{
     creative::CreativeManager, database::Database, engines::managed, library::LibraryManager,
-    queue::QueueManager, transformations::TransformationManager,
+    local_share::LocalShareManager, queue::QueueManager, transformations::TransformationManager,
+    visual_similarity::VisualSimilarityManager,
 };
 use tauri::Manager;
 use tracing_subscriber::EnvFilter;
@@ -106,6 +110,8 @@ pub fn run() {
             }
             let queue = QueueManager::new(database.clone())?;
             let transformations = TransformationManager::new(database.clone())?;
+            let visual_similarity = VisualSimilarityManager::new(database.clone());
+            let local_share = LocalShareManager::new(database.clone());
             let creative = CreativeManager::new(
                 database.clone(),
                 data_directory.join("library-storyboards"),
@@ -124,6 +130,8 @@ pub fn run() {
             app.manage(database);
             app.manage(queue);
             app.manage(transformations);
+            app.manage(visual_similarity);
+            app.manage(local_share);
             app.manage(creative);
             app.manage(library);
             app.manage(media_server);
@@ -184,6 +192,17 @@ pub fn run() {
             commands::query_library_items,
             commands::get_library_facets,
             commands::get_library_items_by_ids,
+            commands::search_library_transcripts,
+            commands::get_library_transcript_index_status,
+            commands::rebuild_library_transcript_index,
+            commands::get_library_visual_similarity_status,
+            commands::get_library_visual_similarity_job,
+            commands::start_library_visual_similarity_index,
+            commands::cancel_library_visual_similarity_index,
+            commands::find_visually_similar_library_items,
+            commands::get_local_share_status,
+            commands::start_local_share,
+            commands::stop_local_share,
             commands::prepare_library_image_view,
             commands::inspect_library_playback,
             commands::prepare_library_playback,
@@ -229,6 +248,10 @@ pub fn run() {
             commands::list_library_moments,
             commands::save_library_moment,
             commands::delete_library_moment,
+            commands::list_library_montages,
+            commands::save_library_montage,
+            commands::delete_library_montage,
+            commands::start_library_montage_export,
             commands::list_library_compare_sessions,
             commands::save_library_compare_session,
             commands::delete_library_compare_session,

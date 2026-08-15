@@ -71,7 +71,11 @@ impl NativePlayerManager {
         }
     }
 
-    pub fn open(&self, item_id: &str) -> Result<NativePlaybackSession, AppError> {
+    pub fn open(
+        &self,
+        item_id: &str,
+        start_at_seconds: Option<f64>,
+    ) -> Result<NativePlaybackSession, AppError> {
         let executable = resolve_mpv().ok_or_else(|| {
             AppError::new(
                 "native_player_unavailable",
@@ -103,13 +107,29 @@ impl NativePlayerManager {
         }
 
         self.stop_active();
-        let saved = self.inner.database.get_library_playback(item_id)?;
-        let resumed_at_seconds = saved
-            .as_ref()
-            .filter(|state| !state.completed && state.position_seconds >= 5.0)
-            .map(|state| state.position_seconds)
-            .unwrap_or(0.0);
         let duration_seconds = item.duration_seconds.unwrap_or(0.0).max(0.0);
+        if start_at_seconds.is_some_and(|seconds| !seconds.is_finite() || seconds < 0.0) {
+            return Err(AppError::new(
+                "invalid_native_playback_start",
+                "The requested native playback timestamp is invalid.",
+            ));
+        }
+        let saved = self.inner.database.get_library_playback(item_id)?;
+        let resumed_at_seconds = start_at_seconds
+            .map(|seconds| {
+                if duration_seconds > 0.0 {
+                    seconds.min(duration_seconds)
+                } else {
+                    seconds
+                }
+            })
+            .or_else(|| {
+                saved
+                    .as_ref()
+                    .filter(|state| !state.completed && state.position_seconds >= 5.0)
+                    .map(|state| state.position_seconds)
+            })
+            .unwrap_or(0.0);
         let ipc_path = native_ipc_path();
         let _ = fs::remove_file(&ipc_path);
         let args = mpv_arguments(&path, &item.title, resumed_at_seconds, &ipc_path);
@@ -358,7 +378,7 @@ fn mpv_arguments(path: &Path, title: &str, start_seconds: f64, ipc_path: &Path) 
         format!("--title=Nice Downloader — {title}"),
         format!("--input-ipc-server={}", ipc_path.to_string_lossy()),
     ];
-    if start_seconds.is_finite() && start_seconds >= 5.0 {
+    if start_seconds.is_finite() && start_seconds > 0.0 {
         args.push(format!("--start={start_seconds:.3}"));
     }
     args.push("--".to_owned());
@@ -441,8 +461,16 @@ mod tests {
     }
 
     #[test]
-    fn omits_invalid_or_tiny_resume_positions() {
-        for position in [0.0, 4.999, f64::NAN, f64::INFINITY] {
+    fn supports_transcript_timestamps_and_omits_invalid_positions() {
+        let transcript_args = mpv_arguments(
+            Path::new("/tmp/video.mp4"),
+            "Video",
+            1.25,
+            Path::new("/tmp/player.sock"),
+        );
+        assert!(transcript_args.contains(&"--start=1.250".to_owned()));
+
+        for position in [0.0, f64::NAN, f64::INFINITY] {
             let args = mpv_arguments(
                 Path::new("/tmp/video.mp4"),
                 "Video",

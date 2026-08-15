@@ -503,6 +503,11 @@ pub enum TransformationOperation {
         audio_codec: TransformAudioCodec,
     },
     SplitChapters,
+    Montage {
+        segment_count: usize,
+        total_duration_seconds: f64,
+        fade_seconds: f64,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -972,6 +977,89 @@ pub struct LibraryProbeResult {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct LibraryTranscriptCue {
+    pub subtitle_name: String,
+    pub language: Option<String>,
+    pub start_seconds: f64,
+    pub end_seconds: f64,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryTranscriptMatch {
+    pub item_id: String,
+    pub start_seconds: f64,
+    pub end_seconds: f64,
+    pub text: String,
+    pub language: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryTranscriptIndexStatus {
+    pub indexed_items: usize,
+    pub cue_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum LibraryVisualSimilarityState {
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryVisualSimilarityJob {
+    pub id: String,
+    pub state: LibraryVisualSimilarityState,
+    pub checked_items: usize,
+    pub total_items: usize,
+    pub indexed_items: usize,
+    pub failed_items: usize,
+    pub current_title: Option<String>,
+    pub error: Option<String>,
+    pub started_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryVisualSimilarityStatus {
+    pub eligible_items: usize,
+    pub indexed_items: usize,
+    pub stale_items: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryVisualSimilarityMatch {
+    pub item: LibraryItem,
+    pub similarity_percent: f64,
+    pub hamming_distance: u32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartLocalShareRequest {
+    pub item_ids: Vec<String>,
+    pub expires_minutes: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalShareSession {
+    pub id: String,
+    pub url: String,
+    pub item_count: usize,
+    pub expires_at: DateTime<Utc>,
+    pub reachable_on_lan: bool,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LibraryCacheResult {
@@ -1043,6 +1131,48 @@ pub struct SaveLibraryMomentRequest {
     pub start_seconds: f64,
     pub end_seconds: Option<f64>,
     pub color: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryMontageSegment {
+    pub item_id: String,
+    pub label: String,
+    pub start_seconds: f64,
+    pub end_seconds: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryMontage {
+    pub id: String,
+    pub name: String,
+    pub notes: String,
+    pub fade_seconds: f64,
+    pub segments: Vec<LibraryMontageSegment>,
+    pub expected_segment_count: usize,
+    pub incomplete: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveLibraryMontageRequest {
+    pub id: Option<String>,
+    pub name: String,
+    pub notes: String,
+    pub fade_seconds: f64,
+    pub segments: Vec<LibraryMontageSegment>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartLibraryMontageExportRequest {
+    pub montage_id: String,
+    pub output_path: String,
+    #[serde(default)]
+    pub overwrite: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]

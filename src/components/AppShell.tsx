@@ -1,6 +1,7 @@
 import {
   Activity,
   Clock3,
+  Clapperboard,
   Download,
   History,
   House,
@@ -14,9 +15,11 @@ import {
   Plus,
   Rss,
   Search,
+  ScanSearch,
   Settings,
   SlidersHorizontal,
   SquarePlay,
+  Share2,
   WandSparkles,
   type LucideIcon,
 } from "lucide-react";
@@ -35,6 +38,8 @@ const mediaNavigation: NavigationItem[] = [
   { id: "compare", label: "Compare videos", icon: LayoutGrid },
   { id: "imageCompare", label: "Compare images", icon: Images },
   { id: "curation", label: "Review library", icon: ListChecks },
+  { id: "montages", label: "Build montages", icon: Clapperboard },
+  { id: "similarity", label: "Find similar media", icon: ScanSearch },
 ];
 
 const downloadNavigation: NavigationItem[] = [
@@ -47,6 +52,7 @@ const downloadNavigation: NavigationItem[] = [
 
 const toolNavigation: NavigationItem[] = [
   { id: "transformations", label: "Transform media", icon: WandSparkles },
+  { id: "sharing", label: "Share temporarily", icon: Share2 },
   { id: "presets", label: "Download presets", icon: SlidersHorizontal },
 ];
 

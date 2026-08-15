@@ -5,6 +5,7 @@ import {
   Ban,
   BellDot,
   Bookmark,
+  Captions,
   Check,
   Copy,
   ChevronRight,
@@ -32,6 +33,7 @@ import {
   Eraser,
   ExternalLink,
   Maximize,
+  Minimize2,
   RotateCcw,
   RotateCw,
   Save,
@@ -41,7 +43,10 @@ import {
   Star,
   Tags,
   Settings2,
+  SkipBack,
+  SkipForward,
   Trash2,
+  Tv,
   Undo2,
   X,
   ZoomIn,
@@ -50,6 +55,7 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Button, Field, Input, Select, Textarea } from "../../components/ui";
 import { formatBytes, formatDuration } from "../../lib/format";
+import { assessEmbeddedCompatibility, formatMediaCodec } from "../../lib/media-compatibility";
 import { canOfferPlaybackFallback, createPlaybackError, EMBEDDED_PLAYBACK_TIMEOUT_MS } from "../../lib/playback";
 import { api, normalizeError } from "../../lib/tauri";
 import { useAppStore } from "../../stores/app-store";
@@ -84,6 +90,8 @@ import type {
   LibraryPlaylist,
   LibraryRichMetadata,
   LibrarySearchStatus,
+  LibraryTranscriptIndexStatus,
+  LibraryTranscriptMatch,
   LibrarySmartView,
   LibrarySmartViewQuery,
   LibraryWatchState,
@@ -107,6 +115,7 @@ const WATCH_BROWSE_PAGE_SIZE = 24;
 const EMPTY_LIBRARY_RESULT: LibraryQueryResult = { items: [], totalItems: 0, page: 1, pageSize: LIBRARY_PAGE_SIZE, totalPages: 1 };
 const EMPTY_LIBRARY_FACETS: LibraryFacets = { totalItems: 0, availableItems: 0, missingItems: 0, containers: [], tags: [], creators: [], series: [], sites: [], folders: [] };
 type LiveAnnouncement = { signature: string; message: string; assertive?: boolean };
+type TranscriptSeekRequest = { id: number; itemId: string; seconds: number };
 
 export function LibraryPage({ active = true }: { active?: boolean }) {
   const setError = useAppStore((state) => state.setError);
@@ -136,6 +145,12 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
   const [smartViewBusy, setSmartViewBusy] = useState(false);
   const [confirmDeleteSmartViewId, setConfirmDeleteSmartViewId] = useState<string | null>(null);
   const [searchStatus, setSearchStatus] = useState<LibrarySearchStatus | null>(null);
+  const [transcriptStatus, setTranscriptStatus] = useState<LibraryTranscriptIndexStatus | null>(null);
+  const [transcriptMatches, setTranscriptMatches] = useState<LibraryTranscriptMatch[]>([]);
+  const [transcriptItems, setTranscriptItems] = useState<Map<string, LibraryItem>>(new Map());
+  const [transcriptLoading, setTranscriptLoading] = useState(false);
+  const [transcriptRebuilding, setTranscriptRebuilding] = useState(false);
+  const [transcriptRevision, setTranscriptRevision] = useState(0);
   const [playlists, setPlaylists] = useState<LibraryPlaylist[]>([]);
   const [mediaStacks, setMediaStacks] = useState<LibraryMediaStack[]>([]);
   const [activeMediaStack, setActiveMediaStack] = useState<LibraryMediaStack | null>(null);
@@ -178,6 +193,7 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
   const [selectedItem, setSelectedItem] = useState<LibraryItem | null>(null);
   const [detailsExtraItems, setDetailsExtraItems] = useState<LibraryItem[]>([]);
   const [watchItem, setWatchItem] = useState<LibraryItem | null>(null);
+  const [transcriptSeekRequest, setTranscriptSeekRequest] = useState<TranscriptSeekRequest | null>(null);
   const [viewImage, setViewImage] = useState<LibraryItem | null>(null);
   const [watchMinimized, setWatchMinimized] = useState(false);
   const [watchSearch, setWatchSearch] = useState("");
@@ -206,6 +222,7 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
   const sourceFormReturnFocus = useRef<HTMLElement | null>(null);
   const playlistLoadRevision = useRef(0);
   const mediaStackLoadRevision = useRef(0);
+  const transcriptSeekSequence = useRef(0);
 
   function activeElement(): HTMLElement | null {
     return document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -225,15 +242,36 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
     if (!active && watchItem) setWatchMinimized(true);
   }, [active, watchItem]);
 
-  function startWatching(item: LibraryItem, queue: LibraryItem[] | null = null) {
+  function startWatching(item: LibraryItem, queue: LibraryItem[] | null = null, startAtSeconds?: number) {
     setViewImage(null);
     imageReturnFocus.current = null;
+    setTranscriptSeekRequest(Number.isFinite(startAtSeconds)
+      ? { id: ++transcriptSeekSequence.current, itemId: item.id, seconds: Math.max(0, startAtSeconds!) }
+      : null);
     setWatchItem(item);
     setPlaybackContext(queue);
     if (queue) setWatchSearch("");
     setWatchMinimized(false);
     setView("library");
     window.setTimeout(() => document.getElementById("main-content")?.scrollTo({ top: 0 }), 0);
+  }
+
+  async function rebuildTranscriptIndex() {
+    if (transcriptRebuilding) return;
+    setTranscriptRebuilding(true);
+    try {
+      const status = await api.rebuildLibraryTranscriptIndex();
+      setTranscriptStatus(status);
+      setTranscriptRevision((revision) => revision + 1);
+      setNotice({
+        message: `Indexed ${status.cueCount.toLocaleString()} subtitle cue${status.cueCount === 1 ? "" : "s"} across ${status.indexedItems.toLocaleString()} video${status.indexedItems === 1 ? "" : "s"}.`,
+        view: "library",
+      });
+    } catch (error) {
+      setError(normalizeError(error));
+    } finally {
+      setTranscriptRebuilding(false);
+    }
   }
 
   function startViewingImage(item: LibraryItem, returnTarget = activeElement()) {
@@ -480,10 +518,12 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
       setScanJobs((current) => upsertById(current, job));
       announceScan(job);
       if (job.state !== "running") {
-        void Promise.all([api.listLibrarySources(), api.getLibrarySearchStatus()]).then(([nextSources, nextSearchStatus]) => {
+        void Promise.all([api.listLibrarySources(), api.getLibrarySearchStatus(), api.getLibraryTranscriptIndexStatus()]).then(([nextSources, nextSearchStatus, nextTranscriptStatus]) => {
           if (!disposed) {
             setSources(nextSources);
             setSearchStatus(nextSearchStatus);
+            setTranscriptStatus(nextTranscriptStatus);
+            setTranscriptRevision((revision) => revision + 1);
             scheduleLibraryRefresh(0);
           }
         });
@@ -517,6 +557,40 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
     const timer = window.setTimeout(() => setDebouncedSearch(search.trim()), 250);
     return () => window.clearTimeout(timer);
   }, [search]);
+
+  useEffect(() => {
+    void api.getLibraryTranscriptIndexStatus()
+      .then(setTranscriptStatus)
+      .catch(() => setTranscriptStatus(null));
+  }, []);
+
+  useEffect(() => {
+    const query = debouncedSearch.trim();
+    if (query.length < 2) {
+      setTranscriptMatches([]);
+      setTranscriptItems(new Map());
+      setTranscriptLoading(false);
+      return;
+    }
+    let disposed = false;
+    setTranscriptLoading(true);
+    void api.searchLibraryTranscripts(query, 12)
+      .then(async (matches) => {
+        const ids = Array.from(new Set(matches.map((match) => match.itemId)));
+        const items = ids.length > 0 ? await api.getLibraryItemsByIds(ids) : [];
+        if (disposed) return;
+        setTranscriptMatches(matches);
+        setTranscriptItems(new Map(items.map((item) => [item.id, item])));
+      })
+      .catch(() => {
+        if (!disposed) {
+          setTranscriptMatches([]);
+          setTranscriptItems(new Map());
+        }
+      })
+      .finally(() => { if (!disposed) setTranscriptLoading(false); });
+    return () => { disposed = true; };
+  }, [debouncedSearch, transcriptRevision]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => setWatchDebouncedSearch(watchSearch.trim()), 250);
@@ -1352,6 +1426,7 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
     compact={compactPlayer}
     autoplayNext={autoplayNext}
     playlists={playlists}
+    seekRequest={transcriptSeekRequest?.itemId === watchItem.id ? transcriptSeekRequest : null}
     onSearch={setWatchSearch}
     onBack={minimizeWatching}
     onRestore={restoreWatching}
@@ -1485,7 +1560,21 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
 
       {tagFilters.length + creatorFilters.length + seriesFilters.length + siteFilters.length > 0 ? <div className="mt-1 flex flex-wrap items-center gap-2" aria-label="Active Library filters"><span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted">Matching any within each group</span>{tagFilters.map((value) => <ActiveFilterChip key={`tag:${value}`} label={`#${value}`} onRemove={() => setTagFilters((current) => current.filter((item) => item !== value))} />)}{creatorFilters.map((value) => <ActiveFilterChip key={`creator:${value}`} label={`Creator: ${value}`} onRemove={() => setCreatorFilters((current) => current.filter((item) => item !== value))} />)}{seriesFilters.map((value) => <ActiveFilterChip key={`series:${value}`} label={`Series: ${value}`} onRemove={() => setSeriesFilters((current) => current.filter((item) => item !== value))} />)}{siteFilters.map((value) => <ActiveFilterChip key={`site:${value}`} label={`Site: ${value}`} onRemove={() => setSiteFilters((current) => current.filter((item) => item !== value))} />)}<button className="text-[11px] font-medium text-muted hover:text-ink" onClick={() => { setTagFilters([]); setCreatorFilters([]); setSeriesFilters([]); setSiteFilters([]); }}>Clear groups</button></div> : null}
 
-      {activeMediaStack ? (
+        {debouncedSearch.length >= 2 ? <TranscriptSearchResults
+          query={debouncedSearch}
+          matches={transcriptMatches}
+          items={transcriptItems}
+          loading={transcriptLoading}
+          status={transcriptStatus}
+          rebuilding={transcriptRebuilding}
+          onRebuild={() => void rebuildTranscriptIndex()}
+          onSelect={(match, item) => {
+            setSelectedItem(null);
+            startWatching(item, null, match.startSeconds);
+          }}
+        /> : null}
+
+        {activeMediaStack ? (
         <MediaStackWorkspace stack={activeMediaStack} items={activeMediaStackItems} loading={mediaStackLoading} onBack={closeMediaStack} onSelect={openDetails} onOpen={(item) => item.mediaKind === "video" ? startWatching(item, activeMediaStackItems.filter((candidate) => candidate.mediaKind === "video" && !candidate.missing)) : startViewingImage(item)} />
       ) : activePlaylist ? (
         <PlaylistWorkspace
@@ -1633,8 +1722,15 @@ function EmptyLibrary({ onAdd }: { onAdd: () => void }) {
   return <section className="relative mt-8 min-h-[460px] overflow-hidden bg-panel/55 px-8 py-14"><div className="absolute -right-24 -top-28 size-[32rem] rounded-full bg-accent/8 blur-3xl" /><div className="relative max-w-xl"><div className="mb-7 grid size-16 place-items-center rounded-[16px] bg-accent text-[#081426] shadow-[0_18px_50px_rgb(var(--accent)/0.2)]"><Play size={27} fill="currentColor" /></div><p className="text-xs font-semibold text-accent">Your private media home</p><h2 className="mt-3 text-[40px] font-semibold leading-[1.05] tracking-[-0.055em] text-balance">Bring every video and image into one library.</h2><p className="mt-5 max-w-lg text-[14px] leading-6 text-muted">Add folders from this computer or an external drive. Nice Downloader indexes them in place, so your originals stay exactly where they are.</p><Button className="mt-7 h-11" onClick={onAdd}><FolderPlus size={17} /> Add your first folder</Button></div></section>;
 }
 
+function TranscriptSearchResults({ query, matches, items, loading, status, rebuilding, onRebuild, onSelect }: { query: string; matches: LibraryTranscriptMatch[]; items: Map<string, LibraryItem>; loading: boolean; status: LibraryTranscriptIndexStatus | null; rebuilding: boolean; onRebuild: () => void; onSelect: (match: LibraryTranscriptMatch, item: LibraryItem) => void }) {
+  return <section className="mt-5 overflow-hidden rounded-[11px] border border-line/60 bg-panel/45" aria-labelledby="transcript-results-title" aria-busy={loading || rebuilding}>
+    <header className="flex flex-wrap items-center gap-3 border-b border-line/55 px-4 py-3"><span className="grid size-8 place-items-center rounded-[7px] bg-accent/10 text-accent"><Captions size={16} /></span><span className="min-w-0 flex-1"><h2 id="transcript-results-title" className="text-xs font-semibold">Spoken in your videos</h2><p className="mt-0.5 text-[10px] text-muted">Searches trusted local WebVTT subtitles · {status ? `${status.cueCount.toLocaleString()} cues in ${status.indexedItems.toLocaleString()} videos` : "index status unavailable"}</p></span><Button variant="ghost" className="h-8 text-xs" disabled={rebuilding} onClick={onRebuild}>{rebuilding ? <LoaderCircle className="animate-spin" size={13} /> : <RotateCcw size={13} />} {status?.cueCount ? "Refresh subtitles" : "Index subtitles"}</Button></header>
+    {loading ? <p className="flex items-center gap-2 px-4 py-5 text-xs text-muted" role="status"><LoaderCircle className="animate-spin text-accent" size={14} /> Searching subtitle text…</p> : matches.length > 0 ? <div className="grid divide-y divide-line/45">{matches.map((match, index) => { const item = items.get(match.itemId); return <button key={`${match.itemId}-${match.startSeconds}-${index}`} className="group grid min-w-0 grid-cols-[70px_minmax(0,1fr)_auto] items-center gap-3 px-4 py-3 text-left transition hover:bg-elevated/55 disabled:cursor-not-allowed disabled:opacity-55" disabled={!item} onClick={() => item && onSelect(match, item)}><span className="text-center"><span className="number-font block rounded-[6px] bg-elevated px-2 py-1 text-[10px] font-semibold text-accent">{formatDuration(match.startSeconds)}</span>{match.language ? <span className="mt-1 block text-[9px] font-semibold uppercase tracking-[0.08em] text-muted">{match.language}</span> : null}</span><span className="min-w-0"><strong className="block truncate text-[11px] font-semibold text-ink">{item?.title || "Loading video…"}</strong><span className="mt-1 line-clamp-2 block text-[11px] leading-4 text-muted">“{match.text}”</span></span><span className="flex items-center gap-1 text-[10px] font-semibold text-muted transition group-hover:text-accent"><Play size={12} fill="currentColor" /> Play</span></button>; })}</div> : <div className="flex flex-wrap items-center gap-3 px-4 py-5 text-xs text-muted"><span className="flex-1">{status?.cueCount ? `No subtitle text matched “${query}”.` : "No subtitle cues are indexed yet. Scan your sources or index existing WebVTT tracks now."}</span>{!status?.cueCount ? <Button variant="secondary" className="h-8 text-xs" disabled={rebuilding} onClick={onRebuild}>{rebuilding ? <LoaderCircle className="animate-spin" size={13} /> : <Captions size={13} />} Index subtitles</Button> : null}</div>}
+  </section>;
+}
+
 function FeaturedMedia({ item, sourceName, onSelect, onWatch }: { item: LibraryItem; sourceName: string; onSelect: () => void; onWatch: () => void }) {
-  return <section className="relative mt-6 grid min-h-[330px] overflow-hidden bg-panel lg:grid-cols-[1.4fr_1fr]"><div className="absolute inset-0 opacity-20"><MediaArtwork item={item} eager /></div><div className="absolute inset-0 bg-gradient-to-r from-canvas via-canvas/95 to-canvas/25" /><div className="relative z-[1] flex flex-col justify-end px-7 py-9 lg:px-10"><p className="text-[11px] font-semibold text-accent">Recently added</p><h2 className="mt-3 max-w-2xl text-[34px] font-semibold leading-[1.08] tracking-[-0.045em] text-balance">{item.title}</h2><p className="mt-3 text-sm text-muted">{sourceName}{item.durationSeconds != null ? ` · ${formatDuration(item.durationSeconds)}` : ""} · {new Date(item.addedAt).toLocaleDateString()}</p><div className="mt-6 flex gap-2"><Button onClick={onWatch}><Play size={16} fill="currentColor" /> {item.mediaKind === "image" ? "View image" : "Watch"}</Button><Button variant="secondary" onClick={onSelect}>Details</Button></div></div><button className="group relative z-[1] m-6 hidden overflow-hidden rounded-[12px] bg-elevated shadow-[0_25px_70px_rgb(0_0_0/0.35)] lg:block" onClick={onWatch} aria-label={`Open ${item.title}`}><MediaArtwork item={item} eager /><span className="absolute inset-0 grid place-items-center bg-black/0 transition group-hover:bg-black/25"><span className="grid size-14 scale-90 place-items-center rounded-full bg-white/90 text-black opacity-0 shadow-xl transition group-hover:scale-100 group-hover:opacity-100"><Play size={22} fill="currentColor" /></span></span></button></section>;
+  return <section className="relative mt-6 grid min-h-[330px] overflow-hidden bg-panel lg:grid-cols-[1.4fr_1fr]"><div className="absolute inset-0 opacity-20"><MediaArtwork item={item} eager /></div><div className="absolute inset-0 bg-gradient-to-r from-canvas via-canvas/95 to-canvas/25" /><div className="relative z-[1] flex flex-col justify-end px-7 py-9 lg:px-10"><p className="text-[11px] font-semibold text-accent">Recently added</p><h2 className="mt-3 max-w-2xl text-[34px] font-semibold leading-[1.08] tracking-[-0.045em] text-balance">{item.title}</h2><p className="mt-3 text-sm text-muted">{sourceName}{item.durationSeconds != null ? ` · ${formatDuration(item.durationSeconds)}` : ""} · {new Date(item.addedAt).toLocaleDateString()}</p>{item.mediaKind === "video" ? <div className="mt-4"><EmbeddedCompatibilityLabel item={item} variant="badge" /></div> : null}<div className="mt-6 flex gap-2"><Button onClick={onWatch}><Play size={16} fill="currentColor" /> {item.mediaKind === "image" ? "View image" : "Watch"}</Button><Button variant="secondary" onClick={onSelect}>Details</Button></div></div><button className="group relative z-[1] m-6 hidden overflow-hidden rounded-[12px] bg-elevated shadow-[0_25px_70px_rgb(0_0_0/0.35)] lg:block" onClick={onWatch} aria-label={`Open ${item.title}`}><MediaArtwork item={item} eager /><span className="absolute inset-0 grid place-items-center bg-black/0 transition group-hover:bg-black/25"><span className="grid size-14 scale-90 place-items-center rounded-full bg-white/90 text-black opacity-0 shadow-xl transition group-hover:scale-100 group-hover:opacity-100"><Play size={22} fill="currentColor" /></span></span></button></section>;
 }
 
 function MediaStackShelf({ stacks, onOpen, onChanged }: { stacks: LibraryMediaStack[]; onOpen: (stack: LibraryMediaStack) => void; onChanged: (stacks: LibraryMediaStack[]) => void }) {
@@ -1821,6 +1917,7 @@ function MediaCard({ item, sourceName, onSelect, progress, selectionMode = false
           {item.durationSeconds != null && quality ? <span className="absolute bottom-2 left-2 rounded-[4px] bg-black/75 px-1.5 py-0.5 text-[9px] font-semibold text-white/90">{quality}</span> : null}
           {item.favorite ? <span className="absolute left-2 top-2 grid size-6 place-items-center rounded-[5px] bg-black/70 text-rose-300"><Heart size={13} fill="currentColor" /></span> : null}
           {item.metadataState === "pending" ? <span className="absolute right-2 top-2 grid size-6 place-items-center rounded-[5px] bg-black/70 text-white/80" title="Inspecting media"><LoaderCircle className="animate-spin" size={12} /></span> : null}
+          {item.mediaKind === "video" && item.metadataState !== "pending" ? <EmbeddedCompatibilityLabel item={item} variant="overlay" /> : null}
           {item.missing ? <span className="absolute left-2 top-2 bg-red-500/90 px-2 py-1 text-[9px] font-bold uppercase tracking-wider text-white">Missing</span> : null}
           {progress != null ? <span className="absolute inset-x-0 bottom-0 h-1 bg-black/60"><span className="block h-full bg-accent" style={{ width: `${progress}%` }} /></span> : null}
         </div>
@@ -1845,6 +1942,31 @@ function MediaArtwork({ item, eager = false }: { item: LibraryItem; eager?: bool
   const variant = item.id.charCodeAt(0) % 3;
   const background = variant === 0 ? "from-[#1b2b45] via-[#172235] to-[#101419]" : variant === 1 ? "from-[#33291d] via-[#26231d] to-[#111417]" : "from-[#202b3a] via-[#1b252f] to-[#101419]";
   return <div className={`relative grid h-full w-full place-items-center bg-gradient-to-br ${background}`}><div className="absolute inset-0 opacity-[0.08] [background-image:radial-gradient(circle_at_center,white_1px,transparent_1px)] [background-size:18px_18px]" />{item.mediaKind === "image" ? <FileImage className="relative text-white/35" size={34} /> : <FileVideo className="relative text-white/35" size={34} />}</div>;
+}
+
+function EmbeddedCompatibilityLabel({ item, preflight, variant = "panel" }: { item: LibraryItem; preflight?: LibraryPlaybackPreflight | null; variant?: "badge" | "overlay" | "panel" }) {
+  const assessment = assessEmbeddedCompatibility(item, preflight);
+  const tone = assessment.kind === "expected"
+    ? "border-emerald-300/25 bg-emerald-400/12 text-emerald-300"
+    : assessment.kind === "copy"
+      ? "border-accent/25 bg-accent/10 text-accent"
+      : assessment.kind === "native"
+        ? "border-amber-300/25 bg-amber-400/12 text-amber-200"
+        : "border-white/15 bg-black/65 text-white/70";
+  const icon = assessment.kind === "expected"
+    ? <Check size={variant === "panel" ? 17 : 11} />
+    : assessment.kind === "native"
+      ? <MonitorPlay size={variant === "panel" ? 17 : 11} />
+      : assessment.kind === "copy"
+        ? <Copy size={variant === "panel" ? 17 : 11} />
+        : <Film size={variant === "panel" ? 17 : 11} />;
+  const videoCodec = formatMediaCodec(item.videoCodec);
+
+  if (variant !== "panel") {
+    return <span className={`${variant === "overlay" ? "absolute right-2 top-2 z-[1] max-w-[calc(100%-1rem)]" : "relative"} inline-flex h-6 items-center gap-1.5 rounded-[5px] border px-2 text-[9px] font-semibold backdrop-blur-md ${tone}`} title={`${assessment.heading}. ${assessment.codecSummary}. ${assessment.detail}`}>{icon}<span className="truncate">{videoCodec ? `${videoCodec} · ` : ""}{assessment.badge}</span></span>;
+  }
+
+  return <section className={`mt-4 flex items-start gap-3 rounded-[9px] border p-3 ${tone}`} aria-label="Embedded playback compatibility"><span className="mt-0.5 shrink-0">{icon}</span><span className="min-w-0"><strong className="block text-xs font-semibold">{assessment.heading}</strong><span className="mt-1 block text-[10px] font-medium opacity-90">{assessment.codecSummary}</span><span className="mt-1 block text-[10px] leading-4 opacity-75">{assessment.detail}</span></span></section>;
 }
 
 function ImageWorkspace({ item, sourceName, position, total, shortcutsEnabled, onBack, onDetails, onPrevious, onNext }: {
@@ -2079,7 +2201,7 @@ function ImageWorkspace({ item, sourceName, position, total, shortcutsEnabled, o
   </div>;
 }
 
-function WatchWorkspace({ item, sourceName, browseItems, browseTotal, browsePage, browsePages, browseLoading, search, sourceNames, compact, autoplayNext, playlists, onSearch, onBack, onRestore, onClose, onDetails, onSelectVideo, onPrevious, onNext, onAutoplayNext, onPlaylistChanged, onPlaybackEnded, onBrowsePage }: {
+function WatchWorkspace({ item, sourceName, browseItems, browseTotal, browsePage, browsePages, browseLoading, search, sourceNames, compact, autoplayNext, playlists, seekRequest, onSearch, onBack, onRestore, onClose, onDetails, onSelectVideo, onPrevious, onNext, onAutoplayNext, onPlaylistChanged, onPlaybackEnded, onBrowsePage }: {
   item: LibraryItem;
   sourceName: string;
   browseItems: LibraryItem[];
@@ -2092,6 +2214,7 @@ function WatchWorkspace({ item, sourceName, browseItems, browseTotal, browsePage
   compact: boolean;
   autoplayNext: boolean;
   playlists: LibraryPlaylist[];
+  seekRequest: TranscriptSeekRequest | null;
   onSearch: (value: string) => void;
   onBack: () => void;
   onRestore: () => void;
@@ -2105,19 +2228,45 @@ function WatchWorkspace({ item, sourceName, browseItems, browseTotal, browsePage
   onPlaybackEnded?: () => void;
   onBrowsePage: (page: number) => void;
 }) {
-  return <section className={compact ? "fixed bottom-5 right-5 z-[65] w-[min(420px,calc(100vw-32px))]" : "mx-auto w-full max-w-[1640px] px-6 pb-12 pt-5 xl:px-8"} aria-label={compact ? "Mini player" : "Watch workspace"}>
+  const [leanBack, setLeanBack] = useState(false);
+  const leanBackReturnFocus = useRef<HTMLElement | null>(null);
+
+  function enterLeanBack() {
+    leanBackReturnFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setLeanBack(true);
+  }
+
+  function exitLeanBack() {
+    setLeanBack(false);
+  }
+
+  useEffect(() => {
+    if (!leanBack) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    window.requestAnimationFrame(() => document.querySelector<HTMLElement>("[data-lean-back-exit]")?.focus());
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.requestAnimationFrame(() => {
+        if (leanBackReturnFocus.current?.isConnected) leanBackReturnFocus.current.focus();
+      });
+    };
+  }, [leanBack]);
+
+  useEffect(() => {
+    if (compact) setLeanBack(false);
+  }, [compact]);
+
+  return <section className={leanBack ? "fixed inset-0 z-[80] flex min-h-0 flex-col bg-[#030406] px-5 pb-5 text-white sm:px-8 sm:pb-8" : compact ? "fixed bottom-5 right-5 z-[65] w-[min(420px,calc(100vw-32px))]" : "mx-auto w-full max-w-[1640px] px-6 pb-12 pt-5 xl:px-8"} aria-label={leanBack ? "Lean-back player" : compact ? "Mini player" : "Watch workspace"}>
     <LibraryLiveRegions polite="" assertive="" />
-    <header className={`${compact ? "hidden" : "sticky"} top-0 z-10 -mx-2 mb-5 flex items-center gap-4 bg-canvas/92 px-2 py-3 backdrop-blur-xl`}>
-      <button autoFocus className="flex h-10 shrink-0 items-center gap-2 rounded-[8px] px-2.5 text-xs font-semibold text-muted transition hover:bg-elevated hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70" onClick={onBack}><ChevronRight className="rotate-180" size={16} /> Library</button>
-      <div className="h-6 w-px bg-line/70" />
-      <div className="min-w-0"><p className="text-[10px] font-medium text-accent">Now watching</p><h1 className="max-w-xl truncate text-sm font-semibold tracking-[-0.02em]">{item.title}</h1></div>
-      <label className="relative ml-auto w-full max-w-md"><span className="sr-only">Search videos while watching</span><Search className="absolute left-3.5 top-3 text-muted" size={15} /><Input className="h-10 rounded-[9px] bg-panel/85 pl-10 text-xs shadow-control" value={search} onChange={(event) => onSearch(event.target.value)} placeholder="Find another video" /></label>
+    <header className={`${compact ? "hidden" : leanBack ? "flex" : "sticky"} top-0 z-10 -mx-2 mb-5 items-center gap-4 px-2 py-3 ${leanBack ? "min-h-20 bg-[#030406]" : "bg-canvas/92 backdrop-blur-xl"}`}>
+      {leanBack ? <><div className="grid size-11 shrink-0 place-items-center rounded-full bg-accent/15 text-accent"><Tv size={21} /></div><div className="min-w-0 flex-1"><p className="text-[11px] font-semibold uppercase tracking-[0.15em] text-accent">Lean-back mode</p><h1 className="mt-1 truncate text-lg font-semibold tracking-[-0.025em] sm:text-2xl">{item.title}</h1></div><p className="hidden text-xs text-white/45 lg:block">Keyboard or gamepad supported</p><Button data-lean-back-exit variant="secondary" className="h-12 shrink-0 border-white/10 bg-white/10 px-5 text-white hover:bg-white/15" onClick={exitLeanBack}><Minimize2 size={18} /> Exit</Button></> : <><button autoFocus className="flex h-10 shrink-0 items-center gap-2 rounded-[8px] px-2.5 text-xs font-semibold text-muted transition hover:bg-elevated hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70" onClick={onBack}><ChevronRight className="rotate-180" size={16} /> Library</button><div className="h-6 w-px bg-line/70" /><div className="min-w-0"><p className="text-[10px] font-medium text-accent">Now watching</p><h1 className="max-w-xl truncate text-sm font-semibold tracking-[-0.02em]">{item.title}</h1></div><Button variant="secondary" className="ml-auto h-10 shrink-0" onClick={enterLeanBack}><Tv size={16} /> Lean back</Button><label className="relative w-full max-w-md"><span className="sr-only">Search videos while watching</span><Search className="absolute left-3.5 top-3 text-muted" size={15} /><Input className="h-10 rounded-[9px] bg-panel/85 pl-10 text-xs shadow-control" value={search} onChange={(event) => onSearch(event.target.value)} placeholder="Find another video" /></label></>}
     </header>
 
-    <div className={compact ? "block" : "grid min-w-0 gap-6 xl:grid-cols-[minmax(0,1fr)_370px] 2xl:grid-cols-[minmax(0,1fr)_410px]"}>
-      <article className="min-w-0">
-        <EmbeddedVideoPlayer key={item.id} item={item} sourceName={sourceName} compact={compact} onRestore={onRestore} onClose={onClose} onPrevious={onPrevious} onNext={onNext} onPlaybackEnded={onPlaybackEnded} />
-        <section className={`${compact ? "hidden" : "block"} mt-5 border-b border-line/60 pb-6`} aria-labelledby="watch-title">
+    <div className={leanBack ? "flex min-h-0 flex-1" : compact ? "block" : "grid min-w-0 gap-6 xl:grid-cols-[minmax(0,1fr)_370px] 2xl:grid-cols-[minmax(0,1fr)_410px]"}>
+      <article className={leanBack ? "flex min-h-0 min-w-0 flex-1 flex-col" : "min-w-0"}>
+        <EmbeddedVideoPlayer key={item.id} item={item} sourceName={sourceName} compact={compact} leanBack={leanBack} seekRequest={seekRequest} onRestore={onRestore} onClose={onClose} onExitLeanBack={exitLeanBack} onPrevious={onPrevious} onNext={onNext} onPlaybackEnded={onPlaybackEnded} />
+        <section className={`${compact || leanBack ? "hidden" : "block"} mt-5 border-b border-line/60 pb-6`} aria-labelledby="watch-title">
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div className="min-w-0 max-w-4xl"><h2 id="watch-title" className="text-[24px] font-semibold leading-tight tracking-[-0.035em] text-balance">{item.title}</h2><p className="mt-2 text-xs text-muted">{sourceName}{item.durationSeconds != null ? ` · ${formatDuration(item.durationSeconds)}` : ""}{item.container ? ` · ${item.container.toLocaleUpperCase()}` : ""}{item.width && item.height ? ` · ${item.width} × ${item.height}` : ""}</p></div>
             <div className="flex flex-wrap items-center gap-2"><WatchStateActions itemId={item.id} playlists={playlists} onPlaylistChanged={onPlaylistChanged} /><Button id="watch-details-button" variant="secondary" onClick={onDetails}><Settings2 size={15} /> Details and organize</Button></div>
@@ -2127,7 +2276,7 @@ function WatchWorkspace({ item, sourceName, browseItems, browseTotal, browsePage
         </section>
       </article>
 
-      <aside className={`${compact ? "hidden" : "flex"} panel-shadow max-h-[calc(100vh-104px)] min-h-[540px] flex-col overflow-hidden rounded-[12px] border border-line/70 bg-panel/65 xl:sticky xl:top-[76px] xl:self-start`} aria-label="Browse videos while watching">
+      <aside className={`${compact || leanBack ? "hidden" : "flex"} panel-shadow max-h-[calc(100vh-104px)] min-h-[540px] flex-col overflow-hidden rounded-[12px] border border-line/70 bg-panel/65 xl:sticky xl:top-[76px] xl:self-start`} aria-label="Browse videos while watching">
         <div className="flex items-start justify-between gap-3 border-b border-line/60 px-4 py-4"><div><h2 className="text-sm font-semibold">{search.trim() ? "Search results" : "Up next"}</h2><p className="mt-1 text-[10px] text-muted">{browseLoading ? "Updating videos…" : `${browseTotal} available video${browseTotal === 1 ? "" : "s"}`}</p><p className="sr-only" role="status" aria-live="polite" aria-atomic="true">{browseLoading ? "Updating watch browser results." : `Watch browser showing page ${browsePage} of ${browsePages}, with ${browseTotal} available videos.`}</p></div><div className="flex items-center gap-3">{!search.trim() ? <label className="flex items-center gap-2 text-[10px] font-medium text-muted"><span>Autoplay</span><input type="checkbox" checked={autoplayNext} onChange={(event) => onAutoplayNext(event.target.checked)} /></label> : null}{browsePages > 1 ? <span className="number-font text-[10px] text-muted">{browsePage}/{browsePages}</span> : null}</div></div>
         <div className="min-h-0 flex-1 overflow-y-auto p-2" aria-busy={browseLoading}>
           {browseLoading && browseItems.length === 0 ? <WatchQueueSkeleton /> : browseItems.length > 0 ? browseItems.map((candidate) => <WatchQueueItem key={candidate.id} item={candidate} sourceName={sourceLabel(candidate, sourceNames)} active={candidate.id === item.id} onSelect={() => onSelectVideo(candidate)} />) : <div className="px-5 py-12 text-center"><Film className="mx-auto text-muted/40" size={28} /><p className="mt-3 text-xs font-medium">No videos found</p><p className="mt-1 text-[10px] leading-4 text-muted">Try a title, tag, filename, or folder name.</p></div>}
@@ -2231,7 +2380,7 @@ function PlaybackPreparationStatus({ preparation, reencodeRequired, cancelling }
   </div>;
 }
 
-function EmbeddedVideoPlayer({ item, sourceName, compact = false, onRestore, onClose, onPrevious, onNext, onPlaybackEnded }: { item: LibraryItem; sourceName: string; compact?: boolean; onRestore?: () => void; onClose: () => void; onPrevious?: () => void; onNext?: () => void; onPlaybackEnded?: () => void }) {
+function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = false, seekRequest, onRestore, onClose, onExitLeanBack, onPrevious, onNext, onPlaybackEnded }: { item: LibraryItem; sourceName: string; compact?: boolean; leanBack?: boolean; seekRequest: TranscriptSeekRequest | null; onRestore?: () => void; onClose: () => void; onExitLeanBack?: () => void; onPrevious?: () => void; onNext?: () => void; onPlaybackEnded?: () => void }) {
   const setError = useAppStore((state) => state.setError);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const playerRef = useRef<HTMLElement | null>(null);
@@ -2239,6 +2388,7 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, onRestore, onC
   const consentReturnFocus = useRef<HTMLElement | null>(null);
   const lastSavedPosition = useRef(0);
   const playbackWatchdog = useRef<number | null>(null);
+  const playbackProgress = useRef<{ position: number; observedAt: number } | null>(null);
   const [session, setSession] = useState<LibraryPlaybackSession | null>(null);
   const [preflight, setPreflight] = useState<LibraryPlaybackPreflight | null>(null);
   const [consent, setConsent] = useState<LibraryPlaybackPreflight | null>(null);
@@ -2255,6 +2405,7 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, onRestore, onC
   const [nativeBusy, setNativeBusy] = useState(false);
   const [resumedAt, setResumedAt] = useState<number | null>(null);
   const [playbackRate, setPlaybackRate] = useState(1);
+  const [isPlaying, setIsPlaying] = useState(false);
   const [currentPosition, setCurrentPosition] = useState(0);
   const [playbackDuration, setPlaybackDuration] = useState(item.durationSeconds || 0);
 
@@ -2273,6 +2424,7 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, onRestore, onC
     setPlaybackError(null);
     setNativeSession(null);
     setNativeBusy(false);
+    setIsPlaying(false);
     setCurrentPosition(0);
     setPlaybackDuration(item.durationSeconds || 0);
     void api.inspectLibraryPlayback(item.id)
@@ -2372,17 +2524,47 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, onRestore, onC
     playbackWatchdog.current = null;
   }
 
+  function notePlaybackProgress(video: HTMLVideoElement) {
+    if (!Number.isFinite(video.currentTime)) return;
+    const previous = playbackProgress.current;
+    if (!previous || Math.abs(video.currentTime - previous.position) >= 0.01) {
+      playbackProgress.current = { position: video.currentTime, observedAt: performance.now() };
+    }
+  }
+
   function armPlaybackWatchdog() {
-    clearPlaybackWatchdog();
-    playbackWatchdog.current = window.setTimeout(() => {
+    if (playbackWatchdog.current != null) return;
+    const checkProgress = () => {
       playbackWatchdog.current = null;
-      videoRef.current?.pause();
+      const video = videoRef.current;
+      if (!video || video.paused || video.ended) return;
+      notePlaybackProgress(video);
+      const observedAt = playbackProgress.current?.observedAt ?? performance.now();
+      const stalledFor = performance.now() - observedAt;
+      if (stalledFor < EMBEDDED_PLAYBACK_TIMEOUT_MS) {
+        playbackWatchdog.current = window.setTimeout(
+          checkProgress,
+          Math.max(50, EMBEDDED_PLAYBACK_TIMEOUT_MS - stalledFor),
+        );
+        return;
+      }
+      video.pause();
       setLoading(false);
       setPlaybackError(createPlaybackError(
         "embedded_playback_timeout",
         "Embedded playback stalled after starting. Try an H.264 playback copy or open the original in your system player.",
       ));
-    }, EMBEDDED_PLAYBACK_TIMEOUT_MS);
+    };
+    playbackWatchdog.current = window.setTimeout(checkProgress, EMBEDDED_PLAYBACK_TIMEOUT_MS);
+  }
+
+  function startPlaybackWatchdog() {
+    clearPlaybackWatchdog();
+    const video = videoRef.current;
+    if (video && Number.isFinite(video.currentTime)) {
+      playbackProgress.current = { position: video.currentTime, observedAt: performance.now() };
+    }
+    armPlaybackWatchdog();
   }
 
   function armPlaybackWatchdogWhilePlaying() {
@@ -2390,7 +2572,10 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, onRestore, onC
     if (video && !video.paused && !video.ended) armPlaybackWatchdog();
   }
 
-  useEffect(() => () => clearPlaybackWatchdog(), [item.id, session?.url]);
+  useEffect(() => () => {
+    clearPlaybackWatchdog();
+    playbackProgress.current = null;
+  }, [item.id, session?.url]);
 
   function persistProgress(completed = false) {
     const video = videoRef.current;
@@ -2467,7 +2652,7 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, onRestore, onC
       const target = event.target as HTMLElement | null;
       if (target?.matches("input, textarea, select, [contenteditable='true']")) return;
       const key = event.key.toLocaleLowerCase();
-      if (key === "escape" && !document.fullscreenElement) { event.preventDefault(); closePlayer(); }
+      if (key === "escape" && !document.fullscreenElement) { event.preventDefault(); if (leanBack) onExitLeanBack?.(); else closePlayer(); }
       else if (key === " " || key === "k") { event.preventDefault(); togglePlayback(); }
       else if (key === "j" || key === "arrowleft") { event.preventDefault(); seek(-10); }
       else if (key === "l" || key === "arrowright") { event.preventDefault(); seek(10); }
@@ -2476,7 +2661,38 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, onRestore, onC
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [compact, consent]);
+  }, [compact, consent, leanBack, onExitLeanBack]);
+
+  useEffect(() => {
+    if (!leanBack || consent || typeof navigator.getGamepads !== "function") return;
+    let frame = 0;
+    let previousActions = new Set<string>();
+    const poll = () => {
+      const actions = new Set<string>();
+      for (const gamepad of navigator.getGamepads()) {
+        if (!gamepad?.connected) continue;
+        if (gamepad.buttons[0]?.pressed || gamepad.buttons[9]?.pressed) actions.add("toggle");
+        if (gamepad.buttons[1]?.pressed) actions.add("exit");
+        if (gamepad.buttons[14]?.pressed) actions.add("previous");
+        if (gamepad.buttons[15]?.pressed) actions.add("next");
+        if (gamepad.buttons[4]?.pressed) actions.add("seek-back");
+        if (gamepad.buttons[5]?.pressed) actions.add("seek-forward");
+      }
+      for (const action of actions) {
+        if (previousActions.has(action)) continue;
+        if (action === "toggle") togglePlayback();
+        else if (action === "exit") onExitLeanBack?.();
+        else if (action === "previous") changeVideo(onPrevious);
+        else if (action === "next") changeVideo(onNext);
+        else if (action === "seek-back") seek(-10);
+        else if (action === "seek-forward") seek(10);
+      }
+      previousActions = actions;
+      frame = window.requestAnimationFrame(poll);
+    };
+    frame = window.requestAnimationFrame(poll);
+    return () => window.cancelAnimationFrame(frame);
+  }, [consent, item.id, leanBack]);
 
   function restoreConsentFocus() {
     window.requestAnimationFrame(() => {
@@ -2596,7 +2812,8 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, onRestore, onC
     persistProgress(false);
     setNativeBusy(true);
     try {
-      const opened = await api.openLibraryNativePlayback(item.id);
+      const transcriptStart = seekRequest?.itemId === item.id ? seekRequest.seconds : undefined;
+      const opened = await api.openLibraryNativePlayback(item.id, transcriptStart);
       setNativeSession(opened);
       setConsent(null);
       setPlaybackError(null);
@@ -2676,6 +2893,15 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, onRestore, onC
     video.playbackRate = playbackRate;
     setPlaybackDuration(video.duration);
     setCurrentPosition(video.currentTime);
+    if (seekRequest?.itemId === item.id) {
+      const target = Math.min(Math.max(0, video.duration - 0.25), seekRequest.seconds);
+      video.currentTime = target;
+      lastSavedPosition.current = target;
+      setCurrentPosition(target);
+      setResumedAt(target);
+      void video.play().catch(() => {});
+      return;
+    }
     const saved = session?.playback;
     if (saved && !saved.completed && saved.positionSeconds >= 5 && saved.positionSeconds < video.duration - 10) {
       video.currentTime = saved.positionSeconds;
@@ -2684,16 +2910,28 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, onRestore, onC
     }
   }
 
-  return <><section ref={playerRef} className={`panel-shadow min-w-0 overflow-hidden border border-white/10 bg-[#06080b] text-white ${compact ? "rounded-[10px] shadow-[0_28px_80px_rgb(0_0_0/0.58)]" : "flex max-h-[calc(100dvh-96px)] flex-col rounded-[12px]"}`} aria-label={`${compact ? "Mini player" : "Playing"} ${item.title}`}>
-    <header className={`flex items-center border-b border-white/10 bg-black/70 backdrop-blur-xl ${compact ? "min-h-11 gap-2 px-3 py-2" : "min-h-16 gap-4 px-5 py-3"}`}>
+  useEffect(() => {
+    if (seekRequest?.itemId !== item.id) return;
+    const video = videoRef.current;
+    if (!video || !Number.isFinite(video.duration)) return;
+    const target = Math.min(Math.max(0, video.duration - 0.25), seekRequest.seconds);
+    video.currentTime = target;
+    lastSavedPosition.current = target;
+    setCurrentPosition(target);
+    setResumedAt(target);
+    void video.play().catch(() => {});
+  }, [item.id, seekRequest?.id]);
+
+  return <><section ref={playerRef} className={`panel-shadow min-w-0 overflow-hidden border border-white/10 bg-[#06080b] text-white ${compact ? "rounded-[10px] shadow-[0_28px_80px_rgb(0_0_0/0.58)]" : leanBack ? "flex min-h-0 flex-1 flex-col rounded-[16px] shadow-[0_30px_120px_rgb(0_0_0/0.8)]" : "flex max-h-[calc(100dvh-96px)] flex-col rounded-[12px]"}`} aria-label={`${leanBack ? "Lean-back player" : compact ? "Mini player" : "Playing"} ${item.title}`}>
+    <header className={`flex items-center border-b border-white/10 bg-black/70 backdrop-blur-xl ${compact ? "min-h-11 gap-2 px-3 py-2" : leanBack ? "min-h-14 gap-4 px-5 py-2" : "min-h-16 gap-4 px-5 py-3"}`}>
       <div className="min-w-0 flex-1"><h1 className={`${compact ? "text-[11px]" : "text-sm"} truncate font-semibold`}>{item.title}</h1>{!compact ? <p className="mt-0.5 truncate text-[11px] text-white/55">{sourceName}{item.container ? ` · ${item.container.toLocaleUpperCase()}` : ""}{item.width && item.height ? ` · ${item.width} × ${item.height}` : ""}</p> : null}</div>
       <Button variant="ghost" className={`${compact ? "size-8 px-0" : ""} text-white/75 hover:text-white`} onClick={() => void openExternal()} aria-label="Open in system player"><ExternalLink size={15} />{compact ? null : " Open in system player"}</Button>
       {compact ? <button className="grid size-8 place-items-center rounded-[7px] text-white/70 hover:bg-white/10 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70" onClick={onRestore} aria-label="Return to full watch page"><Maximize size={15} /></button> : <button className="grid size-9 place-items-center rounded-[8px] text-white/70 hover:bg-white/10 hover:text-white" onClick={toggleFullscreen} aria-label="Toggle fullscreen"><Maximize size={17} /></button>}
       {compact ? <button className="grid size-8 place-items-center rounded-[7px] text-white/70 hover:bg-white/10 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70" onClick={closePlayer} aria-label="Close mini player"><X size={16} /></button> : null}
     </header>
-    <div className={`relative flex min-h-0 items-center justify-center overflow-auto bg-black ${compact ? "aspect-video" : "aspect-video min-h-[240px] max-h-[calc(100dvh-250px)]"}`}>
+    <div className={`relative flex min-h-0 items-center justify-center overflow-auto bg-black ${compact ? "aspect-video" : leanBack ? "flex-1" : "aspect-video min-h-[240px] max-h-[calc(100dvh-250px)]"}`}>
       {loading ? <div className="absolute inset-0 z-[1] flex items-center justify-center gap-2 bg-black/80 text-sm text-white/60" role="status"><LoaderCircle className="animate-spin text-accent" size={18} /> Preparing embedded playback…</div> : null}
-      {nativeSession ? <div className="max-w-lg border border-accent/25 bg-accent/5 p-6 text-center"><MonitorPlay className="mx-auto text-accent" size={36} /><h2 className="mt-4 text-lg font-semibold">Playing with native mpv</h2><p className="mt-2 text-sm leading-6 text-white/60">mpv is decoding this video in its native window without creating a compatibility copy.</p>{nativeSession.resumedAtSeconds >= 5 ? <p className="mt-2 text-xs text-accent">Resumed at {formatDuration(nativeSession.resumedAtSeconds)}</p> : null}<div className="mt-5 flex flex-wrap justify-center gap-2"><Button variant="secondary" disabled={nativeBusy} onClick={() => void closeNativePlayback()}>{nativeBusy ? <LoaderCircle className="animate-spin" size={15} /> : <Square size={15} />} Stop native player</Button><Button onClick={() => void openExternal()}><ExternalLink size={15} /> System player</Button></div></div> : null}
+      {nativeSession ? <div className="max-w-lg border border-accent/25 bg-accent/5 p-6 text-center"><MonitorPlay className="mx-auto text-accent" size={36} /><h2 className="mt-4 text-lg font-semibold">Playing with native mpv</h2><p className="mt-2 text-sm leading-6 text-white/60">mpv is decoding this video in its native window without creating a compatibility copy.</p>{nativeSession.resumedAtSeconds > 0 ? <p className="mt-2 text-xs text-accent">{seekRequest?.itemId === item.id ? "Started from transcript" : "Resumed"} at {formatDuration(nativeSession.resumedAtSeconds)}</p> : null}<div className="mt-5 flex flex-wrap justify-center gap-2"><Button variant="secondary" disabled={nativeBusy} onClick={() => void closeNativePlayback()}>{nativeBusy ? <LoaderCircle className="animate-spin" size={15} /> : <Square size={15} />} Stop native player</Button><Button onClick={() => void openExternal()}><ExternalLink size={15} /> System player</Button></div></div> : null}
         {playbackError && !nativeSession ? <div className="max-w-lg border border-white/10 bg-white/5 p-6 text-center"><Film className="mx-auto text-white/35" size={34} /><h2 className="mt-4 text-lg font-semibold">This video could not be played here</h2><p className="mt-2 text-sm leading-6 text-white/55">{playbackError.message}</p><div className="mt-5 flex flex-wrap justify-center gap-2">{nativeStatus?.available ? <Button disabled={nativeBusy} onClick={() => void playWithNativeMpv()}>{nativeBusy ? <LoaderCircle className="animate-spin" size={15} /> : <MonitorPlay size={15} />} Play with native mpv</Button> : null}{canOfferPlaybackFallback(playbackError) && !session?.compatibilityTranscoded ? <Button variant="secondary" onClick={() => void retryEmbeddedPlayback()}><RotateCcw size={15} /> Create H.264 playback copy</Button> : null}<Button variant={nativeStatus?.available ? "secondary" : "primary"} onClick={() => void openExternal()}><ExternalLink size={15} /> Open in system player</Button></div></div> : null}
         {session && !playbackError && !nativeSession ? <video
         ref={videoRef}
@@ -2704,28 +2942,24 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, onRestore, onC
         crossOrigin="anonymous"
         preload="metadata"
         onLoadedMetadata={onLoadedMetadata}
-        onPlay={armPlaybackWatchdog}
-        onPlaying={clearPlaybackWatchdog}
+        onPlay={() => { setIsPlaying(true); startPlaybackWatchdog(); }}
+        onPlaying={() => { setIsPlaying(true); clearPlaybackWatchdog(); }}
         onWaiting={armPlaybackWatchdogWhilePlaying}
         onStalled={armPlaybackWatchdogWhilePlaying}
-        onTimeUpdate={() => { const video = videoRef.current; if (!video) return; setCurrentPosition(video.currentTime); if (Math.abs(video.currentTime - lastSavedPosition.current) >= 5) persistProgress(false); }}
-        onPause={() => { clearPlaybackWatchdog(); persistProgress(false); }}
-        onEnded={() => { clearPlaybackWatchdog(); persistProgress(true); window.setTimeout(() => onPlaybackEnded?.(), 0); }}
+        onTimeUpdate={() => { const video = videoRef.current; if (!video) return; notePlaybackProgress(video); setCurrentPosition(video.currentTime); if (Math.abs(video.currentTime - lastSavedPosition.current) >= 5) persistProgress(false); }}
+        onPause={() => { setIsPlaying(false); clearPlaybackWatchdog(); persistProgress(false); }}
+        onEnded={() => { setIsPlaying(false); clearPlaybackWatchdog(); persistProgress(true); window.setTimeout(() => onPlaybackEnded?.(), 0); }}
         onError={() => { clearPlaybackWatchdog(); setLoading(false); setPlaybackError(createPlaybackError("embedded_playback_decode_failed", "The WebView does not support this file's container or codecs. The original file is unchanged and can still be opened with your system player.")); }}
       >
         {session.subtitles.map((track) => <track key={track.url} kind="subtitles" src={track.url} srcLang={track.language || "und"} label={track.label} />)}
       </video> : null}
     </div>
-    <footer className={`${compact ? "hidden" : "flex"} flex-wrap items-center gap-3 border-t border-white/10 bg-[#0c0f14] px-5 py-3`}>
-      <Button variant="ghost" className="h-9 text-white/70" disabled={!onPrevious} onClick={() => changeVideo(onPrevious)}><ChevronRight className="rotate-180" size={15} /> Previous</Button>
-      <Button variant="ghost" className="h-9 text-white/70" disabled={!onNext} onClick={() => changeVideo(onNext)}>Next <ChevronRight size={15} /></Button>
-      <span className="h-5 w-px bg-white/10" />
-      <label className="flex items-center gap-2 text-xs text-white/55"><span>Speed</span><Select className="h-8 w-24 border-white/10 bg-white/5 text-xs text-white" value={playbackRate} onChange={(event) => { const rate = Number(event.target.value); setPlaybackRate(rate); if (videoRef.current) videoRef.current.playbackRate = rate; }}><option value={0.5}>0.5×</option><option value={0.75}>0.75×</option><option value={1}>1×</option><option value={1.25}>1.25×</option><option value={1.5}>1.5×</option><option value={2}>2×</option></Select></label>
-      <p className="ml-auto text-[10px] text-white/40">Space/K play · J/L seek · M mute · F fullscreen · Esc close</p>
-      {resumedAt != null ? <p className="w-full text-[10px] text-accent" role="status">Resumed at {formatDuration(resumedAt)}</p> : null}
+    <footer className={`${compact ? "hidden" : "flex"} flex-wrap items-center gap-3 border-t border-white/10 bg-[#0c0f14] ${leanBack ? "justify-center px-5 py-4" : "px-5 py-3"}`}>
+      {leanBack ? <><Button variant="ghost" className="h-14 min-w-32 text-base text-white/75" disabled={!onPrevious} onClick={() => changeVideo(onPrevious)}><SkipBack size={21} /> Previous</Button><Button className="h-14 min-w-44 text-base" disabled={!videoRef.current || Boolean(playbackError) || Boolean(nativeSession)} onClick={togglePlayback}>{isPlaying ? <Pause size={22} /> : <Play size={22} fill="currentColor" />} {isPlaying ? "Pause" : "Play"}</Button><Button variant="ghost" className="h-14 min-w-32 text-base text-white/75" disabled={!onNext} onClick={() => changeVideo(onNext)}>Next <SkipForward size={21} /></Button><Button variant="secondary" className="h-14 min-w-28 border-white/10 bg-white/10 text-white" onClick={onExitLeanBack}><Minimize2 size={19} /> Exit</Button><p className="w-full text-center text-[11px] text-white/45">Gamepad: A/Start play · B exit · D-pad browse · LB/RB seek · Keyboard: Space/K · J/L · M · F · Esc</p></> : <><Button variant="ghost" className="h-9 text-white/70" disabled={!onPrevious} onClick={() => changeVideo(onPrevious)}><ChevronRight className="rotate-180" size={15} /> Previous</Button><Button variant="ghost" className="h-9 text-white/70" disabled={!onNext} onClick={() => changeVideo(onNext)}>Next <ChevronRight size={15} /></Button><span className="h-5 w-px bg-white/10" /><label className="flex items-center gap-2 text-xs text-white/55"><span>Speed</span><Select className="h-8 w-24 border-white/10 bg-white/5 text-xs text-white" value={playbackRate} onChange={(event) => { const rate = Number(event.target.value); setPlaybackRate(rate); if (videoRef.current) videoRef.current.playbackRate = rate; }}><option value={0.5}>0.5×</option><option value={0.75}>0.75×</option><option value={1}>1×</option><option value={1.25}>1.25×</option><option value={1.5}>1.5×</option><option value={2}>2×</option></Select></label><p className="ml-auto text-[10px] text-white/40">Space/K play · J/L seek · M mute · F fullscreen · Esc close</p></>}
+      {resumedAt != null ? <p className="w-full text-[10px] text-accent" role="status">{seekRequest?.itemId === item.id ? "Started from transcript" : "Resumed"} at {formatDuration(resumedAt)}</p> : null}
       {session?.compatibilityMode ? <p className="w-full text-[10px] text-accent" role="status">{session.compatibilityTranscoded ? "Using an H.264/AAC embedded-playback copy." : preflight?.compatibilityCached ? "Using an existing cached compatibility copy. AV1 timing is optimized for the embedded player." : "A lossless AV1 timing copy was created for this playback."} The original is unchanged.</p> : null}
     </footer>
-  </section>{!compact ? <CreativeTimeline item={item} currentTime={currentPosition} duration={playbackDuration} playbackReady={Boolean(session && !playbackError)} onSeek={seekTo} /> : null}{consent ? <div className="fixed inset-0 z-[90] grid place-items-center bg-black/75 p-5 backdrop-blur-sm" onMouseDown={dismissConsent}><section ref={consentDialogRef} className="panel-shadow w-full max-w-xl overflow-hidden rounded-[14px] border border-line bg-panel" role="dialog" aria-modal="true" aria-labelledby="compatibility-copy-title" aria-describedby="compatibility-copy-description" aria-busy={consentBusy || nativeBusy} onKeyDown={trapConsentFocus} onMouseDown={(event) => event.stopPropagation()}><header className="flex items-start gap-4 border-b border-line/70 px-5 py-5"><div className="grid size-11 shrink-0 place-items-center rounded-[10px] border border-accent/20 bg-accent/10 text-accent"><Copy size={20} /></div><div><p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-accent">Embedded playback compatibility</p><h2 id="compatibility-copy-title" className="mt-1 text-xl font-semibold tracking-[-0.03em]">{consent.reencodeRequired ? "Create an H.264 playback copy?" : "Create a temporary playback copy?"}</h2><p id="compatibility-copy-description" className="mt-2 text-xs leading-5 text-muted">{consent.reason}</p></div></header><div className="space-y-4 px-5 py-5"><dl className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-5 gap-y-2.5 border-y border-line/60 py-4 text-xs"><dt className="text-muted">Estimated copy size</dt><dd className="number-font font-medium text-ink">{formatBytes(consent.estimatedCopyBytes)}</dd><dt className="text-muted">Free space available</dt><dd className="number-font font-medium text-ink">{consent.availableSpaceBytes != null ? formatBytes(consent.availableSpaceBytes) : "Unknown"}</dd><dt className="text-muted">Conversion</dt><dd className="font-medium text-ink">{consent.reencodeRequired ? "H.264/AAC · video re-encode" : "Stream-copy · no re-encoding"}</dd></dl>{consent.availableSpaceBytes != null && consent.estimatedCopyBytes > consent.availableSpaceBytes ? <p className="border-l-2 border-red-400/70 bg-red-400/5 px-3 py-2 text-xs leading-5 text-red-300" role="alert">There may not be enough free space to create this copy.</p> : null}{consent.unusuallyLarge ? <p className="border-l-2 border-amber-400/70 bg-amber-400/5 px-3 py-2 text-xs leading-5 text-amber-200">This is an unusually large copy, so Nice Downloader always asks before creating it—even when automatic copies are enabled.</p> : null}<div className="rounded-[9px] bg-elevated/55 p-3 text-[11px] leading-5 text-muted"><p><strong className="font-semibold text-ink">Your original stays untouched.</strong> The copy exists only in Nice Downloader’s private playback cache.</p><p className="mt-1">The oldest copies are removed automatically before the cache exceeds 4 files or 8 GiB. You can review or clear the cache in Settings.</p></div>{!consent.reencodeRequired && consent.preference === "never" ? <p className="text-[11px] leading-5 text-muted">Your saved preference is <strong className="text-ink">Never create automatically</strong>. “Create copy and play” is a one-time override unless you enable the option below.</p> : null}{!consent.reencodeRequired ? <label className="flex items-start gap-3 text-xs text-muted"><input className="mt-0.5" type="checkbox" checked={rememberAutomatic} onChange={(event) => setRememberAutomatic(event.target.checked)} /><span><strong className="block font-medium text-ink">Automatically create compatible copies in the future</strong>Large copies will still require confirmation.</span></label> : <p className="text-[11px] leading-5 text-muted">This fallback is never created automatically because it changes the cached copy’s video codec. The original file and its quality remain unchanged.</p>}{nativeStatus?.available ? <div className="rounded-[9px] border border-accent/20 bg-accent/5 p-3 text-[11px] leading-5 text-muted"><p className="flex items-center gap-2 font-medium text-ink"><MonitorPlay className="text-accent" size={15} /> Native mpv is available</p><p className="mt-1">Play the original directly with FFmpeg decoders and create no compatibility copy.</p></div> : null}{copyPreparationBusy ? <PlaybackPreparationStatus preparation={preparation} reencodeRequired={consent.reencodeRequired} cancelling={cancelBusy || cancelRequested.current} /> : null}</div><footer className="flex flex-wrap items-center justify-end gap-2 border-t border-line/70 bg-elevated/25 px-5 py-4"><Button data-consent-cancel variant="ghost" disabled={cancelBusy || (copyPreparationBusy && !preparation)} onClick={copyPreparationBusy ? () => void cancelCompatibilityCopy() : dismissConsent}>{copyPreparationBusy ? cancelBusy ? "Cancelling…" : "Cancel copy" : "Cancel"}</Button><Button variant="secondary" disabled={consentBusy || nativeBusy} onClick={() => void playWithNativeMpv()}>{nativeBusy ? <LoaderCircle className="animate-spin" size={15} /> : <MonitorPlay size={15} />} Play with native mpv</Button><Button variant="secondary" disabled={consentBusy || nativeBusy} onClick={() => void openOriginalFromConsent()}><ExternalLink size={15} /> Open original in system player</Button><Button disabled={consentBusy || nativeBusy} onClick={() => void approveCompatibilityCopy()}>{consentBusy ? <LoaderCircle className="animate-spin" size={15} /> : <Copy size={15} />} {consentBusy && consent.reencodeRequired ? "Encoding…" : consent.reencodeRequired ? "Create H.264 copy and play" : "Create copy and play"}</Button></footer></section></div> : null}</>;
+  </section>{!compact && !leanBack ? <CreativeTimeline item={item} currentTime={currentPosition} duration={playbackDuration} playbackReady={Boolean(session && !playbackError)} onSeek={seekTo} /> : null}{consent ? <div className="fixed inset-0 z-[90] grid place-items-center bg-black/75 p-5 backdrop-blur-sm" onMouseDown={dismissConsent}><section ref={consentDialogRef} className="panel-shadow w-full max-w-xl overflow-hidden rounded-[14px] border border-line bg-panel" role="dialog" aria-modal="true" aria-labelledby="compatibility-copy-title" aria-describedby="compatibility-copy-description" aria-busy={consentBusy || nativeBusy} onKeyDown={trapConsentFocus} onMouseDown={(event) => event.stopPropagation()}><header className="flex items-start gap-4 border-b border-line/70 px-5 py-5"><div className="grid size-11 shrink-0 place-items-center rounded-[10px] border border-accent/20 bg-accent/10 text-accent"><Copy size={20} /></div><div><p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-accent">Embedded playback compatibility</p><h2 id="compatibility-copy-title" className="mt-1 text-xl font-semibold tracking-[-0.03em]">{consent.reencodeRequired ? "Create an H.264 playback copy?" : "Create a temporary playback copy?"}</h2><p id="compatibility-copy-description" className="mt-2 text-xs leading-5 text-muted">{consent.reason}</p></div></header><div className="space-y-4 px-5 py-5"><dl className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-5 gap-y-2.5 border-y border-line/60 py-4 text-xs"><dt className="text-muted">Estimated copy size</dt><dd className="number-font font-medium text-ink">{formatBytes(consent.estimatedCopyBytes)}</dd><dt className="text-muted">Free space available</dt><dd className="number-font font-medium text-ink">{consent.availableSpaceBytes != null ? formatBytes(consent.availableSpaceBytes) : "Unknown"}</dd><dt className="text-muted">Conversion</dt><dd className="font-medium text-ink">{consent.reencodeRequired ? "H.264/AAC · video re-encode" : "Stream-copy · no re-encoding"}</dd></dl>{consent.availableSpaceBytes != null && consent.estimatedCopyBytes > consent.availableSpaceBytes ? <p className="border-l-2 border-red-400/70 bg-red-400/5 px-3 py-2 text-xs leading-5 text-red-300" role="alert">There may not be enough free space to create this copy.</p> : null}{consent.unusuallyLarge ? <p className="border-l-2 border-amber-400/70 bg-amber-400/5 px-3 py-2 text-xs leading-5 text-amber-200">This is an unusually large copy, so Nice Downloader always asks before creating it—even when automatic copies are enabled.</p> : null}<div className="rounded-[9px] bg-elevated/55 p-3 text-[11px] leading-5 text-muted"><p><strong className="font-semibold text-ink">Your original stays untouched.</strong> The copy exists only in Nice Downloader’s private playback cache.</p><p className="mt-1">The oldest copies are removed automatically before the cache exceeds 4 files or 8 GiB. You can review or clear the cache in Settings.</p></div>{!consent.reencodeRequired && consent.preference === "never" ? <p className="text-[11px] leading-5 text-muted">Your saved preference is <strong className="text-ink">Never create automatically</strong>. “Create copy and play” is a one-time override unless you enable the option below.</p> : null}{!consent.reencodeRequired ? <label className="flex items-start gap-3 text-xs text-muted"><input className="mt-0.5" type="checkbox" checked={rememberAutomatic} onChange={(event) => setRememberAutomatic(event.target.checked)} /><span><strong className="block font-medium text-ink">Automatically create compatible copies in the future</strong>Large copies will still require confirmation.</span></label> : <p className="text-[11px] leading-5 text-muted">This fallback is never created automatically because it changes the cached copy’s video codec. The original file and its quality remain unchanged.</p>}{nativeStatus?.available ? <div className="rounded-[9px] border border-accent/20 bg-accent/5 p-3 text-[11px] leading-5 text-muted"><p className="flex items-center gap-2 font-medium text-ink"><MonitorPlay className="text-accent" size={15} /> Native mpv is available</p><p className="mt-1">Play the original directly with FFmpeg decoders and create no compatibility copy.</p></div> : null}{copyPreparationBusy ? <PlaybackPreparationStatus preparation={preparation} reencodeRequired={consent.reencodeRequired} cancelling={cancelBusy || cancelRequested.current} /> : null}</div><footer className="flex flex-wrap items-center justify-end gap-2 border-t border-line/70 bg-elevated/25 px-5 py-4"><Button data-consent-cancel variant="ghost" disabled={cancelBusy || (copyPreparationBusy && !preparation)} onClick={copyPreparationBusy ? () => void cancelCompatibilityCopy() : dismissConsent}>{copyPreparationBusy ? cancelBusy ? "Cancelling…" : "Cancel copy" : "Cancel"}</Button><Button variant="secondary" disabled={consentBusy || nativeBusy} onClick={() => void playWithNativeMpv()}>{nativeBusy ? <LoaderCircle className="animate-spin" size={15} /> : <MonitorPlay size={15} />} Play with native mpv</Button><Button variant="secondary" disabled={consentBusy || nativeBusy} onClick={() => void openOriginalFromConsent()}><ExternalLink size={15} /> Open original in system player</Button><Button disabled={consentBusy || nativeBusy} onClick={() => void approveCompatibilityCopy()}>{consentBusy ? <LoaderCircle className="animate-spin" size={15} /> : <Copy size={15} />} {consentBusy && consent.reencodeRequired ? "Encoding…" : consent.reencodeRequired ? "Create H.264 copy and play" : "Create copy and play"}</Button></footer></section></div> : null}</>;
 }
 
 function MediaDetails({ item, sourceName, onClose, onWatch, onChanged, onMetadataChanged, onBrowseCreator, onBrowseSeries, onBrowseSite, onSelectRelated, onRemoved, onOperation }: { item: LibraryItem; sourceName: string; onClose: () => void; onWatch: () => void; onChanged: (item: LibraryItem) => void; onMetadataChanged: () => void; onBrowseCreator: (creator: string) => void; onBrowseSeries: (series: string) => void; onBrowseSite: (site: string) => void; onSelectRelated: (item: LibraryItem) => void; onRemoved: () => void; onOperation: (result: LibraryFileOperationResult) => void }) {
@@ -2738,6 +2972,7 @@ function MediaDetails({ item, sourceName, onClose, onWatch, onChanged, onMetadat
   const [richMetadata, setRichMetadata] = useState<LibraryRichMetadata | null>(null);
   const [relatedItems, setRelatedItems] = useState<LibraryItem[]>([]);
   const [relatedLoading, setRelatedLoading] = useState(false);
+  const [playbackPreflight, setPlaybackPreflight] = useState<LibraryPlaybackPreflight | null>(null);
   const [relatedRevision, setRelatedRevision] = useState(0);
   const [metadataEditing, setMetadataEditing] = useState(false);
   const [metadataBusy, setMetadataBusy] = useState(false);
@@ -2774,6 +3009,7 @@ function MediaDetails({ item, sourceName, onClose, onWatch, onChanged, onMetadat
     setRichMetadata(null);
     setRelatedItems([]);
     setRelatedLoading(true);
+    setPlaybackPreflight(null);
     setMetadataEditing(false);
     let disposed = false;
     void api.getLibraryRichMetadata(item.id)
@@ -2787,6 +3023,11 @@ function MediaDetails({ item, sourceName, onClose, onWatch, onChanged, onMetadat
       .then((related) => { if (!disposed) setRelatedItems(related); })
       .catch(() => { if (!disposed) setRelatedItems([]); })
       .finally(() => { if (!disposed) setRelatedLoading(false); });
+    if (item.mediaKind === "video" && !item.missing) {
+      void api.inspectLibraryPlayback(item.id)
+        .then((preflight) => { if (!disposed) setPlaybackPreflight(preflight); })
+        .catch(() => { if (!disposed) setPlaybackPreflight(null); });
+    }
     return () => { disposed = true; };
   }, [item.id, item.path, relatedRevision]);
 
@@ -2954,7 +3195,7 @@ function MediaDetails({ item, sourceName, onClose, onWatch, onChanged, onMetadat
     }
   }
 
-  return <aside className="fixed bottom-0 right-0 top-0 z-50 w-[min(500px,100vw)] overflow-y-auto border-l border-line/70 bg-panel/98 shadow-[-28px_0_80px_rgb(0_0_0/0.32)] backdrop-blur-xl" role="dialog" aria-modal="true" aria-label={`${item.title} details`} onKeyDown={trapFocus}><div className="sticky top-0 z-[1] flex items-center justify-between border-b border-line/60 bg-panel/90 px-5 py-4 backdrop-blur-xl"><div><p className="text-xs font-semibold">Media details</p><p className="mt-0.5 text-[10px] text-muted">Use ← → to browse · Esc to close</p></div><button ref={closeButtonRef} className="grid size-8 place-items-center rounded-[7px] text-muted transition hover:bg-elevated hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70" onClick={onClose} aria-label="Close media details"><X size={17} /></button></div><div className="p-5"><div className="aspect-video overflow-hidden rounded-[12px] bg-elevated"><MediaArtwork item={item} eager /></div>{editing ? <div className="mt-5 space-y-3"><Field label="Title"><Input value={title} onChange={(event) => setTitle(event.target.value)} /></Field><Field label="Tags"><Input value={tags} onChange={(event) => setTags(event.target.value)} placeholder="Comma-separated tags" /></Field><div className="flex gap-2"><Button onClick={() => void update()}>Save changes</Button><Button variant="secondary" onClick={() => setEditing(false)}>Cancel</Button></div></div> : <><h2 className="mt-5 text-[22px] font-semibold leading-[1.2] tracking-[-0.035em] text-balance">{item.title}</h2><p className="mt-2 text-xs text-muted">{sourceName}{item.durationSeconds != null ? ` · ${formatDuration(item.durationSeconds)}` : ""}</p><div className="mt-5 flex flex-wrap gap-2">{item.mediaKind === "video" ? <Button className="flex-1" disabled={item.missing} onClick={onWatch}><Play size={16} fill="currentColor" /> Watch here</Button> : <Button className="flex-1" disabled={item.missing} onClick={onWatch}><FileImage size={16} /> View image</Button>}<Button variant="secondary" disabled={item.missing} onClick={() => void openItem()}><ExternalLink size={15} /> {item.mediaKind === "image" ? "System viewer" : "System player"}</Button><Button variant="secondary" onClick={() => setEditing(true)}>Edit</Button></div></>}
+  return <aside className="fixed bottom-0 right-0 top-0 z-50 w-[min(500px,100vw)] overflow-y-auto border-l border-line/70 bg-panel/98 shadow-[-28px_0_80px_rgb(0_0_0/0.32)] backdrop-blur-xl" role="dialog" aria-modal="true" aria-label={`${item.title} details`} onKeyDown={trapFocus}><div className="sticky top-0 z-[1] flex items-center justify-between border-b border-line/60 bg-panel/90 px-5 py-4 backdrop-blur-xl"><div><p className="text-xs font-semibold">Media details</p><p className="mt-0.5 text-[10px] text-muted">Use ← → to browse · Esc to close</p></div><button ref={closeButtonRef} className="grid size-8 place-items-center rounded-[7px] text-muted transition hover:bg-elevated hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70" onClick={onClose} aria-label="Close media details"><X size={17} /></button></div><div className="p-5"><div className="aspect-video overflow-hidden rounded-[12px] bg-elevated"><MediaArtwork item={item} eager /></div>{editing ? <div className="mt-5 space-y-3"><Field label="Title"><Input value={title} onChange={(event) => setTitle(event.target.value)} /></Field><Field label="Tags"><Input value={tags} onChange={(event) => setTags(event.target.value)} placeholder="Comma-separated tags" /></Field><div className="flex gap-2"><Button onClick={() => void update()}>Save changes</Button><Button variant="secondary" onClick={() => setEditing(false)}>Cancel</Button></div></div> : <><h2 className="mt-5 text-[22px] font-semibold leading-[1.2] tracking-[-0.035em] text-balance">{item.title}</h2><p className="mt-2 text-xs text-muted">{sourceName}{item.durationSeconds != null ? ` · ${formatDuration(item.durationSeconds)}` : ""}</p>{item.mediaKind === "video" ? <EmbeddedCompatibilityLabel item={item} preflight={playbackPreflight} /> : null}<div className="mt-5 flex flex-wrap gap-2">{item.mediaKind === "video" ? <Button className="flex-1" disabled={item.missing} onClick={onWatch}><Play size={16} fill="currentColor" /> Watch here</Button> : <Button className="flex-1" disabled={item.missing} onClick={onWatch}><FileImage size={16} /> View image</Button>}<Button variant="secondary" disabled={item.missing} onClick={() => void openItem()}><ExternalLink size={15} /> {item.mediaKind === "image" ? "System viewer" : "System player"}</Button><Button variant="secondary" onClick={() => setEditing(true)}>Edit</Button></div></>}
       <div className="mt-4 flex items-center gap-2"><Button variant="secondary" className={item.favorite ? "text-rose-300" : ""} onClick={() => void updateCuration(!item.favorite, item.rating)}><Heart size={15} fill={item.favorite ? "currentColor" : "none"} /> {item.favorite ? "Favorited" : "Favorite"}</Button><label className="flex flex-1 items-center gap-2 text-xs text-muted"><Star size={15} /><span className="sr-only">Rating</span><Select className="h-10" value={item.rating ?? ""} onChange={(event) => void updateCuration(item.favorite, event.target.value ? Number(event.target.value) : null)}><option value="">Not rated</option>{[5, 4, 3, 2, 1].map((rating) => <option key={rating} value={rating}>{rating} star{rating === 1 ? "" : "s"}</option>)}</Select></label></div>
       <section className="mt-7 border-t border-line/60 pt-5" aria-labelledby="rich-metadata-title">
         <div className="flex items-start justify-between gap-3"><div><h3 id="rich-metadata-title" className="text-sm font-semibold">Media information</h3><p className="mt-1 text-[11px] leading-5 text-muted">Imported from yt-dlp sidecars. Your edits stay in Nice Downloader and survive rescans.</p></div><Button variant="ghost" className="h-8 text-xs" disabled={!richMetadata || metadataBusy} onClick={() => { if (richMetadata) loadMetadataForm(richMetadata); setMetadataEditing((value) => !value); }}>{metadataEditing ? "Cancel" : "Edit metadata"}</Button></div>
@@ -3023,9 +3264,7 @@ function resolutionLabel(item: LibraryItem): string {
 }
 
 function formatCodec(codec: string | null | undefined): string | null {
-  if (!codec) return null;
-  const labels: Record<string, string> = { h264: "H.264", hevc: "HEVC", av1: "AV1", vp9: "VP9", aac: "AAC", opus: "Opus", mp3: "MP3", vorbis: "Vorbis" };
-  return labels[codec.toLocaleLowerCase()] || codec.toLocaleUpperCase();
+  return formatMediaCodec(codec);
 }
 
 function formatFps(fps: number): string {
