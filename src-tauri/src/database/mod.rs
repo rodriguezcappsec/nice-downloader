@@ -15,8 +15,8 @@ use crate::{
         LibraryQueryRequest, LibraryQueryResult, LibraryRichMetadata, LibraryScanJob,
         LibraryScanState, LibrarySearchStatus, LibrarySmartView, LibrarySmartViewQuery,
         LibrarySort, LibrarySource, LibrarySourceStatus, LibraryThemeAnalysis,
-        LibraryThemeAnalysisMode, LibraryThemeAssignment, LibraryThemeFacet,
-        LibraryThemeIndexStatus, LibraryThemeSettings, LibraryTranscriptCue,
+        LibraryThemeAnalysisMode, LibraryThemeAnalysisScope, LibraryThemeAssignment,
+        LibraryThemeFacet, LibraryThemeIndexStatus, LibraryThemeSettings, LibraryTranscriptCue,
         LibraryTranscriptIndexStatus, LibraryTranscriptMatch, LibraryVisualSimilarityMatch,
         LibraryVisualSimilarityStatus, LibraryWatchState, Preset, PresetIntent, QueueSettings,
         SaveAuthenticationProfileRequest, SaveLibraryCollectionRequest,
@@ -24,8 +24,8 @@ use crate::{
         SaveLibraryMontageRequest, SaveLibraryPlaybackRequest, SaveLibraryPlaylistRequest,
         SaveLibraryRichMetadataRequest, SaveLibrarySmartViewRequest, SaveLibrarySourceRequest,
         SavePresetRequest, SaveSitePresetRuleRequest, SaveSubscriptionRequest, SitePresetRule,
-        StartDownloadRequest, Subscription, TransformationOperation, TransformationState,
-        TransformationTask, UpdateLibraryItemRequest,
+        StartDownloadRequest, StartLibraryThemeAnalysisRequest, Subscription,
+        TransformationOperation, TransformationState, TransformationTask, UpdateLibraryItemRequest,
     },
     utils::validation::{
         normalize_engine_preferences, validate_destination, validate_engine_preferences,
@@ -1625,20 +1625,73 @@ impl Database {
             .collect())
     }
 
-    pub fn list_theme_analysis_targets_after(
+    pub fn list_theme_analysis_targets(
         &self,
-        after_id: Option<&str>,
-        limit: usize,
+        request: &StartLibraryThemeAnalysisRequest,
         settings: &LibraryThemeSettings,
     ) -> Result<Vec<ThemeAnalysisTarget>, AppError> {
-        if !(1..=100).contains(&limit) {
+        if !(1..=500).contains(&request.max_videos) {
             return Err(AppError::new(
-                "invalid_theme_analysis_batch",
-                "Theme-analysis batches contain between 1 and 100 videos.",
+                "invalid_theme_analysis_limit",
+                "Choose between 1 and 500 videos for a theme-analysis job.",
             ));
         }
         validate_library_theme_settings(settings)?;
         let mode = library_theme_mode_name(settings.mode);
+        let (scope, source_id, folder_path, folder_scope, item_ids) = match request.scope {
+            LibraryThemeAnalysisScope::All => {
+                if request.source_id.is_some()
+                    || request.folder_path.is_some()
+                    || !request.item_ids.is_empty()
+                    || request.folder_scope != LibraryFolderScope::Tree
+                {
+                    return Err(invalid_theme_analysis_scope());
+                }
+                ("all", None, String::new(), "tree", Vec::new())
+            }
+            LibraryThemeAnalysisScope::Folder => {
+                let (Some(source_id), Some(folder_path)) =
+                    (request.source_id.as_deref(), request.folder_path.as_deref())
+                else {
+                    return Err(invalid_theme_analysis_scope());
+                };
+                if !request.item_ids.is_empty() {
+                    return Err(invalid_theme_analysis_scope());
+                }
+                validate_uuid(source_id, "library source")?;
+                (
+                    "folder",
+                    Some(source_id.to_owned()),
+                    normalize_library_folder_path(folder_path)?,
+                    match request.folder_scope {
+                        LibraryFolderScope::Tree => "tree",
+                        LibraryFolderScope::Direct => "direct",
+                    },
+                    Vec::new(),
+                )
+            }
+            LibraryThemeAnalysisScope::Items => {
+                if request.source_id.is_some()
+                    || request.folder_path.is_some()
+                    || request.folder_scope != LibraryFolderScope::Tree
+                {
+                    return Err(invalid_theme_analysis_scope());
+                }
+                (
+                    "items",
+                    None,
+                    String::new(),
+                    "tree",
+                    validate_library_item_ids(request.item_ids.clone())?,
+                )
+            }
+        };
+        let folder_like = format!("{}/%", escape_sql_like(&folder_path));
+        let folder_prefix_length =
+            i64::try_from(folder_path.chars().count() + 2).unwrap_or(i64::MAX);
+        let item_ids = serde_json::to_string(&item_ids)
+            .map_err(|error| AppError::internal("could not serialize theme selection", error))?;
+        let after_id: Option<&str> = None;
         let connection = self.connection.lock().map_err(|_| {
             AppError::new("database_unavailable", "The theme index is unavailable.")
         })?;
@@ -1665,14 +1718,34 @@ impl Database {
                         AND analysis.modified_at_ms IS metadata.modified_at_ms
                     )
                )
-             ORDER BY media.id LIMIT ?4",
+               AND (
+                    ?4 = 'all' OR
+                    (?4 = 'folder' AND media.source_id = ?5 AND (
+                        (?6 = '' AND (?7 = 'tree' OR
+                            INSTR(REPLACE(COALESCE(media.relative_path, ''), '\\', '/'), '/') = 0)) OR
+                        (?6 != '' AND
+                            REPLACE(COALESCE(media.relative_path, ''), '\\', '/') LIKE ?8 ESCAPE '\\' AND
+                            (?7 = 'tree' OR INSTR(SUBSTR(
+                                REPLACE(COALESCE(media.relative_path, ''), '\\', '/'), ?9
+                            ), '/') = 0))
+                    )) OR
+                    (?4 = 'items' AND media.id IN (SELECT value FROM json_each(?10)))
+               )
+             ORDER BY media.id LIMIT ?11",
         )?;
         let rows = statement.query_map(
             params![
                 after_id,
                 settings.model,
                 mode,
-                i64::try_from(limit).unwrap_or(100)
+                scope,
+                source_id,
+                folder_path,
+                folder_scope,
+                folder_like,
+                folder_prefix_length,
+                item_ids,
+                i64::from(request.max_videos)
             ],
             |row| {
                 let tags_json = row.get::<_, String>(4)?;
@@ -5995,6 +6068,13 @@ fn normalize_library_folder_path(value: &str) -> Result<String, AppError> {
     Ok(normalized.to_owned())
 }
 
+fn invalid_theme_analysis_scope() -> AppError {
+    AppError::new(
+        "invalid_theme_analysis_scope",
+        "Choose all videos, one imported folder, or between 1 and 500 selected videos.",
+    )
+}
+
 fn validate_library_theme_settings(settings: &LibraryThemeSettings) -> Result<(), AppError> {
     let model = settings.model.trim();
     if model.is_empty()
@@ -8823,6 +8903,172 @@ mod tests {
     }
 
     #[test]
+    fn targets_bounded_theme_analysis_jobs_by_folder_and_items() {
+        let directory = tempdir().expect("temporary directory");
+        let database =
+            Database::open(&directory.path().join("theme-targets.sqlite3")).expect("database");
+        let source = database
+            .save_library_source(SaveLibrarySourceRequest {
+                id: None,
+                name: "Imported videos".to_owned(),
+                path: directory.path().to_string_lossy().into_owned(),
+                media_kind: LibraryMediaKind::Both,
+                recursive: true,
+                watch_enabled: false,
+                private: true,
+                include_patterns: Vec::new(),
+                exclude_patterns: Vec::new(),
+            })
+            .expect("library source");
+        let add_item = |title: &str, relative_path: &str, kind: LibraryMediaKind| {
+            let mut item = media_stack_test_item(directory.path(), title, kind);
+            item.source_id = Some(source.id.clone());
+            item.relative_path = Some(relative_path.to_owned());
+            database.upsert_library_item(&item).expect("library item")
+        };
+        let root = add_item("Root video", "root.mp4", LibraryMediaKind::Video);
+        let direct = add_item("Direct show", "shows/direct.mp4", LibraryMediaKind::Video);
+        let nested = add_item(
+            "Nested show",
+            "shows/season-one/nested.mp4",
+            LibraryMediaKind::Video,
+        );
+        let outside = add_item("Outside show", "other/outside.mp4", LibraryMediaKind::Video);
+        let image = add_item("Poster", "shows/poster.jpg", LibraryMediaKind::Image);
+        let mut missing = add_item("Missing show", "shows/missing.mp4", LibraryMediaKind::Video);
+        missing.missing = true;
+        database
+            .upsert_library_item(&missing)
+            .expect("missing library item");
+        let pending = add_item("Pending show", "shows/pending.mp4", LibraryMediaKind::Video);
+        database
+            .reset_library_probe(&pending.id, 100, 2)
+            .expect("pending metadata");
+
+        let settings = LibraryThemeSettings {
+            enabled: true,
+            ..LibraryThemeSettings::default()
+        };
+        let all_request = StartLibraryThemeAnalysisRequest {
+            scope: LibraryThemeAnalysisScope::All,
+            max_videos: 2,
+            source_id: None,
+            folder_path: None,
+            folder_scope: LibraryFolderScope::Tree,
+            item_ids: Vec::new(),
+        };
+        let first_batch = database
+            .list_theme_analysis_targets(&all_request, &settings)
+            .expect("bounded first batch");
+        assert_eq!(first_batch.len(), 2);
+
+        let mut invalid_limit = all_request.clone();
+        invalid_limit.max_videos = 501;
+        assert!(database
+            .list_theme_analysis_targets(&invalid_limit, &settings)
+            .is_err());
+        invalid_limit.max_videos = 0;
+        assert!(database
+            .list_theme_analysis_targets(&invalid_limit, &settings)
+            .is_err());
+
+        let mut folder_request = StartLibraryThemeAnalysisRequest {
+            scope: LibraryThemeAnalysisScope::Folder,
+            max_videos: 500,
+            source_id: Some(source.id.clone()),
+            folder_path: Some("shows".to_owned()),
+            folder_scope: LibraryFolderScope::Direct,
+            item_ids: Vec::new(),
+        };
+        let direct_targets = database
+            .list_theme_analysis_targets(&folder_request, &settings)
+            .expect("direct folder targets");
+        assert_eq!(
+            direct_targets
+                .iter()
+                .map(|target| target.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![direct.id.as_str()]
+        );
+        folder_request.folder_path = Some(String::new());
+        let root_targets = database
+            .list_theme_analysis_targets(&folder_request, &settings)
+            .expect("source root direct targets");
+        assert_eq!(root_targets.len(), 1);
+        assert_eq!(root_targets[0].id, root.id);
+        folder_request.folder_path = Some("shows".to_owned());
+        folder_request.folder_scope = LibraryFolderScope::Tree;
+        let tree_ids = database
+            .list_theme_analysis_targets(&folder_request, &settings)
+            .expect("folder tree targets")
+            .into_iter()
+            .map(|target| target.id)
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            tree_ids,
+            HashSet::from([direct.id.clone(), nested.id.clone()])
+        );
+
+        let item_request = StartLibraryThemeAnalysisRequest {
+            scope: LibraryThemeAnalysisScope::Items,
+            max_videos: 500,
+            source_id: None,
+            folder_path: None,
+            folder_scope: LibraryFolderScope::Tree,
+            item_ids: vec![
+                nested.id.clone(),
+                outside.id.clone(),
+                image.id,
+                missing.id,
+                pending.id,
+                nested.id.clone(),
+            ],
+        };
+        let selected_ids = database
+            .list_theme_analysis_targets(&item_request, &settings)
+            .expect("selected item targets")
+            .into_iter()
+            .map(|target| target.id)
+            .collect::<HashSet<_>>();
+        assert_eq!(selected_ids, HashSet::from([nested.id, outside.id]));
+
+        for target in &first_batch {
+            database
+                .save_theme_analysis(target, &settings, "Indexed.", 0.9, &[])
+                .expect("save current analysis");
+        }
+        let second_batch = database
+            .list_theme_analysis_targets(&all_request, &settings)
+            .expect("bounded second batch");
+        assert_eq!(second_batch.len(), 2);
+        assert!(second_batch
+            .iter()
+            .all(|target| first_batch.iter().all(|first| first.id != target.id)));
+
+        let mut invalid_scope = all_request;
+        invalid_scope.source_id = Some(source.id);
+        assert!(database
+            .list_theme_analysis_targets(&invalid_scope, &settings)
+            .is_err());
+        let mut invalid_items = item_request;
+        invalid_items.item_ids.clear();
+        assert!(database
+            .list_theme_analysis_targets(&invalid_items, &settings)
+            .is_err());
+        let invalid_folder = StartLibraryThemeAnalysisRequest {
+            scope: LibraryThemeAnalysisScope::Folder,
+            max_videos: 10,
+            source_id: None,
+            folder_path: Some("shows".to_owned()),
+            folder_scope: LibraryFolderScope::Tree,
+            item_ids: Vec::new(),
+        };
+        assert!(database
+            .list_theme_analysis_targets(&invalid_folder, &settings)
+            .is_err());
+    }
+
+    #[test]
     fn indexes_and_filters_creator_independent_video_themes() {
         let directory = tempdir().expect("temporary directory");
         let database = Database::open(&directory.path().join("themes.sqlite3")).expect("database");
@@ -8848,7 +9094,17 @@ mod tests {
             .save_library_theme_settings(&settings)
             .expect("theme settings");
         let targets = database
-            .list_theme_analysis_targets_after(None, 100, &settings)
+            .list_theme_analysis_targets(
+                &StartLibraryThemeAnalysisRequest {
+                    scope: LibraryThemeAnalysisScope::All,
+                    max_videos: 100,
+                    source_id: None,
+                    folder_path: None,
+                    folder_scope: LibraryFolderScope::Tree,
+                    item_ids: Vec::new(),
+                },
+                &settings,
+            )
             .expect("theme targets");
         assert_eq!(targets.len(), 2);
         let themes = vec![

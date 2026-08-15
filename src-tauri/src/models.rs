@@ -854,6 +854,26 @@ impl Default for LibraryThemeSettings {
     }
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum LibraryThemeAnalysisScope {
+    All,
+    Folder,
+    Items,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StartLibraryThemeAnalysisRequest {
+    pub scope: LibraryThemeAnalysisScope,
+    pub max_videos: u32,
+    pub source_id: Option<String>,
+    pub folder_path: Option<String>,
+    pub folder_scope: LibraryFolderScope,
+    #[serde(default)]
+    pub item_ids: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LibraryThemeProviderStatus {

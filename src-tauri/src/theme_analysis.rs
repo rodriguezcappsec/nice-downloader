@@ -4,7 +4,7 @@ use crate::{
     errors::AppError,
     models::{
         LibraryThemeAnalysisMode, LibraryThemeAssignment, LibraryThemeJob, LibraryThemeJobState,
-        LibraryThemeProviderStatus, LibraryThemeSettings,
+        LibraryThemeProviderStatus, LibraryThemeSettings, StartLibraryThemeAnalysisRequest,
     },
     utils::process::sanitize_tokio_command,
 };
@@ -30,7 +30,6 @@ use uuid::Uuid;
 
 pub const LIBRARY_THEME_EVENT: &str = "library-theme-analysis-updated";
 const OLLAMA_BASE_URL: &str = "http://127.0.0.1:11434";
-const BATCH_SIZE: usize = 10;
 
 #[derive(Clone)]
 pub struct ThemeAnalysisManager {
@@ -130,7 +129,11 @@ impl ThemeAnalysisManager {
         }
     }
 
-    pub async fn start(&self, app: AppHandle) -> Result<LibraryThemeJob, AppError> {
+    pub async fn start(
+        &self,
+        app: AppHandle,
+        request: StartLibraryThemeAnalysisRequest,
+    ) -> Result<LibraryThemeJob, AppError> {
         let settings = self.database.load_library_theme_settings()?;
         if !settings.enabled {
             return Err(AppError::new(
@@ -159,17 +162,19 @@ impl ThemeAnalysisManager {
                 "A theme-analysis job is already running.",
             ));
         }
-        let status = self.database.library_theme_index_status(&settings)?;
+        let targets = self
+            .database
+            .list_theme_analysis_targets(&request, &settings)?;
         let now = Utc::now();
         let mut job = LibraryThemeJob {
             id: Uuid::new_v4().to_string(),
-            state: if status.stale_items == 0 {
+            state: if targets.is_empty() {
                 LibraryThemeJobState::Completed
             } else {
                 LibraryThemeJobState::Running
             },
             checked_items: 0,
-            total_items: status.stale_items,
+            total_items: targets.len(),
             indexed_items: 0,
             failed_items: 0,
             current_title: None,
@@ -177,7 +182,7 @@ impl ThemeAnalysisManager {
             started_at: now,
             updated_at: now,
         };
-        if status.stale_items == 0 {
+        if targets.is_empty() {
             *self.job.lock().map_err(|_| unavailable())? = Some(job.clone());
             let _ = app.emit(LIBRARY_THEME_EVENT, &job);
             return Ok(job);
@@ -190,7 +195,9 @@ impl ThemeAnalysisManager {
         let _ = app.emit(LIBRARY_THEME_EVENT, &job);
         let manager = self.clone();
         tauri::async_runtime::spawn(async move {
-            let result = manager.run(&app, &mut job, settings, token.clone()).await;
+            let result = manager
+                .run(&app, &mut job, settings, targets, token.clone())
+                .await;
             if let Err(error) = result {
                 job.state = if token.is_cancelled() {
                     LibraryThemeJobState::Cancelled
@@ -246,71 +253,57 @@ impl ThemeAnalysisManager {
         app: &AppHandle,
         job: &mut LibraryThemeJob,
         settings: LibraryThemeSettings,
+        targets: Vec<ThemeAnalysisTarget>,
         token: CancellationToken,
     ) -> Result<(), AppError> {
         let client = local_client(Duration::from_secs(600))?;
         let ffmpeg = (settings.mode == LibraryThemeAnalysisMode::Deep)
             .then(|| managed::resolve("ffmpeg"))
             .flatten();
-        let mut after_id = None;
-        loop {
+        for target in &targets {
             if token.is_cancelled() {
                 return Ok(());
             }
-            let targets = self.database.list_theme_analysis_targets_after(
-                after_id.as_deref(),
-                BATCH_SIZE,
-                &settings,
-            )?;
-            if targets.is_empty() {
-                break;
-            }
-            for target in &targets {
-                if token.is_cancelled() {
-                    return Ok(());
+            job.current_title = Some(target.title.clone());
+            job.updated_at = Utc::now();
+            self.store_and_emit(app, job)?;
+            let result = match ffmpeg.as_deref() {
+                Some(ffmpeg) => match extract_contact_sheet(ffmpeg, target, &token).await {
+                    Ok(image) => {
+                        analyze_target(&client, &settings, target, Some(&image), &token).await
+                    }
+                    Err(error) => Err(error),
+                },
+                None => analyze_target(&client, &settings, target, None, &token).await,
+            };
+            match result {
+                Ok(result) => {
+                    self.database.save_theme_analysis(
+                        target,
+                        &settings,
+                        &result.summary,
+                        result.overall_confidence,
+                        &result.themes,
+                    )?;
+                    job.indexed_items += 1;
                 }
-                job.current_title = Some(target.title.clone());
-                job.updated_at = Utc::now();
-                self.store_and_emit(app, job)?;
-                let result = match ffmpeg.as_deref() {
-                    Some(ffmpeg) => match extract_contact_sheet(ffmpeg, target, &token).await {
-                        Ok(image) => {
-                            analyze_target(&client, &settings, target, Some(&image), &token).await
-                        }
-                        Err(error) => Err(error),
-                    },
-                    None => analyze_target(&client, &settings, target, None, &token).await,
-                };
-                match result {
-                    Ok(result) => {
-                        self.database.save_theme_analysis(
-                            target,
-                            &settings,
-                            &result.summary,
-                            result.overall_confidence,
-                            &result.themes,
-                        )?;
-                        job.indexed_items += 1;
-                    }
-                    Err(error) if error.code == "theme_analysis_cancelled" => return Ok(()),
-                    Err(error)
-                        if matches!(
-                            error.code.as_str(),
-                            "theme_model_unavailable" | "theme_model_failed"
-                        ) =>
-                    {
-                        return Err(error);
-                    }
-                    Err(_) => {
-                        self.database.remove_theme_analysis(&target.id)?;
-                        job.failed_items += 1;
-                    }
+                Err(error) if error.code == "theme_analysis_cancelled" => return Ok(()),
+                Err(error)
+                    if matches!(
+                        error.code.as_str(),
+                        "theme_model_unavailable" | "theme_model_failed"
+                    ) =>
+                {
+                    return Err(error);
                 }
-                job.checked_items += 1;
-                job.updated_at = Utc::now();
-                self.store_and_emit(app, job)?;
+                Err(_) => {
+                    self.database.remove_theme_analysis(&target.id)?;
+                    job.failed_items += 1;
+                }
             }
-            after_id = targets.last().map(|target| target.id.clone());
+            job.checked_items += 1;
+            job.updated_at = Utc::now();
+            self.store_and_emit(app, job)?;
         }
         Ok(())
     }

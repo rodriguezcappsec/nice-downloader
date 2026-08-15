@@ -10,7 +10,8 @@ Nice Downloader connects only to Ollama's fixed loopback endpoint at `127.0.0.1:
 2. Download a vision-capable model, for example `ollama pull qwen2.5vl:7b`.
 3. Open **Library > Discover video themes**.
 4. Select the installed model and analysis depth, explicitly enable the feature, and save.
-5. Start the stale-video analysis job.
+5. Choose the maximum videos for this run and optionally narrow it to one imported folder or selected catalog videos.
+6. Start the stale-video analysis job.
 
 The model is not bundled because Qwen2.5-VL 7B weights are several gigabytes and hardware requirements differ. Another installed Ollama vision model can be selected, but Nice Downloader cannot verify that an arbitrary model actually accepts images.
 
@@ -20,6 +21,16 @@ The model is not bundled because Qwen2.5-VL 7B weights are several gigabytes and
 - **Fast** sends the bounded textual context without frames. It is useful for large metadata-rich libraries but must not claim visual evidence.
 
 The prompt treats all media text and visible text as untrusted content. Model output must parse as bounded JSON, themes below 45 percent confidence are discarded, and evidence is retained so users can see why a theme was assigned. Confidence remains advisory.
+
+## Bounded targeting
+
+Every run processes at most 1 to 500 videos. The workspace defaults to 25, so a large Library does not accidentally become a multi-hour job. Choose one of three scopes:
+
+- **Next stale videos** takes the next stable catalog-ID group across the Library. Running another batch advances to the next stale group.
+- **Imported folder** selects a source root or indexed relative subfolder, with either the full nested tree or only files directly inside that folder.
+- **Selected videos** searches at most 60 available catalog videos at a time and retains up to 500 explicit selections while the search changes.
+
+The maximum remains a hard backend work cap for every scope. Rust resolves source UUIDs, normalized relative folder paths, and item UUIDs against the current catalog. React does not submit an absolute media path. Missing files, images, metadata-pending videos, and analyses already current for the selected fingerprint, model, and mode do not enter the job. Consequently, the job total can be smaller than the requested maximum or selected-video count.
 
 ## Index and filtering behavior
 

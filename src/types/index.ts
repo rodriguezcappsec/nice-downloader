@@ -557,11 +557,21 @@ export interface LibraryFacets {
 }
 
 export type LibraryThemeAnalysisMode = "fast" | "deep";
+export type LibraryThemeAnalysisScope = "all" | "folder" | "items";
 
 export interface LibraryThemeSettings {
   enabled: boolean;
   model: string;
   mode: LibraryThemeAnalysisMode;
+}
+
+export interface StartLibraryThemeAnalysisRequest {
+  scope: LibraryThemeAnalysisScope;
+  maxVideos: number;
+  sourceId?: string | null;
+  folderPath?: string | null;
+  folderScope: LibraryFolderScope;
+  itemIds: string[];
 }
 
 export interface LibraryThemeProviderStatus {

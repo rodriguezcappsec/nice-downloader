@@ -43,9 +43,9 @@ use crate::{
         SaveLibrarySmartViewRequest, SaveLibrarySourceRequest, SavePresetRequest,
         SaveSitePresetRuleRequest, SaveSubscriptionRequest, SetLibraryArtworkRequest,
         SitePresetRule, StartDownloadRequest, StartLibraryClipExportRequest,
-        StartLibraryMontageExportRequest, StartLocalShareRequest, StartTransformationRequest,
-        Subscription, SubscriptionCheckResult, TransformationOperation, TransformationTask,
-        UpdateLibraryItemRequest,
+        StartLibraryMontageExportRequest, StartLibraryThemeAnalysisRequest, StartLocalShareRequest,
+        StartTransformationRequest, Subscription, SubscriptionCheckResult, TransformationOperation,
+        TransformationTask, UpdateLibraryItemRequest,
     },
     queue::{disk_space, QueueManager},
     subscriptions,
@@ -245,8 +245,9 @@ pub fn get_library_theme_job(
 pub async fn start_library_theme_analysis(
     app: AppHandle,
     theme_analysis: State<'_, ThemeAnalysisManager>,
+    request: StartLibraryThemeAnalysisRequest,
 ) -> Result<LibraryThemeJob, AppError> {
-    theme_analysis.start(app).await
+    theme_analysis.start(app, request).await
 }
 
 #[tauri::command]

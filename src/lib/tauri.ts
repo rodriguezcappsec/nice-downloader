@@ -50,6 +50,7 @@ import type {
   LibraryThemeJob,
   LibraryThemeProviderStatus,
   LibraryThemeSettings,
+  StartLibraryThemeAnalysisRequest,
   LibrarySearchStatus,
   LibrarySmartView,
   LibraryFacetRequest,
@@ -207,7 +208,8 @@ export const api = {
   listLibraryThemeAnalyses: (limit = 50) =>
     invoke<LibraryThemeAnalysis[]>("list_library_theme_analyses", { limit }),
   getLibraryThemeJob: () => invoke<LibraryThemeJob | null>("get_library_theme_job"),
-  startLibraryThemeAnalysis: () => invoke<LibraryThemeJob>("start_library_theme_analysis"),
+  startLibraryThemeAnalysis: (request: StartLibraryThemeAnalysisRequest) =>
+    invoke<LibraryThemeJob>("start_library_theme_analysis", { request }),
   cancelLibraryThemeAnalysis: (jobId: string) =>
     invoke<void>("cancel_library_theme_analysis", { jobId }),
   getLocalShareStatus: () => invoke<LocalShareSession | null>("get_local_share_status"),

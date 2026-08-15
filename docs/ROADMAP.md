@@ -48,7 +48,7 @@ Status: implemented on `feat/library-creative-workspaces`.
 
 26: restored Library workspaces, universal media commands, session-only Play Next, local share QR codes, and a bounded media-health dashboard — implemented.
 
-27: optional local VLM theme discovery with deep frame sampling, evidence, and cross-creator Library theme filtering — implemented.
+27: optional local VLM theme discovery with deep frame sampling, evidence, cross-creator Library theme filtering, and bounded all/folder/item targeting — implemented.
 
 ## Maturity roadmap delivered
 
