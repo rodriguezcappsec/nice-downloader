@@ -1,6 +1,6 @@
 mod operations;
 use crate::models::{
-    LibraryMediaStack, LibraryMediaStackRole, LibraryMoment, LibraryPlaylist,
+    LibraryCurationState, LibraryMediaStack, LibraryMediaStackRole, LibraryMoment, LibraryPlaylist,
     SaveLibraryMediaStackRequest, SaveLibraryMomentRequest, SaveLibraryPlaylistRequest,
 };
 
@@ -50,7 +50,7 @@ const MAX_CONCURRENT_METADATA_PROBES: usize = 3;
 const WATCH_DEBOUNCE: Duration = Duration::from_secs(2);
 const WATCH_SCAN_RETRY: Duration = Duration::from_secs(1);
 const SOURCE_HEALTH_INTERVAL: Duration = Duration::from_secs(10);
-const LIBRARY_BACKUP_VERSION: u32 = 4;
+const LIBRARY_BACKUP_VERSION: u32 = 5;
 const LIBRARY_CATALOG_SCHEMA_VERSION: u32 = 1;
 const LIBRARY_METADATA_SCHEMA_VERSION: u32 = 1;
 const MAX_LIBRARY_BACKUP_BYTES: u64 = 128 * 1024 * 1024;
@@ -2497,6 +2497,8 @@ struct LibraryBackup {
     #[serde(default)]
     media_stacks: Vec<LibraryMediaStack>,
     #[serde(default)]
+    curation_decisions: Vec<LibraryCurationState>,
+    #[serde(default)]
     moments: Vec<LibraryMoment>,
     #[serde(default)]
     rich_metadata: Vec<LibraryRichMetadata>,
@@ -2514,6 +2516,8 @@ pub fn export_backup(database: &Database, path: &str) -> Result<(), AppError> {
         collections: database.list_library_collections()?,
         playlists: database.list_library_playlists()?,
         media_stacks: database.list_library_media_stacks()?,
+        curation_decisions: database
+            .list_library_curation_states_for_backup(MAX_LIBRARY_BACKUP_ITEMS + 1)?,
         moments: database.list_library_moments_for_backup(MAX_LIBRARY_BACKUP_MOMENTS + 1)?,
         rich_metadata: database
             .list_library_rich_metadata_for_backup(MAX_LIBRARY_BACKUP_ITEMS + 1)?,
@@ -2571,6 +2575,26 @@ pub fn restore_backup(database: &Database, path: &str) -> Result<Vec<LibraryItem
     let backup_item_ids = backup_item_kinds.keys().cloned().collect::<HashSet<_>>();
     let prepared_media_stacks =
         prepare_backup_media_stacks(database, backup.media_stacks, &backup_item_kinds)?;
+    let mut curation_item_ids = HashSet::new();
+    let prepared_curation_decisions = backup
+        .curation_decisions
+        .into_iter()
+        .map(|state| {
+            let Some(decision) = state.decision else {
+                return Err(invalid_backup(
+                    "Curation decisions must contain a supported decision.",
+                ));
+            };
+            if !backup_item_ids.contains(&state.item_id)
+                || !curation_item_ids.insert(state.item_id.clone())
+            {
+                return Err(invalid_backup(
+                    "Curation decisions must reference unique backed-up items.",
+                ));
+            }
+            Ok((state.item_id, decision))
+        })
+        .collect::<Result<Vec<_>, AppError>>()?;
     let video_backup_ids = prepared_items
         .iter()
         .filter(|(_, item)| item.media_kind == Some(LibraryMediaKind::Video))
@@ -2629,6 +2653,12 @@ pub fn restore_backup(database: &Database, path: &str) -> Result<Vec<LibraryItem
                 episode: overrides.episode,
                 original_url: overrides.original_url,
             })?;
+        }
+    }
+
+    for (backup_item_id, decision) in prepared_curation_decisions {
+        if let Some(item_id) = item_id_map.get(&backup_item_id) {
+            database.set_library_curation_decision(item_id, Some(decision))?;
         }
     }
 
@@ -2760,6 +2790,7 @@ fn validate_backup_shape(backup: &LibraryBackup) -> Result<(), AppError> {
         || backup.media_stacks.len() > MAX_LIBRARY_BACKUP_STACKS
         || backup.moments.len() > MAX_LIBRARY_BACKUP_MOMENTS
         || backup.rich_metadata.len() > MAX_LIBRARY_BACKUP_ITEMS
+        || backup.curation_decisions.len() > MAX_LIBRARY_BACKUP_ITEMS
         || membership_count.is_none_or(|count| count > MAX_LIBRARY_BACKUP_MEMBERSHIPS)
     {
         return Err(AppError::new(
@@ -3410,7 +3441,7 @@ mod tests {
     }
 
     #[test]
-    fn version_three_backup_restores_sources_collections_metadata_and_moments() {
+    fn current_backup_restores_sources_collections_metadata_moments_and_curation() {
         let directory = tempdir().expect("temporary directory");
         let media_directory = directory.path().join("media");
         std::fs::create_dir(&media_directory).expect("media directory");
@@ -3484,6 +3515,12 @@ mod tests {
                 color: "amber".to_owned(),
             })
             .expect("moment");
+        source_database
+            .set_library_curation_decision(
+                &item.id,
+                Some(crate::models::LibraryCurationDecision::Keep),
+            )
+            .expect("curation decision");
 
         let backup_path = directory.path().join("library.json");
         export_backup(&source_database, &backup_path.to_string_lossy()).expect("export");
@@ -3531,6 +3568,13 @@ mod tests {
         assert_eq!(restored_moments[0].label, "Favorite scene");
         assert_eq!(restored_moments[0].start_seconds, 2.0);
         assert_eq!(restored_moments[0].end_seconds, Some(5.0));
+        assert_eq!(
+            restored_database
+                .get_library_curation_state(&restored[0].id)
+                .expect("restored curation")
+                .decision,
+            Some(crate::models::LibraryCurationDecision::Keep)
+        );
         let restored_metadata = restored_database
             .get_library_rich_metadata(&restored[0].id)
             .expect("restored rich metadata");
@@ -3615,6 +3659,7 @@ mod tests {
             collections: Vec::new(),
             playlists: Vec::new(),
             media_stacks: Vec::new(),
+            curation_decisions: Vec::new(),
             moments: Vec::new(),
             rich_metadata: Vec::new(),
         };

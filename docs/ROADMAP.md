@@ -34,7 +34,7 @@ Status: implemented on `feat/library-creative-workspaces`.
 
 18: saved comparison sessions and review-note export — implemented on `feat/library-creative-workspaces`.
 19: synchronized image comparison and explicit media-version stacks — implemented on `feat/library-visual-curation`.
-20: keyboard-first rapid curation and dynamic rule collections.
+20: keyboard-first rapid curation and dynamic rule collections — implemented on `feat/library-visual-curation`.
 21: local subtitle/transcript FTS with timestamp seeking.
 22: accessible lean-back playback foundations.
 

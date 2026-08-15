@@ -8,6 +8,7 @@ import {
   Keyboard,
   LayoutGrid,
   ListOrdered,
+  ListChecks,
   PanelLeftClose,
   PanelLeftOpen,
   Plus,
@@ -33,6 +34,7 @@ const mediaNavigation: NavigationItem[] = [
   { id: "library", label: "Media home", icon: House },
   { id: "compare", label: "Compare videos", icon: LayoutGrid },
   { id: "imageCompare", label: "Compare images", icon: Images },
+  { id: "curation", label: "Review library", icon: ListChecks },
 ];
 
 const downloadNavigation: NavigationItem[] = [

@@ -21,16 +21,17 @@ use crate::{
         DiskSpaceInfo, DownloadArchiveMatch, DownloadJob, EngineId, EngineInfo, EnginePreferences,
         ExportLibraryMomentsRequest, GalleryItemList, LibraryArtworkCacheStatus, LibraryBulkAction,
         LibraryBulkMovePlan, LibraryBulkMoveResult, LibraryCacheResult, LibraryChange,
-        LibraryCollection, LibraryCompareSession, LibraryDuplicateAnalysisJob,
-        LibraryDuplicateGroup, LibraryDuplicateTrashResult, LibraryFacetRequest, LibraryFacets,
-        LibraryFileOperation, LibraryFileOperationPlan, LibraryFileOperationResult,
-        LibraryImageSession, LibraryItem, LibraryMediaKind, LibraryMediaStack, LibraryMoment,
-        LibraryPlaybackCacheStatus, LibraryPlaybackEntry, LibraryPlaybackPreflight,
-        LibraryPlaybackSession, LibraryPlaybackState, LibraryQueryRequest, LibraryQueryResult,
-        LibraryRichMetadata, LibraryScanJob, LibraryScanResult, LibrarySearchStatus,
-        LibrarySmartView, LibrarySource, MediaAnalysis, OnboardingStatus, Preset,
-        PreviewLibraryBulkMoveRequest, PreviewLibraryFileOperationRequest, QueueSettings,
-        QueueSnapshot, SaveAuthenticationProfileRequest, SaveLibraryCollectionRequest,
+        LibraryCollection, LibraryCompareSession, LibraryCurationDecision, LibraryCurationState,
+        LibraryDuplicateAnalysisJob, LibraryDuplicateGroup, LibraryDuplicateTrashResult,
+        LibraryFacetRequest, LibraryFacets, LibraryFileOperation, LibraryFileOperationPlan,
+        LibraryFileOperationResult, LibraryImageSession, LibraryItem, LibraryMediaKind,
+        LibraryMediaStack, LibraryMoment, LibraryPlaybackCacheStatus, LibraryPlaybackEntry,
+        LibraryPlaybackPreflight, LibraryPlaybackSession, LibraryPlaybackState,
+        LibraryQueryRequest, LibraryQueryResult, LibraryRichMetadata, LibraryScanJob,
+        LibraryScanResult, LibrarySearchStatus, LibrarySmartView, LibrarySource, MediaAnalysis,
+        OnboardingStatus, Preset, PreviewLibraryBulkMoveRequest,
+        PreviewLibraryFileOperationRequest, QueueSettings, QueueSnapshot,
+        SaveAuthenticationProfileRequest, SaveLibraryCollectionRequest,
         SaveLibraryCompareSessionRequest, SaveLibraryMediaStackRequest, SaveLibraryMomentRequest,
         SaveLibraryPlaybackRequest, SaveLibraryRichMetadataRequest, SaveLibrarySmartViewRequest,
         SaveLibrarySourceRequest, SavePresetRequest, SaveSitePresetRuleRequest,
@@ -476,6 +477,32 @@ pub fn delete_library_media_stack(
     id: String,
 ) -> Result<(), AppError> {
     database.delete_library_media_stack(&id)
+}
+
+#[tauri::command]
+pub fn list_library_curation_queue(
+    database: State<'_, Database>,
+    review_later: bool,
+    limit: Option<usize>,
+) -> Result<Vec<LibraryItem>, AppError> {
+    database.list_library_curation_queue(review_later, limit.unwrap_or(100))
+}
+
+#[tauri::command]
+pub fn get_library_curation_state(
+    database: State<'_, Database>,
+    item_id: String,
+) -> Result<LibraryCurationState, AppError> {
+    database.get_library_curation_state(&item_id)
+}
+
+#[tauri::command]
+pub fn set_library_curation_decision(
+    database: State<'_, Database>,
+    item_id: String,
+    decision: Option<LibraryCurationDecision>,
+) -> Result<LibraryCurationState, AppError> {
+    database.set_library_curation_decision(&item_id, decision)
 }
 
 #[tauri::command]

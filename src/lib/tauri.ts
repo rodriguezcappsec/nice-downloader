@@ -2,6 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   LibraryCompareSession,
+  LibraryCurationDecision,
+  LibraryCurationState,
   LibraryMediaStack,
   ExportLibraryMomentsRequest,
   LibraryMoment,
@@ -229,6 +231,12 @@ export const api = {
     invoke<LibraryMediaStack>("save_library_media_stack", { request }),
   deleteLibraryMediaStack: (id: string) =>
     invoke<void>("delete_library_media_stack", { id }),
+  listLibraryCurationQueue: (reviewLater = false, limit = 100) =>
+    invoke<LibraryItem[]>("list_library_curation_queue", { reviewLater, limit }),
+  getLibraryCurationState: (itemId: string) =>
+    invoke<LibraryCurationState>("get_library_curation_state", { itemId }),
+  setLibraryCurationDecision: (itemId: string, decision: LibraryCurationDecision | null) =>
+    invoke<LibraryCurationState>("set_library_curation_decision", { itemId, decision }),
   exportLibraryMoments: (request: ExportLibraryMomentsRequest) =>
     invoke<number>("export_library_moments", { request }),
   generateLibraryStoryboard: (itemId: string, frameCount = 12) =>

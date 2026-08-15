@@ -8,6 +8,7 @@ export type ViewId =
   | "library"
   | "compare"
   | "imageCompare"
+  | "curation"
   | "presets"
   | "settings";
 
@@ -745,6 +746,14 @@ export interface SaveLibraryMediaStackRequest {
   notes: string;
   coverItemId?: string | null;
   members: LibraryMediaStackMember[];
+}
+
+export type LibraryCurationDecision = "keep" | "reviewLater";
+
+export interface LibraryCurationState {
+  itemId: string;
+  decision?: LibraryCurationDecision | null;
+  reviewedAt?: string | null;
 }
 
 export interface ExportLibraryMomentsRequest {

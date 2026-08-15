@@ -95,7 +95,8 @@ warning because current builds are not code-signed.
 - Two-to-four-image comparison studio with synchronized zoom/pan plus two-image
   overlay and split reveal modes
 - Persistent media-version stacks for originals, edits, alternates, and generated
-  copies, including version 4 backup/restore
+  copies, plus durable rapid-curation decisions in version 5 backup/restore
+- Keyboard-first Review Library workflow and filter-driven automatic collections
 - Integrated full-resolution image viewer with zoom, pan, rotation, keyboard
   browsing, slideshows, and explicit system-viewer fallback
 - Scheduled playlist/channel subscriptions with archive-aware deduplication

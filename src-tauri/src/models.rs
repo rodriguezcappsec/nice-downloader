@@ -1119,6 +1119,30 @@ pub struct SaveLibraryMediaStackRequest {
     pub members: Vec<LibraryMediaStackMember>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum LibraryCurationDecision {
+    Keep,
+    ReviewLater,
+}
+
+impl LibraryCurationDecision {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Keep => "keep",
+            Self::ReviewLater => "reviewLater",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryCurationState {
+    pub item_id: String,
+    pub decision: Option<LibraryCurationDecision>,
+    pub reviewed_at: Option<DateTime<Utc>>,
+}
+
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum LibraryMomentExportFormat {

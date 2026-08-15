@@ -408,12 +408,29 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
   }, []);
 
   useEffect(() => {
+    let disposed = false;
     const startSelection = (event: Event) => {
       const requestedIds = (event as CustomEvent<{ itemIds?: string[] }>).detail?.itemIds || [];
       setSelectedIds(new Set(Array.from(new Set(requestedIds)).slice(0, 4)));
       setSelectionMode(true);
       setActivePlaylist(null);
       setActivePlaylistItems([]);
+    };
+    const startBulkMoveFromWorkspace = (event: Event) => {
+      const requestedIds = (event as CustomEvent<{ itemIds?: string[] }>).detail?.itemIds || [];
+      if (requestedIds.length === 0) return;
+      setSelectedIds(new Set(Array.from(new Set(requestedIds)).slice(0, 500)));
+      setSelectionMode(true);
+      setBulkMoveOpen(true);
+      setActivePlaylist(null);
+      setActiveMediaStack(null);
+    };
+    const openLibraryItemFromWorkspace = (event: Event) => {
+      const itemId = (event as CustomEvent<{ itemId?: string }>).detail?.itemId;
+      if (!itemId) return;
+      void api.getLibraryItemsByIds([itemId]).then(([item]) => {
+        if (!disposed && item) openDetails(item);
+      }).catch((error) => { if (!disposed) setError(normalizeError(error)); });
     };
     const stopSinglePlayback = () => {
       setWatchItem(null);
@@ -428,13 +445,18 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
     window.addEventListener("nice-downloader:start-image-compare-selection", startSelection);
     window.addEventListener("nice-downloader:compare-start", stopSinglePlayback);
     window.addEventListener("nice-downloader:image-compare-start", stopSinglePlayback);
+    window.addEventListener("nice-downloader:start-bulk-move", startBulkMoveFromWorkspace);
+    window.addEventListener("nice-downloader:open-library-item", openLibraryItemFromWorkspace);
     return () => {
+      disposed = true;
       window.removeEventListener("nice-downloader:start-compare-selection", startSelection);
       window.removeEventListener("nice-downloader:start-image-compare-selection", startSelection);
       window.removeEventListener("nice-downloader:compare-start", stopSinglePlayback);
       window.removeEventListener("nice-downloader:image-compare-start", stopSinglePlayback);
+      window.removeEventListener("nice-downloader:start-bulk-move", startBulkMoveFromWorkspace);
+      window.removeEventListener("nice-downloader:open-library-item", openLibraryItemFromWorkspace);
     };
-  }, []);
+  }, [setError]);
 
   async function refreshArtworkCacheStatus() {
     try {
@@ -1016,7 +1038,7 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
       applySmartView(stored);
       setSmartViewName("");
       setSmartViewFormOpen(false);
-      setNotice({ message: `Saved “${stored.name}” as a dynamic Library view.`, view: "library" });
+      setNotice({ message: `Saved “${stored.name}” as an automatic collection.`, view: "library" });
     } catch (error) {
       setError(normalizeError(error));
     } finally {
@@ -1037,7 +1059,7 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
       setSmartViews((current) => current.filter((view) => view.id !== id));
       if (activeSmartViewId === id) setActiveSmartViewId(null);
       setConfirmDeleteSmartViewId(null);
-      setNotice({ message: "Saved Library view removed. Media files were not changed.", view: "library" });
+      setNotice({ message: "Automatic collection removed. Media files were not changed.", view: "library" });
     } catch (error) {
       setError(normalizeError(error));
     } finally {
@@ -1261,7 +1283,7 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
     if (!path) return;
     try {
       await api.exportLibrary(path);
-      setNotice({ message: "Library backup exported with sources, collections, stacks, curation, and media metadata." });
+      setNotice({ message: "Library backup exported with sources, collections, stacks, review decisions, and media metadata." });
     } catch (error) {
       setError(normalizeError(error));
     }
@@ -1423,10 +1445,10 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
         <div className="flex shrink-0 items-center gap-1"><div className="flex rounded-[8px] bg-elevated/70 p-0.5" role="group" aria-label="Library view"><button className={`grid size-8 place-items-center rounded-[6px] transition ${viewMode === "grid" ? "bg-panel text-ink shadow-control" : "text-muted hover:text-ink"}`} onClick={() => changeViewMode("grid")} aria-pressed={viewMode === "grid"} aria-label="Grid view"><LayoutGrid size={15} /></button><button className={`grid size-8 place-items-center rounded-[6px] transition ${viewMode === "list" ? "bg-panel text-ink shadow-control" : "text-muted hover:text-ink"}`} onClick={() => changeViewMode("list")} aria-pressed={viewMode === "list"} aria-label="List view"><List size={15} /></button></div><Button variant={selectionMode ? "secondary" : "ghost"} onClick={() => selectionMode ? closeSelectionMode() : setSelectionMode(true)}>{selectionMode ? <X size={16} /> : <CheckSquare2 size={16} />} {selectionMode ? "Done" : "Select"}</Button><Button variant={changes.length > 0 ? "secondary" : "ghost"} onClick={() => { setManageOpen(true); void api.listLibraryFileOperations().then(setFileOperations).catch((error) => setError(normalizeError(error))); }}><Settings2 size={16} /> Manage{changes.length > 0 ? <span className="number-font rounded bg-accent/15 px-1.5 py-0.5 text-[10px] text-accent">{changes.length}</span> : null}</Button></div>
       </header>
 
-      <section className="mt-3 flex flex-wrap items-center gap-2 border-y border-line/45 py-2.5" aria-label="Saved Library views">
-        <span className="mr-1 inline-flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-muted"><Bookmark size={13} /> Saved views</span>
-        {smartViews.length === 0 ? <span className="text-[11px] text-muted">Save a filter combination for one-click access.</span> : smartViews.map((view) => <span key={view.id} className={`inline-flex items-center overflow-hidden rounded-[7px] border ${activeSmartViewId === view.id ? "border-accent/35 bg-accent/12 text-accent" : "border-line/70 bg-elevated/50 text-muted"}`}><button className="h-7 max-w-[220px] truncate px-2.5 text-[11px] font-medium hover:text-ink" onClick={() => applySmartView(view)} title={`Open ${view.name}`}>{view.name}</button><button className={`grid size-7 place-items-center border-l transition ${confirmDeleteSmartViewId === view.id ? "border-red-400/30 bg-red-400/10 text-red-300" : "border-line/60 hover:bg-panel hover:text-ink"}`} disabled={smartViewBusy} onClick={() => void deleteSmartView(view.id)} aria-label={confirmDeleteSmartViewId === view.id ? `Confirm removing ${view.name}` : `Remove ${view.name}`} title={confirmDeleteSmartViewId === view.id ? "Click again to confirm" : "Remove saved view"}>{confirmDeleteSmartViewId === view.id ? <Trash2 size={12} /> : <X size={12} />}</button></span>)}
-        <span className="ml-auto flex items-center gap-2">{smartViewFormOpen ? <><Input className="h-8 w-[190px] text-xs" value={smartViewName} maxLength={80} autoFocus placeholder="View name" onChange={(event) => setSmartViewName(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void saveCurrentSmartView(); if (event.key === "Escape") { setSmartViewFormOpen(false); setSmartViewName(""); } }} /><Button className="h-8 text-xs" disabled={!smartViewName.trim() || smartViewBusy} onClick={() => void saveCurrentSmartView()}>{smartViewBusy ? <LoaderCircle className="animate-spin" size={13} /> : <Save size={13} />} Save</Button><Button variant="ghost" className="h-8 text-xs" onClick={() => { setSmartViewFormOpen(false); setSmartViewName(""); }}>Cancel</Button></> : <Button variant="ghost" className="h-8 text-xs" onClick={() => setSmartViewFormOpen(true)}><Bookmark size={13} /> Save current view</Button>}<button className={`inline-flex h-8 items-center gap-1.5 rounded-[7px] px-2 text-[10px] transition hover:bg-elevated hover:text-ink ${searchStatus?.consistent === false ? "text-amber-300" : "text-muted"}`} disabled={smartViewBusy} onClick={() => void rebuildSearchIndex()} title="Rebuild the local Library search index"><Database size={12} />{searchStatus?.consistent === false ? "Repair search" : searchStatus ? "Search ready" : "Search index"}</button></span>
+      <section className="mt-3 flex flex-wrap items-center gap-2 border-y border-line/45 py-2.5" aria-label="Automatic collections">
+        <span className="mr-1 inline-flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-muted"><Bookmark size={13} /> Automatic collections</span>
+        {smartViews.length === 0 ? <span className="text-[11px] text-muted">Save the current filters as a collection that updates itself.</span> : smartViews.map((view) => <span key={view.id} className={`inline-flex items-center overflow-hidden rounded-[7px] border ${activeSmartViewId === view.id ? "border-accent/35 bg-accent/12 text-accent" : "border-line/70 bg-elevated/50 text-muted"}`}><button className="h-7 max-w-[220px] truncate px-2.5 text-[11px] font-medium hover:text-ink" onClick={() => applySmartView(view)} title={`Open ${view.name}`}>{view.name}</button><button className={`grid size-7 place-items-center border-l transition ${confirmDeleteSmartViewId === view.id ? "border-red-400/30 bg-red-400/10 text-red-300" : "border-line/60 hover:bg-panel hover:text-ink"}`} disabled={smartViewBusy} onClick={() => void deleteSmartView(view.id)} aria-label={confirmDeleteSmartViewId === view.id ? `Confirm removing ${view.name}` : `Remove ${view.name}`} title={confirmDeleteSmartViewId === view.id ? "Click again to confirm" : "Remove automatic collection"}>{confirmDeleteSmartViewId === view.id ? <Trash2 size={12} /> : <X size={12} />}</button></span>)}
+        <span className="ml-auto flex items-center gap-2">{smartViewFormOpen ? <><Input className="h-8 w-[190px] text-xs" value={smartViewName} maxLength={80} autoFocus placeholder="Collection name" onChange={(event) => setSmartViewName(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void saveCurrentSmartView(); if (event.key === "Escape") { setSmartViewFormOpen(false); setSmartViewName(""); } }} /><Button className="h-8 text-xs" disabled={!smartViewName.trim() || smartViewBusy} onClick={() => void saveCurrentSmartView()}>{smartViewBusy ? <LoaderCircle className="animate-spin" size={13} /> : <Save size={13} />} Save</Button><Button variant="ghost" className="h-8 text-xs" onClick={() => { setSmartViewFormOpen(false); setSmartViewName(""); }}>Cancel</Button></> : <Button variant="ghost" className="h-8 text-xs" onClick={() => setSmartViewFormOpen(true)}><Bookmark size={13} /> Save automatic collection</Button>}<button className={`inline-flex h-8 items-center gap-1.5 rounded-[7px] px-2 text-[10px] transition hover:bg-elevated hover:text-ink ${searchStatus?.consistent === false ? "text-amber-300" : "text-muted"}`} disabled={smartViewBusy} onClick={() => void rebuildSearchIndex()} title="Rebuild the local Library search index"><Database size={12} />{searchStatus?.consistent === false ? "Repair search" : searchStatus ? "Search ready" : "Search index"}</button></span>
       </section>
 
       {searchStatus && !searchStatus.consistent ? <div className="mt-3 flex items-center gap-3 border-l-2 border-amber-400/60 bg-amber-400/5 px-3 py-2 text-xs text-amber-100" role="alert"><span>Search index has {searchStatus.indexedItems.toLocaleString()} of {searchStatus.catalogItems.toLocaleString()} Library items.</span><Button variant="secondary" className="ml-auto h-8 text-xs" disabled={smartViewBusy} onClick={() => void rebuildSearchIndex()}>{smartViewBusy ? <LoaderCircle className="animate-spin" size={13} /> : <RotateCcw size={13} />} Rebuild search</Button></div> : null}
