@@ -11,6 +11,7 @@ import { HealthPage } from "./features/library/HealthPage";
 import { MontagePage } from "./features/library/MontagePage";
 import { SimilarityPage } from "./features/library/SimilarityPage";
 import { SharingPage } from "./features/library/SharingPage";
+import { ThemesPage } from "./features/library/ThemesPage";
 import { NewDownloadPage } from "./features/new-download/NewDownloadPage";
 import { PresetsPage, SettingsPage } from "./features/settings/SettingsPage";
 import { SubscriptionsPage } from "./features/subscriptions/SubscriptionsPage";
@@ -180,6 +181,7 @@ export default function App() {
       {view === "curation" ? <Suspense fallback={<div className="grid min-h-[60vh] place-items-center text-sm text-muted" role="status">Opening curation workspace…</div>}><CurationPage /></Suspense> : null}
       <div className={view === "montages" ? "" : "hidden"}><MontagePage /></div>
       <div className={view === "similarity" ? "" : "hidden"}><SimilarityPage /></div>
+      <div className={view === "themes" ? "" : "hidden"}><ThemesPage /></div>
       <div className={view === "sharing" ? "" : "hidden"}><SharingPage /></div>
       <div className={view === "health" ? "" : "hidden"}><HealthPage /></div>
       <div className={view === "presets" ? "" : "hidden"}><PresetsPage /></div>

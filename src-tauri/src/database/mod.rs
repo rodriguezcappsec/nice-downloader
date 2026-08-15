@@ -14,7 +14,9 @@ use crate::{
         LibraryPlaybackEntry, LibraryPlaybackState, LibraryPlaylist, LibraryProbeResult,
         LibraryQueryRequest, LibraryQueryResult, LibraryRichMetadata, LibraryScanJob,
         LibraryScanState, LibrarySearchStatus, LibrarySmartView, LibrarySmartViewQuery,
-        LibrarySort, LibrarySource, LibrarySourceStatus, LibraryTranscriptCue,
+        LibrarySort, LibrarySource, LibrarySourceStatus, LibraryThemeAnalysis,
+        LibraryThemeAnalysisMode, LibraryThemeAssignment, LibraryThemeFacet,
+        LibraryThemeIndexStatus, LibraryThemeSettings, LibraryTranscriptCue,
         LibraryTranscriptIndexStatus, LibraryTranscriptMatch, LibraryVisualSimilarityMatch,
         LibraryVisualSimilarityStatus, LibraryWatchState, Preset, PresetIntent, QueueSettings,
         SaveAuthenticationProfileRequest, SaveLibraryCollectionRequest,
@@ -65,9 +67,11 @@ const MIGRATION_0023: &str = include_str!("migrations/0023_library_curation_deci
 const MIGRATION_0024: &str = include_str!("migrations/0024_library_transcripts.sql");
 const MIGRATION_0025: &str = include_str!("migrations/0025_library_montages.sql");
 const MIGRATION_0026: &str = include_str!("migrations/0026_library_visual_similarity.sql");
+const MIGRATION_0027: &str = include_str!("migrations/0027_library_themes.sql");
 const ENGINE_PREFERENCES_KEY: &str = "engine.preferences";
 const QUEUE_SETTINGS_KEY: &str = "queue.settings";
 const DESKTOP_PREFERENCES_KEY: &str = "desktop.preferences";
+const LIBRARY_THEME_SETTINGS_KEY: &str = "library.theme.settings";
 const ONBOARDING_COMPLETED_KEY: &str = "onboarding.completed";
 
 #[derive(Clone)]
@@ -82,6 +86,19 @@ pub struct VisualSignatureTarget {
     pub title: String,
     pub media_kind: String,
     pub duration_seconds: Option<f64>,
+    pub file_size_bytes: Option<u64>,
+    pub modified_at_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ThemeAnalysisTarget {
+    pub id: String,
+    pub path: String,
+    pub title: String,
+    pub duration_seconds: Option<f64>,
+    pub tags: Vec<String>,
+    pub description: Option<String>,
+    pub transcript: Option<String>,
     pub file_size_bytes: Option<u64>,
     pub modified_at_ms: Option<i64>,
 }
@@ -135,6 +152,7 @@ impl Database {
             (24, MIGRATION_0024),
             (25, MIGRATION_0025),
             (26, MIGRATION_0026),
+            (27, MIGRATION_0027),
         ] {
             let migrated: bool = transaction.query_row(
                 "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = ?1)",
@@ -377,6 +395,46 @@ impl Database {
             "INSERT INTO settings (key, value_json, updated_at) VALUES (?1, ?2, ?3)
              ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at",
             params![DESKTOP_PREFERENCES_KEY, value, Utc::now().timestamp_millis()],
+        )?;
+        Ok(())
+    }
+
+    pub fn load_library_theme_settings(&self) -> Result<LibraryThemeSettings, AppError> {
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "Local AI settings are unavailable.")
+        })?;
+        let value: Option<String> = connection
+            .query_row(
+                "SELECT value_json FROM settings WHERE key = ?1",
+                [LIBRARY_THEME_SETTINGS_KEY],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let settings = value
+            .map(|value| {
+                serde_json::from_str(&value)
+                    .map_err(|error| AppError::internal("could not read local AI settings", error))
+            })
+            .transpose()?
+            .unwrap_or_default();
+        validate_library_theme_settings(&settings)?;
+        Ok(settings)
+    }
+
+    pub fn save_library_theme_settings(
+        &self,
+        settings: &LibraryThemeSettings,
+    ) -> Result<(), AppError> {
+        validate_library_theme_settings(settings)?;
+        let value = serde_json::to_string(settings)
+            .map_err(|error| AppError::internal("could not serialize local AI settings", error))?;
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "Local AI settings are unavailable.")
+        })?;
+        connection.execute(
+            "INSERT INTO settings (key, value_json, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at",
+            params![LIBRARY_THEME_SETTINGS_KEY, value, Utc::now().timestamp_millis()],
         )?;
         Ok(())
     }
@@ -1567,6 +1625,286 @@ impl Database {
             .collect())
     }
 
+    pub fn list_theme_analysis_targets_after(
+        &self,
+        after_id: Option<&str>,
+        limit: usize,
+        settings: &LibraryThemeSettings,
+    ) -> Result<Vec<ThemeAnalysisTarget>, AppError> {
+        if !(1..=100).contains(&limit) {
+            return Err(AppError::new(
+                "invalid_theme_analysis_batch",
+                "Theme-analysis batches contain between 1 and 100 videos.",
+            ));
+        }
+        validate_library_theme_settings(settings)?;
+        let mode = library_theme_mode_name(settings.mode);
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "The theme index is unavailable.")
+        })?;
+        let mut statement = connection.prepare(
+            "SELECT media.id, media.path, media.title, media.duration_seconds, media.tags_json,
+                    COALESCE(NULLIF(json_extract(rich.overrides_json, '$.description'), ''),
+                             json_extract(rich.extracted_json, '$.description')),
+                    (SELECT GROUP_CONCAT(cue_text, ' ') FROM (
+                        SELECT cue_text FROM library_transcript_search
+                        WHERE item_id = media.id ORDER BY start_seconds LIMIT 80
+                    )),
+                    metadata.file_size_bytes, metadata.modified_at_ms
+             FROM media_library media
+             LEFT JOIN library_media_metadata metadata ON metadata.item_id = media.id
+             LEFT JOIN library_rich_metadata rich ON rich.item_id = media.id
+             LEFT JOIN library_theme_analyses analysis ON analysis.item_id = media.id
+             WHERE media.missing = 0 AND media.media_kind IN ('video', 'both')
+               AND metadata.state = 'ready'
+               AND (?1 IS NULL OR media.id > ?1)
+               AND (
+                    analysis.item_id IS NULL OR analysis.model != ?2 OR analysis.mode != ?3
+                    OR NOT (
+                        analysis.file_size_bytes IS metadata.file_size_bytes
+                        AND analysis.modified_at_ms IS metadata.modified_at_ms
+                    )
+               )
+             ORDER BY media.id LIMIT ?4",
+        )?;
+        let rows = statement.query_map(
+            params![
+                after_id,
+                settings.model,
+                mode,
+                i64::try_from(limit).unwrap_or(100)
+            ],
+            |row| {
+                let tags_json = row.get::<_, String>(4)?;
+                Ok(ThemeAnalysisTarget {
+                    id: row.get(0)?,
+                    path: row.get(1)?,
+                    title: row.get(2)?,
+                    duration_seconds: row.get(3)?,
+                    tags: serde_json::from_str(&tags_json).unwrap_or_default(),
+                    description: row.get(5)?,
+                    transcript: row.get(6)?,
+                    file_size_bytes: row.get(7)?,
+                    modified_at_ms: row.get(8)?,
+                })
+            },
+        )?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+    }
+
+    pub fn save_theme_analysis(
+        &self,
+        target: &ThemeAnalysisTarget,
+        settings: &LibraryThemeSettings,
+        summary: &str,
+        overall_confidence: f64,
+        themes: &[LibraryThemeAssignment],
+    ) -> Result<(), AppError> {
+        validate_uuid(&target.id, "library item")?;
+        validate_library_theme_settings(settings)?;
+        if summary.chars().count() > 500
+            || !overall_confidence.is_finite()
+            || !(0.0..=1.0).contains(&overall_confidence)
+            || themes.len() > 12
+        {
+            return Err(AppError::new(
+                "invalid_theme_analysis",
+                "The local model returned an invalid theme analysis.",
+            ));
+        }
+        let mut connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "The theme index is unavailable.")
+        })?;
+        let transaction = connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO library_theme_analyses
+                (item_id, model, mode, summary, overall_confidence, file_size_bytes, modified_at_ms, analyzed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(item_id) DO UPDATE SET
+                model = excluded.model, mode = excluded.mode, summary = excluded.summary,
+                overall_confidence = excluded.overall_confidence,
+                file_size_bytes = excluded.file_size_bytes,
+                modified_at_ms = excluded.modified_at_ms, analyzed_at = excluded.analyzed_at",
+            params![
+                target.id,
+                settings.model,
+                library_theme_mode_name(settings.mode),
+                summary,
+                overall_confidence,
+                target.file_size_bytes,
+                target.modified_at_ms,
+                Utc::now().timestamp_millis(),
+            ],
+        )?;
+        transaction.execute(
+            "DELETE FROM library_theme_assignments WHERE item_id = ?1",
+            [&target.id],
+        )?;
+        for theme in themes {
+            validate_theme_assignment(theme)?;
+            let evidence = serde_json::to_string(&theme.evidence)
+                .map_err(|error| AppError::internal("could not serialize theme evidence", error))?;
+            transaction.execute(
+                "INSERT INTO library_theme_assignments
+                    (item_id, theme_key, label, confidence, evidence_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    target.id,
+                    theme.key,
+                    theme.label,
+                    theme.confidence,
+                    evidence
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn remove_theme_analysis(&self, item_id: &str) -> Result<(), AppError> {
+        validate_uuid(item_id, "library item")?;
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "The theme index is unavailable.")
+        })?;
+        connection.execute(
+            "DELETE FROM library_theme_analyses WHERE item_id = ?1",
+            [item_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn library_theme_index_status(
+        &self,
+        settings: &LibraryThemeSettings,
+    ) -> Result<LibraryThemeIndexStatus, AppError> {
+        validate_library_theme_settings(settings)?;
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "The theme index is unavailable.")
+        })?;
+        let eligible_items: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM media_library media
+             JOIN library_media_metadata metadata ON metadata.item_id = media.id
+             WHERE media.missing = 0 AND media.media_kind IN ('video', 'both')
+               AND metadata.state = 'ready'",
+            [],
+            |row| row.get(0),
+        )?;
+        let indexed_items: i64 = connection.query_row(
+            "SELECT COUNT(*)
+             FROM library_theme_analyses analysis
+             JOIN media_library media ON media.id = analysis.item_id
+             LEFT JOIN library_media_metadata metadata ON metadata.item_id = media.id
+             WHERE media.missing = 0 AND media.media_kind IN ('video', 'both')
+               AND metadata.state = 'ready'
+               AND analysis.model = ?1 AND analysis.mode = ?2
+               AND analysis.file_size_bytes IS metadata.file_size_bytes
+               AND analysis.modified_at_ms IS metadata.modified_at_ms",
+            params![settings.model, library_theme_mode_name(settings.mode)],
+            |row| row.get(0),
+        )?;
+        let theme_count: i64 = connection.query_row(
+            "SELECT COUNT(DISTINCT assignment.theme_key)
+             FROM library_theme_assignments assignment
+             JOIN library_theme_analyses analysis ON analysis.item_id = assignment.item_id
+             JOIN media_library media ON media.id = assignment.item_id
+             LEFT JOIN library_media_metadata metadata ON metadata.item_id = assignment.item_id
+             WHERE media.missing = 0 AND metadata.state = 'ready'
+               AND analysis.model = ?1 AND analysis.mode = ?2
+               AND analysis.file_size_bytes IS metadata.file_size_bytes
+               AND analysis.modified_at_ms IS metadata.modified_at_ms",
+            params![settings.model, library_theme_mode_name(settings.mode)],
+            |row| row.get(0),
+        )?;
+        let eligible_items = usize::try_from(eligible_items).unwrap_or(usize::MAX);
+        let indexed_items = usize::try_from(indexed_items).unwrap_or(usize::MAX);
+        Ok(LibraryThemeIndexStatus {
+            eligible_items,
+            indexed_items,
+            stale_items: eligible_items.saturating_sub(indexed_items),
+            theme_count: usize::try_from(theme_count).unwrap_or(usize::MAX),
+        })
+    }
+
+    pub fn list_library_theme_analyses(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<LibraryThemeAnalysis>, AppError> {
+        if !(1..=100).contains(&limit) {
+            return Err(AppError::new(
+                "invalid_theme_analysis_limit",
+                "Theme-analysis history returns between 1 and 100 records.",
+            ));
+        }
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "The theme index is unavailable.")
+        })?;
+        let mut statement = connection.prepare(
+            "SELECT analysis.item_id, media.title, analysis.model, analysis.mode,
+                    analysis.summary, analysis.overall_confidence, analysis.analyzed_at
+             FROM library_theme_analyses analysis
+             JOIN media_library media ON media.id = analysis.item_id
+             LEFT JOIN library_media_metadata metadata ON metadata.item_id = analysis.item_id
+             WHERE analysis.file_size_bytes IS metadata.file_size_bytes
+               AND analysis.modified_at_ms IS metadata.modified_at_ms
+               AND analysis.model = COALESCE(
+                   (SELECT json_extract(value_json, '$.model') FROM settings WHERE key = 'library.theme.settings'),
+                   'qwen2.5vl:7b'
+               )
+               AND analysis.mode = COALESCE(
+                   (SELECT json_extract(value_json, '$.mode') FROM settings WHERE key = 'library.theme.settings'),
+                   'deep'
+               )
+             ORDER BY analysis.analyzed_at DESC LIMIT ?1",
+        )?;
+        let rows = statement
+            .query_map([i64::try_from(limit).unwrap_or(100)], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, f64>(5)?,
+                    row.get::<_, i64>(6)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        let mut theme_statement = connection.prepare(
+            "SELECT theme_key, label, confidence, evidence_json
+             FROM library_theme_assignments WHERE item_id = ?1
+             ORDER BY confidence DESC, label COLLATE NOCASE",
+        )?;
+        rows.into_iter()
+            .map(
+                |(item_id, title, model, mode, summary, overall_confidence, analyzed_at)| {
+                    let themes = theme_statement
+                        .query_map([&item_id], |row| {
+                            let evidence_json = row.get::<_, String>(3)?;
+                            Ok(LibraryThemeAssignment {
+                                key: row.get(0)?,
+                                label: row.get(1)?,
+                                confidence: row.get(2)?,
+                                evidence: serde_json::from_str(&evidence_json).unwrap_or_default(),
+                            })
+                        })?
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok(LibraryThemeAnalysis {
+                        item_id,
+                        title,
+                        model,
+                        mode: library_theme_mode_from_name(&mode),
+                        summary,
+                        overall_confidence,
+                        themes,
+                        analyzed_at: DateTime::from_timestamp_millis(analyzed_at)
+                            .unwrap_or(DateTime::<Utc>::UNIX_EPOCH),
+                    })
+                },
+            )
+            .collect()
+    }
+
     pub fn list_library_items_for_backup(
         &self,
         limit: usize,
@@ -1796,6 +2134,44 @@ impl Database {
                 .collect::<Result<Vec<String>, _>>()?;
             values
         };
+        let themes = {
+            let availability_condition = match request.availability {
+                LibraryAvailabilityFilter::All => "",
+                LibraryAvailabilityFilter::Available => " AND media_library.missing = 0",
+                LibraryAvailabilityFilter::Missing => " AND media_library.missing = 1",
+            };
+            let mut statement = connection.prepare(&format!(
+                "SELECT assignment.theme_key, MIN(assignment.label), COUNT(DISTINCT assignment.item_id)
+                 FROM library_theme_assignments assignment
+                 JOIN media_library ON media_library.id = assignment.item_id
+                 JOIN library_theme_analyses analysis ON analysis.item_id = assignment.item_id
+                 LEFT JOIN library_media_metadata metadata ON metadata.item_id = assignment.item_id
+                 WHERE analysis.file_size_bytes IS metadata.file_size_bytes
+                   AND analysis.modified_at_ms IS metadata.modified_at_ms
+                   AND analysis.model = COALESCE(
+                       (SELECT json_extract(value_json, '$.model') FROM settings WHERE key = 'library.theme.settings'),
+                       'qwen2.5vl:7b'
+                   )
+                   AND analysis.mode = COALESCE(
+                       (SELECT json_extract(value_json, '$.mode') FROM settings WHERE key = 'library.theme.settings'),
+                       'deep'
+                   )
+                   {availability_condition}{source_condition}
+                 GROUP BY assignment.theme_key
+                 ORDER BY COUNT(DISTINCT assignment.item_id) DESC, MIN(assignment.label) COLLATE NOCASE
+                 LIMIT 200"
+            ))?;
+            let values = statement
+                .query_map(params_from_iter(request.source_id.iter()), |row| {
+                    Ok(LibraryThemeFacet {
+                        key: row.get(0)?,
+                        label: row.get(1)?,
+                        item_count: usize::try_from(row.get::<_, i64>(2)?).unwrap_or(usize::MAX),
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            values
+        };
         let mut folder_sql = String::from(
             "SELECT source_id, relative_path FROM media_library
              WHERE source_id IS NOT NULL AND relative_path IS NOT NULL",
@@ -1861,6 +2237,7 @@ impl Database {
             creators,
             series,
             sites,
+            themes,
             folders,
         })
     }
@@ -5547,6 +5924,30 @@ fn build_library_query(request: &LibraryQueryRequest) -> Result<(String, Vec<Sql
         clauses.push(format!("({})", matches.join(" OR ")));
     }
 
+    if let Some(theme) = request.theme.as_deref() {
+        let theme = validate_library_filter_text(theme, "theme", 80)?;
+        let placeholder = bind(SqlValue::Text(theme));
+        clauses.push(format!(
+            "EXISTS (
+                SELECT 1 FROM library_theme_assignments assignment
+                JOIN library_theme_analyses analysis ON analysis.item_id = assignment.item_id
+                LEFT JOIN library_media_metadata theme_metadata ON theme_metadata.item_id = assignment.item_id
+                WHERE assignment.item_id = media_library.id
+                  AND assignment.theme_key = {placeholder} COLLATE NOCASE
+                  AND analysis.file_size_bytes IS theme_metadata.file_size_bytes
+                  AND analysis.modified_at_ms IS theme_metadata.modified_at_ms
+                  AND analysis.model = COALESCE(
+                      (SELECT json_extract(value_json, '$.model') FROM settings WHERE key = 'library.theme.settings'),
+                      'qwen2.5vl:7b'
+                  )
+                  AND analysis.mode = COALESCE(
+                      (SELECT json_extract(value_json, '$.mode') FROM settings WHERE key = 'library.theme.settings'),
+                      'deep'
+                  )
+            )"
+        ));
+    }
+
     if let Some(rating) = request.rating.as_deref() {
         clauses.push(match rating {
             "rated" => "rating IS NOT NULL".to_owned(),
@@ -5592,6 +5993,59 @@ fn normalize_library_folder_path(value: &str) -> Result<String, AppError> {
         ));
     }
     Ok(normalized.to_owned())
+}
+
+fn validate_library_theme_settings(settings: &LibraryThemeSettings) -> Result<(), AppError> {
+    let model = settings.model.trim();
+    if model.is_empty()
+        || model.chars().count() > 100
+        || !model
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || ".:_-/".contains(character))
+    {
+        return Err(AppError::new(
+            "invalid_theme_model",
+            "Choose a valid local Ollama model name.",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_theme_assignment(theme: &LibraryThemeAssignment) -> Result<(), AppError> {
+    if theme.key.is_empty()
+        || theme.key.chars().count() > 80
+        || !theme.key.chars().all(|character| {
+            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
+        })
+        || theme.label.trim().is_empty()
+        || theme.label.chars().count() > 80
+        || !theme.confidence.is_finite()
+        || !(0.0..=1.0).contains(&theme.confidence)
+        || theme.evidence.len() > 6
+        || theme.evidence.iter().any(|evidence| {
+            evidence.chars().count() > 240 || evidence.chars().any(char::is_control)
+        })
+    {
+        return Err(AppError::new(
+            "invalid_theme_analysis",
+            "The local model returned an invalid theme assignment.",
+        ));
+    }
+    Ok(())
+}
+
+fn library_theme_mode_name(mode: LibraryThemeAnalysisMode) -> &'static str {
+    match mode {
+        LibraryThemeAnalysisMode::Fast => "fast",
+        LibraryThemeAnalysisMode::Deep => "deep",
+    }
+}
+
+fn library_theme_mode_from_name(value: &str) -> LibraryThemeAnalysisMode {
+    match value {
+        "fast" => LibraryThemeAnalysisMode::Fast,
+        _ => LibraryThemeAnalysisMode::Deep,
+    }
 }
 
 fn validate_library_filter_text(
@@ -5700,6 +6154,11 @@ fn normalize_smart_view_query(
     query.creators = validate_library_filter_values(&query.creators, "creator", 200)?;
     query.series = validate_library_filter_values(&query.series, "series", 200)?;
     query.sites = validate_library_filter_values(&query.sites, "site", 200)?;
+    query.theme = query
+        .theme
+        .take()
+        .map(|theme| validate_library_filter_text(&theme, "theme", 80))
+        .transpose()?;
     build_library_query(&library_query_from_smart_view(&query, 1, 1))?;
     Ok(query)
 }
@@ -5746,6 +6205,7 @@ fn library_query_from_smart_view(
         creators: query.creators.clone(),
         series: query.series.clone(),
         sites: query.sites.clone(),
+        theme: query.theme.clone(),
         rating: query.rating.clone(),
         collection_id: query.collection_id.clone(),
         favorite_only: query.favorite_only,
@@ -5773,6 +6233,7 @@ fn empty_library_query_request(page: u32, page_size: u32) -> LibraryQueryRequest
         creators: Vec::new(),
         series: Vec::new(),
         sites: Vec::new(),
+        theme: None,
         rating: None,
         collection_id: None,
         favorite_only: false,
@@ -7475,7 +7936,7 @@ mod tests {
                 row.get(0)
             })
             .expect("recovered migration version");
-        assert_eq!(latest_version, 26);
+        assert_eq!(latest_version, 27);
         let has_playback: bool = connection
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'library_playback')",
@@ -8231,6 +8692,7 @@ mod tests {
             creators: Vec::new(),
             series: vec![" Relaxation ".to_owned(), "relaxation".to_owned()],
             sites: Vec::new(),
+            theme: None,
             rating: None,
             collection_id: None,
             favorite_only: false,
@@ -8358,6 +8820,132 @@ mod tests {
         assert!(summary.issues.iter().any(|issue| {
             issue.item_id == healthy.id && issue.kinds.contains(&LibraryHealthIssueKind::Changed)
         }));
+    }
+
+    #[test]
+    fn indexes_and_filters_creator_independent_video_themes() {
+        let directory = tempdir().expect("temporary directory");
+        let database = Database::open(&directory.path().join("themes.sqlite3")).expect("database");
+        let first = database
+            .upsert_library_item(&media_stack_test_item(
+                directory.path(),
+                "Creator A gentle session",
+                LibraryMediaKind::Video,
+            ))
+            .expect("first video");
+        let second = database
+            .upsert_library_item(&media_stack_test_item(
+                directory.path(),
+                "Creator B binaural sounds",
+                LibraryMediaKind::Video,
+            ))
+            .expect("second video");
+        let settings = LibraryThemeSettings {
+            enabled: true,
+            ..LibraryThemeSettings::default()
+        };
+        database
+            .save_library_theme_settings(&settings)
+            .expect("theme settings");
+        let targets = database
+            .list_theme_analysis_targets_after(None, 100, &settings)
+            .expect("theme targets");
+        assert_eq!(targets.len(), 2);
+        let themes = vec![
+            LibraryThemeAssignment {
+                key: "asmr".to_owned(),
+                label: "ASMR".to_owned(),
+                confidence: 0.98,
+                evidence: vec!["Visual: binaural microphone setup".to_owned()],
+            },
+            LibraryThemeAssignment {
+                key: "ear-massage".to_owned(),
+                label: "Ear massage".to_owned(),
+                confidence: 0.93,
+                evidence: vec!["Visual: hands massage an ear microphone".to_owned()],
+            },
+        ];
+        for target in &targets {
+            database
+                .save_theme_analysis(
+                    target,
+                    &settings,
+                    "An ASMR ear-massage session.",
+                    0.95,
+                    &themes,
+                )
+                .expect("theme analysis");
+        }
+        let status = database
+            .library_theme_index_status(&settings)
+            .expect("theme status");
+        assert_eq!(status.eligible_items, 2);
+        assert_eq!(status.indexed_items, 2);
+        assert_eq!(status.theme_count, 2);
+
+        let mut request = empty_library_query_request(1, 60);
+        request.theme = Some("ear-massage".to_owned());
+        let result = database.query_library_items(request).expect("theme filter");
+        assert_eq!(result.total_items, 2);
+        assert!(result.items.iter().any(|item| item.id == first.id));
+        assert!(result.items.iter().any(|item| item.id == second.id));
+        let facets = database
+            .library_facets(LibraryFacetRequest {
+                source_id: None,
+                availability: LibraryAvailabilityFilter::Available,
+            })
+            .expect("theme facets");
+        assert!(facets
+            .themes
+            .iter()
+            .any(|theme| theme.key == "ear-massage" && theme.item_count == 2));
+        let analyses = database
+            .list_library_theme_analyses(10)
+            .expect("theme evidence");
+        assert_eq!(analyses.len(), 2);
+        assert!(analyses.iter().all(|analysis| analysis
+            .themes
+            .iter()
+            .any(|theme| theme.key == "ear-massage")));
+
+        let fast_settings = LibraryThemeSettings {
+            mode: LibraryThemeAnalysisMode::Fast,
+            ..settings.clone()
+        };
+        database
+            .save_library_theme_settings(&fast_settings)
+            .expect("changed theme settings");
+        assert_eq!(
+            database
+                .library_theme_index_status(&fast_settings)
+                .expect("mode-stale theme status")
+                .stale_items,
+            2
+        );
+        assert!(database
+            .library_facets(LibraryFacetRequest {
+                source_id: None,
+                availability: LibraryAvailabilityFilter::Available,
+            })
+            .expect("mode-stale facets")
+            .themes
+            .is_empty());
+        database
+            .save_library_theme_settings(&settings)
+            .expect("restore theme settings");
+
+        let mut changed = second.clone();
+        changed.modified_at_ms = Some(changed.modified_at_ms.unwrap_or_default() + 1);
+        database
+            .upsert_library_item(&changed)
+            .expect("changed video fingerprint");
+        assert_eq!(
+            database
+                .library_theme_index_status(&settings)
+                .expect("stale theme status")
+                .stale_items,
+            1
+        );
     }
 
     #[test]
@@ -9189,6 +9777,7 @@ mod tests {
             creators: Vec::new(),
             series: Vec::new(),
             sites: Vec::new(),
+            theme: None,
             rating: None,
             collection_id: None,
             favorite_only: false,

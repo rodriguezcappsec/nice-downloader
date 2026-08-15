@@ -117,7 +117,7 @@ type FolderOption = FolderSelection & { value: string; label: string; directCoun
 const LIBRARY_PAGE_SIZE = 60;
 const WATCH_BROWSE_PAGE_SIZE = 24;
 const EMPTY_LIBRARY_RESULT: LibraryQueryResult = { items: [], totalItems: 0, page: 1, pageSize: LIBRARY_PAGE_SIZE, totalPages: 1 };
-const EMPTY_LIBRARY_FACETS: LibraryFacets = { totalItems: 0, availableItems: 0, missingItems: 0, containers: [], tags: [], creators: [], series: [], sites: [], folders: [] };
+const EMPTY_LIBRARY_FACETS: LibraryFacets = { totalItems: 0, availableItems: 0, missingItems: 0, containers: [], tags: [], creators: [], series: [], sites: [], themes: [], folders: [] };
 type LiveAnnouncement = { signature: string; message: string; assertive?: boolean };
 type TranscriptSeekRequest = { id: number; itemId: string; seconds: number };
 
@@ -194,6 +194,7 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
   const [creatorFilters, setCreatorFilters] = useState<string[]>(initialWorkspace.creatorFilters);
   const [seriesFilters, setSeriesFilters] = useState<string[]>(initialWorkspace.seriesFilters);
   const [siteFilters, setSiteFilters] = useState<string[]>(initialWorkspace.siteFilters);
+  const [themeFilter, setThemeFilter] = useState(initialWorkspace.themeFilter);
   const [ratingFilter, setRatingFilter] = useState(initialWorkspace.ratingFilter);
   const [collectionFilter, setCollectionFilter] = useState(initialWorkspace.collectionFilter);
   const [favoriteOnly, setFavoriteOnly] = useState(initialWorkspace.favoriteOnly);
@@ -276,6 +277,7 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
     creatorFilters,
     seriesFilters,
     siteFilters,
+    themeFilter,
     ratingFilter,
     collectionFilter,
     favoriteOnly,
@@ -288,7 +290,7 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
   useEffect(() => {
     const timer = window.setTimeout(() => writeLibraryWorkspace(workspaceSnapshotRef.current), 150);
     return () => window.clearTimeout(timer);
-  }, [availabilityFilter, collectionFilter, containerFilter, creatorFilters, dateFilter, durationFilter, favoriteOnly, folderFilter, folderScope, mediaFilter, publishedFilter, ratingFilter, resolutionFilter, resultPage, search, selectedItem?.id, seriesFilters, siteFilters, sort, sourceFilter, tagFilters, viewMode]);
+  }, [availabilityFilter, collectionFilter, containerFilter, creatorFilters, dateFilter, durationFilter, favoriteOnly, folderFilter, folderScope, mediaFilter, publishedFilter, ratingFilter, resolutionFilter, resultPage, search, selectedItem?.id, seriesFilters, siteFilters, sort, sourceFilter, tagFilters, themeFilter, viewMode]);
 
   useEffect(() => {
     if (!active) return;
@@ -353,6 +355,18 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
     };
     window.addEventListener("nice-downloader:library-health-filter", applyHealthFilter);
     return () => window.removeEventListener("nice-downloader:library-health-filter", applyHealthFilter);
+  }, []);
+
+  useEffect(() => {
+    const applyThemeFilter = (event: Event) => {
+      const key = (event as CustomEvent<{ key?: string }>).detail?.key;
+      if (!key) return;
+      resetFilters();
+      setThemeFilter(key);
+      setResultPage(1);
+    };
+    window.addEventListener("nice-downloader:library-theme-filter", applyThemeFilter);
+    return () => window.removeEventListener("nice-downloader:library-theme-filter", applyThemeFilter);
   }, []);
 
   function startWatching(item: LibraryItem, queue: LibraryItem[] | null = null, startAtSeconds?: number) {
@@ -695,6 +709,15 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
   }, [search]);
 
   useEffect(() => {
+    let disposed = false;
+    let unlisten = () => {};
+    void api.onLibraryThemeAnalysisUpdated((job) => {
+      if (!disposed && job.state !== "running") scheduleLibraryRefresh(0);
+    }).then((cleanup) => disposed ? cleanup() : unlisten = cleanup);
+    return () => { disposed = true; unlisten(); };
+  }, []);
+
+  useEffect(() => {
     void api.getLibraryTranscriptIndexStatus()
       .then(setTranscriptStatus)
       .catch(() => setTranscriptStatus(null));
@@ -798,12 +821,13 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
       creators: creatorFilters,
       series: seriesFilters,
       sites: siteFilters,
+      theme: themeFilter === "all" ? null : themeFilter,
       rating: ratingFilter === "all" ? null : ratingFilter,
       collectionId: collectionFilter === "all" ? null : collectionFilter,
       favoriteOnly,
       sort,
     };
-  }, [availabilityFilter, collectionFilter, containerFilter, creatorFilters, dateFilter, debouncedSearch, durationFilter, favoriteOnly, folderFilter, folderScope, mediaFilter, publishedFilter, ratingFilter, resolutionFilter, resultPage, seriesFilters, siteFilters, sort, sourceFilter, tagFilters]);
+  }, [availabilityFilter, collectionFilter, containerFilter, creatorFilters, dateFilter, debouncedSearch, durationFilter, favoriteOnly, folderFilter, folderScope, mediaFilter, publishedFilter, ratingFilter, resolutionFilter, resultPage, seriesFilters, siteFilters, sort, sourceFilter, tagFilters, themeFilter]);
   const currentSmartViewQuery = useMemo<LibrarySmartViewQuery>(() => {
     const { page: _page, pageSize: _pageSize, ...query } = libraryRequest;
     return { ...query, search: search.trim() || null };
@@ -924,6 +948,7 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
   const creators = facets.creators;
   const seriesOptions = facets.series;
   const sites = facets.sites;
+  const themes = facets.themes;
   const folderOptions = useMemo(() => buildFolderOptions(facets.folders, sources, sourceFilter), [facets.folders, sourceFilter, sources]);
   const featured = recentResult.items[0];
   const videos = videoResult.items;
@@ -932,9 +957,11 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
   const currentResultPage = queryResult.page;
   const resultStart = queryResult.totalItems === 0 ? 0 : (currentResultPage - 1) * queryResult.pageSize;
   const resultEnd = Math.min(resultStart + items.length, queryResult.totalItems);
-  const isFiltered = Boolean(search.trim()) || sourceFilter !== "all" || folderFilter !== "all" || mediaFilter !== "all" || resolutionFilter !== "all" || containerFilter !== "all" || durationFilter !== "all" || dateFilter !== "all" || publishedFilter !== "all" || availabilityFilter !== "available" || tagFilters.length > 0 || creatorFilters.length > 0 || seriesFilters.length > 0 || siteFilters.length > 0 || ratingFilter !== "all" || collectionFilter !== "all" || favoriteOnly || sort !== "recent";
+  const isFiltered = Boolean(search.trim()) || sourceFilter !== "all" || folderFilter !== "all" || mediaFilter !== "all" || resolutionFilter !== "all" || containerFilter !== "all" || durationFilter !== "all" || dateFilter !== "all" || publishedFilter !== "all" || availabilityFilter !== "available" || tagFilters.length > 0 || creatorFilters.length > 0 || seriesFilters.length > 0 || siteFilters.length > 0 || themeFilter !== "all" || ratingFilter !== "all" || collectionFilter !== "all" || favoriteOnly || sort !== "recent";
   const resultTitle = search.trim()
     ? `Results for “${search.trim()}”`
+    : themeFilter !== "all"
+      ? `Theme: ${themes.find((theme) => theme.key === themeFilter)?.label || themeFilter}`
     : creatorFilters.length === 1
       ? `From ${creatorFilters[0]}`
       : seriesFilters.length === 1
@@ -958,7 +985,7 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
       return;
     }
     setResultPage(1);
-  }, [availabilityFilter, collectionFilter, containerFilter, creatorFilters, dateFilter, durationFilter, favoriteOnly, folderFilter, folderScope, mediaFilter, publishedFilter, ratingFilter, resolutionFilter, search, selectionMode, seriesFilters, siteFilters, sort, sourceFilter, tagFilters]);
+  }, [availabilityFilter, collectionFilter, containerFilter, creatorFilters, dateFilter, durationFilter, favoriteOnly, folderFilter, folderScope, mediaFilter, publishedFilter, ratingFilter, resolutionFilter, search, selectionMode, seriesFilters, siteFilters, sort, sourceFilter, tagFilters, themeFilter]);
 
   useEffect(() => {
     if (folderFilter === "all") return;
@@ -975,7 +1002,8 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
     if (sourceFilter !== "all" && !sources.some((source) => source.id === sourceFilter)) setSourceFilter("all");
     if (collectionFilter !== "all" && !collections.some((collection) => collection.id === collectionFilter)) setCollectionFilter("all");
     if (facetsContext === `${sourceFilter}:${availabilityFilter}` && containerFilter !== "all" && !containers.includes(containerFilter)) setContainerFilter("all");
-  }, [availabilityFilter, collectionFilter, collections, containerFilter, containers, facetsContext, libraryCatalogContextLoaded, sourceFilter, sources]);
+    if (facetsContext === `${sourceFilter}:${availabilityFilter}` && themeFilter !== "all" && !themes.some((theme) => theme.key === themeFilter)) setThemeFilter("all");
+  }, [availabilityFilter, collectionFilter, collections, containerFilter, containers, facetsContext, libraryCatalogContextLoaded, sourceFilter, sources, themeFilter, themes]);
 
   const navigationItems = useMemo(() => activeMediaStack ? activeMediaStackItems : isFiltered || selectionMode
     ? Array.from(new Map([...items, ...detailsExtraItems].map((item) => [item.id, item])).values())
@@ -1222,6 +1250,7 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
     setMediaFilter("all"); setSourceFilter("all"); setFolderFilter("all"); setFolderScope("tree"); setResolutionFilter("all"); setContainerFilter("all");
     setDurationFilter("all"); setDateFilter("all"); setPublishedFilter("all"); setAvailabilityFilter("available"); setTagFilters([]); setCreatorFilters([]);
     setSeriesFilters([]); setSiteFilters([]);
+    setThemeFilter("all");
     setRatingFilter("all"); setCollectionFilter("all"); setFavoriteOnly(false);
     setSort("recent");
   }
@@ -1245,6 +1274,7 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
     setCreatorFilters(query.creators);
     setSeriesFilters(query.series);
     setSiteFilters(query.sites);
+    setThemeFilter(query.theme || "all");
     setRatingFilter(query.rating || "all");
     setCollectionFilter(query.collectionId || "all");
     setFavoriteOnly(query.favoriteOnly);
@@ -1723,11 +1753,13 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
         <label className="shrink-0"><span className="sr-only">Add creator filter</span><Select className="h-9 w-[170px] bg-elevated/70 text-xs" value="" onChange={(event) => { const value = event.target.value; if (value && !creatorFilters.includes(value)) setCreatorFilters((current) => [...current, value]); }}><option value="">Add creator…</option>{creators.filter((creator) => !creatorFilters.includes(creator)).map((creator) => <option key={creator} value={creator}>{creator}</option>)}</Select></label>
         <label className="shrink-0"><span className="sr-only">Add series filter</span><Select className="h-9 w-[170px] bg-elevated/70 text-xs" value="" onChange={(event) => { const value = event.target.value; if (value && !seriesFilters.includes(value)) setSeriesFilters((current) => [...current, value]); }}><option value="">Add series…</option>{seriesOptions.filter((series) => !seriesFilters.includes(series)).map((series) => <option key={series} value={series}>{series}</option>)}</Select></label>
         <label className="shrink-0"><span className="sr-only">Add site filter</span><Select className="h-9 w-[145px] bg-elevated/70 text-xs" value="" onChange={(event) => { const value = event.target.value; if (value && !siteFilters.includes(value)) setSiteFilters((current) => [...current, value]); }}><option value="">Add site…</option>{sites.filter((site) => !siteFilters.includes(site)).map((site) => <option key={site} value={site}>{site}</option>)}</Select></label>
+        <label className="shrink-0"><span className="sr-only">Filter by AI-discovered theme</span><Select className="h-9 w-[175px] bg-elevated/70 text-xs" value={themeFilter} onChange={(event) => setThemeFilter(event.target.value)}><option value="all">Any theme</option>{themes.map((theme) => <option key={theme.key} value={theme.key}>{theme.label} ({theme.itemCount})</option>)}</Select></label>
         <label className="shrink-0"><span className="sr-only">Filter by rating</span><Select className="h-9 w-[120px] bg-elevated/70 text-xs" value={ratingFilter} onChange={(event) => setRatingFilter(event.target.value)}><option value="all">Any rating</option><option value="rated">Rated</option><option value="5">5 stars</option><option value="4">4 stars</option><option value="3">3 stars</option><option value="unrated">Unrated</option></Select></label>
         <label className="shrink-0"><span className="sr-only">Sort library results</span><Select className="h-9 w-[175px] bg-elevated/70 text-xs" value={sort} onChange={(event) => setSort(event.target.value as LibrarySort)}><option value="recent">Newest added</option><option value="oldest">Oldest added</option><option value="publishedDesc">Newest published</option><option value="publishedAsc">Oldest published</option><option value="fileDateDesc">Newest file date</option><option value="fileDateAsc">Oldest file date</option><option value="titleAsc">Title A–Z</option><option value="titleDesc">Title Z–A</option><option value="durationDesc">Longest first</option><option value="durationAsc">Shortest first</option><option value="sizeDesc">Largest first</option><option value="sizeAsc">Smallest first</option></Select></label>
       </nav>
 
       {tagFilters.length + creatorFilters.length + seriesFilters.length + siteFilters.length > 0 ? <div className="mt-1 flex flex-wrap items-center gap-2" aria-label="Active Library filters"><span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted">Matching any within each group</span>{tagFilters.map((value) => <ActiveFilterChip key={`tag:${value}`} label={`#${value}`} onRemove={() => setTagFilters((current) => current.filter((item) => item !== value))} />)}{creatorFilters.map((value) => <ActiveFilterChip key={`creator:${value}`} label={`Creator: ${value}`} onRemove={() => setCreatorFilters((current) => current.filter((item) => item !== value))} />)}{seriesFilters.map((value) => <ActiveFilterChip key={`series:${value}`} label={`Series: ${value}`} onRemove={() => setSeriesFilters((current) => current.filter((item) => item !== value))} />)}{siteFilters.map((value) => <ActiveFilterChip key={`site:${value}`} label={`Site: ${value}`} onRemove={() => setSiteFilters((current) => current.filter((item) => item !== value))} />)}<button className="text-[11px] font-medium text-muted hover:text-ink" onClick={() => { setTagFilters([]); setCreatorFilters([]); setSeriesFilters([]); setSiteFilters([]); }}>Clear groups</button></div> : null}
+      {themeFilter !== "all" ? <div className="mt-1 flex flex-wrap items-center gap-2" aria-label="Active theme filter"><span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted">AI theme</span><ActiveFilterChip label={themes.find((theme) => theme.key === themeFilter)?.label || themeFilter} onRemove={() => setThemeFilter("all")} /></div> : null}
 
         {debouncedSearch.length >= 2 ? <TranscriptSearchResults
           query={debouncedSearch}

@@ -681,6 +681,8 @@ pub struct LibraryQueryRequest {
     pub series: Vec<String>,
     #[serde(default)]
     pub sites: Vec<String>,
+    #[serde(default)]
+    pub theme: Option<String>,
     pub rating: Option<String>,
     pub collection_id: Option<String>,
     pub favorite_only: bool,
@@ -711,6 +713,8 @@ pub struct LibrarySmartViewQuery {
     pub series: Vec<String>,
     #[serde(default)]
     pub sites: Vec<String>,
+    #[serde(default)]
+    pub theme: Option<String>,
     pub rating: Option<String>,
     pub collection_id: Option<String>,
     pub favorite_only: bool,
@@ -801,6 +805,14 @@ pub struct LibraryFolderFacet {
     pub tree_count: usize,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryThemeFacet {
+    pub key: String,
+    pub label: String,
+    pub item_count: usize,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LibraryFacets {
@@ -812,7 +824,98 @@ pub struct LibraryFacets {
     pub creators: Vec<String>,
     pub series: Vec<String>,
     pub sites: Vec<String>,
+    pub themes: Vec<LibraryThemeFacet>,
     pub folders: Vec<LibraryFolderFacet>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum LibraryThemeAnalysisMode {
+    Fast,
+    #[default]
+    Deep,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryThemeSettings {
+    pub enabled: bool,
+    pub model: String,
+    pub mode: LibraryThemeAnalysisMode,
+}
+
+impl Default for LibraryThemeSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            model: "qwen2.5vl:7b".to_owned(),
+            mode: LibraryThemeAnalysisMode::Deep,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryThemeProviderStatus {
+    pub available: bool,
+    pub installed_models: Vec<String>,
+    pub selected_model_available: bool,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryThemeAssignment {
+    pub key: String,
+    pub label: String,
+    pub confidence: f64,
+    pub evidence: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryThemeAnalysis {
+    pub item_id: String,
+    pub title: String,
+    pub model: String,
+    pub mode: LibraryThemeAnalysisMode,
+    pub summary: String,
+    pub overall_confidence: f64,
+    pub themes: Vec<LibraryThemeAssignment>,
+    pub analyzed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryThemeIndexStatus {
+    pub eligible_items: usize,
+    pub indexed_items: usize,
+    pub stale_items: usize,
+    pub theme_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum LibraryThemeJobState {
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryThemeJob {
+    pub id: String,
+    pub state: LibraryThemeJobState,
+    pub checked_items: usize,
+    pub total_items: usize,
+    pub indexed_items: usize,
+    pub failed_items: usize,
+    pub current_title: Option<String>,
+    pub error: Option<String>,
+    pub started_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]

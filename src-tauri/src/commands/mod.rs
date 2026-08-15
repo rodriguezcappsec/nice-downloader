@@ -31,12 +31,13 @@ use crate::{
         LibraryPlaybackCacheStatus, LibraryPlaybackEntry, LibraryPlaybackPreflight,
         LibraryPlaybackSession, LibraryPlaybackState, LibraryQueryRequest, LibraryQueryResult,
         LibraryRichMetadata, LibraryScanJob, LibraryScanResult, LibrarySearchStatus,
-        LibrarySmartView, LibrarySource, LibraryTranscriptIndexStatus, LibraryTranscriptMatch,
-        LibraryVisualSimilarityJob, LibraryVisualSimilarityMatch, LibraryVisualSimilarityStatus,
-        LocalShareSession, MediaAnalysis, NativePlaybackSession, NativePlaybackStatus,
-        OnboardingStatus, Preset, PreviewLibraryBulkMoveRequest,
-        PreviewLibraryFileOperationRequest, QueueSettings, QueueSnapshot,
-        SaveAuthenticationProfileRequest, SaveLibraryCollectionRequest,
+        LibrarySmartView, LibrarySource, LibraryThemeAnalysis, LibraryThemeIndexStatus,
+        LibraryThemeJob, LibraryThemeProviderStatus, LibraryThemeSettings,
+        LibraryTranscriptIndexStatus, LibraryTranscriptMatch, LibraryVisualSimilarityJob,
+        LibraryVisualSimilarityMatch, LibraryVisualSimilarityStatus, LocalShareSession,
+        MediaAnalysis, NativePlaybackSession, NativePlaybackStatus, OnboardingStatus, Preset,
+        PreviewLibraryBulkMoveRequest, PreviewLibraryFileOperationRequest, QueueSettings,
+        QueueSnapshot, SaveAuthenticationProfileRequest, SaveLibraryCollectionRequest,
         SaveLibraryCompareSessionRequest, SaveLibraryMediaStackRequest, SaveLibraryMomentRequest,
         SaveLibraryMontageRequest, SaveLibraryPlaybackRequest, SaveLibraryRichMetadataRequest,
         SaveLibrarySmartViewRequest, SaveLibrarySourceRequest, SavePresetRequest,
@@ -48,6 +49,7 @@ use crate::{
     },
     queue::{disk_space, QueueManager},
     subscriptions,
+    theme_analysis::ThemeAnalysisManager,
     transformations::{MontageInput, TransformationManager},
     utils::validation::{
         normalize_engine_preferences, validate_destination, validate_destination_writable,
@@ -189,6 +191,70 @@ pub fn find_visually_similar_library_items(
     minimum_similarity_percent: f64,
 ) -> Result<Vec<LibraryVisualSimilarityMatch>, AppError> {
     database.find_visually_similar_items(&item_id, limit, minimum_similarity_percent)
+}
+
+#[tauri::command]
+pub fn get_library_theme_settings(
+    database: State<'_, Database>,
+) -> Result<LibraryThemeSettings, AppError> {
+    database.load_library_theme_settings()
+}
+
+#[tauri::command]
+pub fn save_library_theme_settings(
+    database: State<'_, Database>,
+    settings: LibraryThemeSettings,
+) -> Result<LibraryThemeSettings, AppError> {
+    database.save_library_theme_settings(&settings)?;
+    Ok(settings)
+}
+
+#[tauri::command]
+pub async fn get_library_theme_provider_status(
+    database: State<'_, Database>,
+    theme_analysis: State<'_, ThemeAnalysisManager>,
+) -> Result<LibraryThemeProviderStatus, AppError> {
+    let settings = database.load_library_theme_settings()?;
+    Ok(theme_analysis.provider_status(&settings).await)
+}
+
+#[tauri::command]
+pub fn get_library_theme_index_status(
+    database: State<'_, Database>,
+) -> Result<LibraryThemeIndexStatus, AppError> {
+    let settings = database.load_library_theme_settings()?;
+    database.library_theme_index_status(&settings)
+}
+
+#[tauri::command]
+pub fn list_library_theme_analyses(
+    database: State<'_, Database>,
+    limit: usize,
+) -> Result<Vec<LibraryThemeAnalysis>, AppError> {
+    database.list_library_theme_analyses(limit)
+}
+
+#[tauri::command]
+pub fn get_library_theme_job(
+    theme_analysis: State<'_, ThemeAnalysisManager>,
+) -> Result<Option<LibraryThemeJob>, AppError> {
+    theme_analysis.job()
+}
+
+#[tauri::command]
+pub async fn start_library_theme_analysis(
+    app: AppHandle,
+    theme_analysis: State<'_, ThemeAnalysisManager>,
+) -> Result<LibraryThemeJob, AppError> {
+    theme_analysis.start(app).await
+}
+
+#[tauri::command]
+pub fn cancel_library_theme_analysis(
+    theme_analysis: State<'_, ThemeAnalysisManager>,
+    job_id: String,
+) -> Result<(), AppError> {
+    theme_analysis.cancel(&job_id)
 }
 
 #[tauri::command]

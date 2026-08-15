@@ -51,6 +51,7 @@ The frontend never receives a generic command-execution primitive. Tauri capabil
 - `database`: SQLite connection, embedded migrations, durable job intent/diagnostics, settings, and history repository.
 - `creative`: Rust-owned, serialized, timeout-bounded storyboard generation from validated catalog videos. Clip exports reuse `transformations` for cancellable FFmpeg execution and staged output publication.
 - `visual_similarity`: cancellable, bounded FFmpeg sampling and derived dHash indexing keyed only by catalog IDs and current source fingerprints.
+- `theme_analysis`: opt-in sequential local-VLM classification through fixed loopback Ollama, with bounded FFmpeg contact sheets, untrusted-content prompting, validated evidence, cancellation, and fingerprint-aware derived themes.
 - `local_share`: memory-only, capability-token LAN serving for a bounded set of revalidated catalog media; no arbitrary path authority crosses the command boundary.
 - `errors`: typed user-facing errors with optional diagnostic details.
 

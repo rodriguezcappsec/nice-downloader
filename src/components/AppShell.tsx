@@ -44,6 +44,7 @@ const mediaNavigation: NavigationItem[] = [
   { id: "curation", label: "Review library", icon: ListChecks },
   { id: "montages", label: "Build montages", icon: Clapperboard },
   { id: "similarity", label: "Find similar media", icon: ScanSearch },
+  { id: "themes", label: "Discover video themes", icon: WandSparkles },
   { id: "health", label: "Media health", icon: HeartPulse },
 ];
 

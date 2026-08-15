@@ -92,7 +92,7 @@ function newerJob(
 }
 
 export const useAppStore = create<AppStore>((set, get) => ({
-  view: savedView && ["new", "downloads", "queue", "history", "subscriptions", "transformations", "library", "compare", "imageCompare", "curation", "montages", "similarity", "sharing", "health", "presets", "settings"].includes(savedView) ? savedView : "library",
+  view: savedView && ["new", "downloads", "queue", "history", "subscriptions", "transformations", "library", "compare", "imageCompare", "curation", "montages", "similarity", "themes", "sharing", "health", "presets", "settings"].includes(savedView) ? savedView : "library",
   compareItemIds: [],
   imageCompareItemIds: [],
   playNextItemIds: [],

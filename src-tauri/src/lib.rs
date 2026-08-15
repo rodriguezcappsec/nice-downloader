@@ -11,6 +11,7 @@ mod models;
 mod native_player;
 mod queue;
 mod subscriptions;
+mod theme_analysis;
 mod transcripts;
 mod transformations;
 mod utils;
@@ -18,8 +19,8 @@ mod visual_similarity;
 
 use crate::{
     creative::CreativeManager, database::Database, engines::managed, library::LibraryManager,
-    local_share::LocalShareManager, queue::QueueManager, transformations::TransformationManager,
-    visual_similarity::VisualSimilarityManager,
+    local_share::LocalShareManager, queue::QueueManager, theme_analysis::ThemeAnalysisManager,
+    transformations::TransformationManager, visual_similarity::VisualSimilarityManager,
 };
 use tauri::Manager;
 use tracing_subscriber::EnvFilter;
@@ -111,6 +112,7 @@ pub fn run() {
             let queue = QueueManager::new(database.clone())?;
             let transformations = TransformationManager::new(database.clone())?;
             let visual_similarity = VisualSimilarityManager::new(database.clone());
+            let theme_analysis = ThemeAnalysisManager::new(database.clone());
             let local_share = LocalShareManager::new(database.clone());
             let creative = CreativeManager::new(
                 database.clone(),
@@ -131,6 +133,7 @@ pub fn run() {
             app.manage(queue);
             app.manage(transformations);
             app.manage(visual_similarity);
+            app.manage(theme_analysis);
             app.manage(local_share);
             app.manage(creative);
             app.manage(library);
@@ -201,6 +204,14 @@ pub fn run() {
             commands::start_library_visual_similarity_index,
             commands::cancel_library_visual_similarity_index,
             commands::find_visually_similar_library_items,
+            commands::get_library_theme_settings,
+            commands::save_library_theme_settings,
+            commands::get_library_theme_provider_status,
+            commands::get_library_theme_index_status,
+            commands::list_library_theme_analyses,
+            commands::get_library_theme_job,
+            commands::start_library_theme_analysis,
+            commands::cancel_library_theme_analysis,
             commands::get_local_share_status,
             commands::start_local_share,
             commands::stop_local_share,

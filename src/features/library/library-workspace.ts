@@ -19,6 +19,7 @@ export interface LibraryWorkspaceSnapshot {
   creatorFilters: string[];
   seriesFilters: string[];
   siteFilters: string[];
+  themeFilter: string;
   ratingFilter: string;
   collectionFilter: string;
   favoriteOnly: boolean;
@@ -48,6 +49,7 @@ export function defaultLibraryWorkspace(storage: Pick<Storage, "getItem"> = wind
     creatorFilters: [],
     seriesFilters: [],
     siteFilters: [],
+    themeFilter: "all",
     ratingFilter: "all",
     collectionFilter: "all",
     favoriteOnly: false,
@@ -80,6 +82,7 @@ export function readLibraryWorkspace(storage: Pick<Storage, "getItem"> = window.
       creatorFilters: boundedStrings(value.creatorFilters),
       seriesFilters: boundedStrings(value.seriesFilters),
       siteFilters: boundedStrings(value.siteFilters),
+      themeFilter: boundedString(value.themeFilter, defaults.themeFilter, 80),
       ratingFilter: oneOf(value.ratingFilter, ["all", "rated", "5", "4", "3", "unrated"] as const, defaults.ratingFilter),
       collectionFilter: boundedString(value.collectionFilter, defaults.collectionFilter, 100),
       favoriteOnly: typeof value.favoriteOnly === "boolean" ? value.favoriteOnly : defaults.favoriteOnly,

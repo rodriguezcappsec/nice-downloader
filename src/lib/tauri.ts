@@ -45,6 +45,11 @@ import type {
   LibraryItem,
   LibraryRichMetadata,
   LibraryHealthSummary,
+  LibraryThemeAnalysis,
+  LibraryThemeIndexStatus,
+  LibraryThemeJob,
+  LibraryThemeProviderStatus,
+  LibraryThemeSettings,
   LibrarySearchStatus,
   LibrarySmartView,
   LibraryFacetRequest,
@@ -192,6 +197,19 @@ export const api = {
     invoke<void>("cancel_library_visual_similarity_index", { jobId }),
   findVisuallySimilarLibraryItems: (itemId: string, limit = 24, minimumSimilarityPercent = 75) =>
     invoke<LibraryVisualSimilarityMatch[]>("find_visually_similar_library_items", { itemId, limit, minimumSimilarityPercent }),
+  getLibraryThemeSettings: () => invoke<LibraryThemeSettings>("get_library_theme_settings"),
+  saveLibraryThemeSettings: (settings: LibraryThemeSettings) =>
+    invoke<LibraryThemeSettings>("save_library_theme_settings", { settings }),
+  getLibraryThemeProviderStatus: () =>
+    invoke<LibraryThemeProviderStatus>("get_library_theme_provider_status"),
+  getLibraryThemeIndexStatus: () =>
+    invoke<LibraryThemeIndexStatus>("get_library_theme_index_status"),
+  listLibraryThemeAnalyses: (limit = 50) =>
+    invoke<LibraryThemeAnalysis[]>("list_library_theme_analyses", { limit }),
+  getLibraryThemeJob: () => invoke<LibraryThemeJob | null>("get_library_theme_job"),
+  startLibraryThemeAnalysis: () => invoke<LibraryThemeJob>("start_library_theme_analysis"),
+  cancelLibraryThemeAnalysis: (jobId: string) =>
+    invoke<void>("cancel_library_theme_analysis", { jobId }),
   getLocalShareStatus: () => invoke<LocalShareSession | null>("get_local_share_status"),
   startLocalShare: (itemIds: string[], expiresMinutes: number) =>
     invoke<LocalShareSession>("start_local_share", { request: { itemIds, expiresMinutes } }),
@@ -345,6 +363,8 @@ export const api = {
     listen<TransformationTask>("transformation-task-updated", (event) => handler(event.payload)),
   onLibraryVisualSimilarityUpdated: (handler: (job: LibraryVisualSimilarityJob) => void): Promise<UnlistenFn> =>
     listen<LibraryVisualSimilarityJob>("library-visual-similarity-updated", (event) => handler(event.payload)),
+  onLibraryThemeAnalysisUpdated: (handler: (job: LibraryThemeJob) => void): Promise<UnlistenFn> =>
+    listen<LibraryThemeJob>("library-theme-analysis-updated", (event) => handler(event.payload)),
   onLibraryScanUpdated: (handler: (job: LibraryScanJob) => void): Promise<UnlistenFn> =>
     listen<LibraryScanJob>("library-scan-updated", (event) => handler(event.payload)),
   onLibraryItemIndexed: (handler: (item: LibraryItem) => void): Promise<UnlistenFn> =>

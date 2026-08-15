@@ -11,6 +11,7 @@ export type ViewId =
   | "curation"
   | "montages"
   | "similarity"
+  | "themes"
   | "sharing"
   | "health"
   | "presets"
@@ -467,6 +468,7 @@ export interface LibraryQueryRequest {
   creators: string[];
   series: string[];
   sites: string[];
+  theme?: string | null;
   rating?: string | null;
   collectionId?: string | null;
   favoriteOnly: boolean;
@@ -535,6 +537,12 @@ export interface LibraryFolderFacet {
   treeCount: number;
 }
 
+export interface LibraryThemeFacet {
+  key: string;
+  label: string;
+  itemCount: number;
+}
+
 export interface LibraryFacets {
   totalItems: number;
   availableItems: number;
@@ -544,7 +552,63 @@ export interface LibraryFacets {
   creators: string[];
   series: string[];
   sites: string[];
+  themes: LibraryThemeFacet[];
   folders: LibraryFolderFacet[];
+}
+
+export type LibraryThemeAnalysisMode = "fast" | "deep";
+
+export interface LibraryThemeSettings {
+  enabled: boolean;
+  model: string;
+  mode: LibraryThemeAnalysisMode;
+}
+
+export interface LibraryThemeProviderStatus {
+  available: boolean;
+  installedModels: string[];
+  selectedModelAvailable: boolean;
+  detail: string;
+}
+
+export interface LibraryThemeAssignment {
+  key: string;
+  label: string;
+  confidence: number;
+  evidence: string[];
+}
+
+export interface LibraryThemeAnalysis {
+  itemId: string;
+  title: string;
+  model: string;
+  mode: LibraryThemeAnalysisMode;
+  summary: string;
+  overallConfidence: number;
+  themes: LibraryThemeAssignment[];
+  analyzedAt: string;
+}
+
+export interface LibraryThemeIndexStatus {
+  eligibleItems: number;
+  indexedItems: number;
+  staleItems: number;
+  themeCount: number;
+}
+
+export type LibraryThemeJobState = "running" | "completed" | "failed" | "cancelled";
+
+export interface LibraryThemeJob {
+  id: string;
+  state: LibraryThemeJobState;
+  checkedItems: number;
+  totalItems: number;
+  indexedItems: number;
+  failedItems: number;
+  currentTitle?: string | null;
+  error?: string | null;
+  startedAt: string;
+  updatedAt: string;
 }
 
 export interface LibraryMetadataFields {
