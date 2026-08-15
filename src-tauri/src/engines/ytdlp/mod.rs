@@ -32,6 +32,7 @@ pub struct YtDlpRuntimeCapabilities {
 
 static RUNTIME_CAPABILITIES: OnceLock<Mutex<HashMap<PathBuf, YtDlpRuntimeCapabilities>>> =
     OnceLock::new();
+const DOWNLOAD_PROGRESS_DELTA_SECONDS: &str = "0.5";
 
 impl YtDlpRuntimeCapabilities {
     pub fn impersonation_available(&self) -> bool {
@@ -291,6 +292,8 @@ impl DownloadEngine for YtDlpEngine {
             "--newline".to_owned(),
             "--no-color".to_owned(),
             "--progress".to_owned(),
+            "--progress-delta".to_owned(),
+            DOWNLOAD_PROGRESS_DELTA_SECONDS.to_owned(),
             "--progress-template".to_owned(),
             "download:nicedl:progress:%(progress._percent_str)s|%(progress.downloaded_bytes)s|%(progress.total_bytes_estimate)s|%(progress.speed)s|%(progress.eta)s".to_owned(),
             "--progress-template".to_owned(),
@@ -678,6 +681,26 @@ mod tests {
         assert!(overwrite_args
             .iter()
             .any(|argument| argument == "--force-overwrites"));
+    }
+
+    #[test]
+    fn bounds_download_progress_output_frequency() {
+        let engine = YtDlpEngine {
+            executable: PathBuf::from("yt-dlp"),
+        };
+        let args = engine
+            .build_download_args(
+                "https://example.com/video",
+                &options(QualityKind::Best, None, false),
+                None,
+                &EnginePreferences::default(),
+                &YtDlpRuntimeCapabilities::default(),
+            )
+            .expect("download arguments");
+
+        assert!(args
+            .windows(2)
+            .any(|pair| { pair == ["--progress-delta", DOWNLOAD_PROGRESS_DELTA_SECONDS] }));
     }
 
     #[test]
