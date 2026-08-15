@@ -5,6 +5,8 @@ const FALLBACK_ELIGIBLE_ERRORS = new Set([
   "embedded_playback_timeout",
 ]);
 
+export const EMBEDDED_PLAYBACK_TIMEOUT_MS = 8_000;
+
 export function createPlaybackError(code: string, message: string): AppError {
   return { code, message };
 }

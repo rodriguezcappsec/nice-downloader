@@ -899,6 +899,26 @@ pub struct LibraryPlaybackPreflight {
     pub requires_confirmation: bool,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum LibraryPlaybackPreparationPhase {
+    Queued,
+    Copying,
+    Encoding,
+    Finalizing,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryPlaybackPreparationProgress {
+    pub item_id: String,
+    pub phase: LibraryPlaybackPreparationPhase,
+    pub progress_percent: Option<f64>,
+    pub processed_seconds: Option<f64>,
+    pub duration_seconds: Option<f64>,
+    pub reencode_required: bool,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LibraryPlaybackCacheStatus {

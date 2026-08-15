@@ -50,7 +50,7 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Button, Field, Input, Select, Textarea } from "../../components/ui";
 import { formatBytes, formatDuration } from "../../lib/format";
-import { canOfferPlaybackFallback, createPlaybackError } from "../../lib/playback";
+import { canOfferPlaybackFallback, createPlaybackError, EMBEDDED_PLAYBACK_TIMEOUT_MS } from "../../lib/playback";
 import { api, normalizeError } from "../../lib/tauri";
 import { useAppStore } from "../../stores/app-store";
 import { CreativeTimeline } from "./CreativeTimeline";
@@ -77,6 +77,7 @@ import type {
   LibraryMediaStackRole,
   LibraryPlaybackEntry,
   LibraryPlaybackPreflight,
+  LibraryPlaybackPreparationProgress,
   LibraryPlaybackSession,
   LibraryPlaylist,
   LibraryRichMetadata,
@@ -2210,6 +2211,24 @@ function WatchQueueSkeleton() {
   return <div className="space-y-2 p-2" role="status" aria-label="Loading videos">{Array.from({ length: 5 }, (_, index) => <div key={index} className="grid animate-pulse grid-cols-[128px_1fr] gap-3 rounded-[9px] p-2"><div className="aspect-video rounded-[7px] bg-elevated" /><div className="py-1"><div className="h-2.5 w-full rounded bg-elevated" /><div className="mt-2 h-2.5 w-3/4 rounded bg-elevated" /><div className="mt-3 h-2 w-1/2 rounded bg-elevated/70" /></div></div>)}</div>;
 }
 
+function PlaybackPreparationStatus({ preparation, reencodeRequired, cancelling }: { preparation: LibraryPlaybackPreparationProgress | null; reencodeRequired: boolean; cancelling: boolean }) {
+  const percent = preparation?.progressPercent != null ? Math.round(preparation.progressPercent) : null;
+  const label = cancelling
+    ? "Cancelling playback copy…"
+    : preparation?.phase === "queued"
+      ? "Waiting for a playback-copy slot…"
+      : preparation?.phase === "finalizing"
+        ? "Finalizing playback copy…"
+        : reencodeRequired
+          ? "Encoding H.264 playback copy…"
+          : "Copying streams without re-encoding…";
+  return <div className="space-y-2" role="status" aria-live="polite">
+    <div className="flex items-center justify-between gap-3 text-xs text-accent"><span className="flex items-center gap-2"><LoaderCircle className="animate-spin" size={14} /> {label}</span>{percent != null ? <span className="number-font">{percent}%</span> : null}</div>
+    <div className="h-1.5 overflow-hidden rounded-full bg-elevated" role="progressbar" aria-label="Playback copy preparation" aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent ?? undefined}><div className={`h-full bg-accent transition-[width] ${percent == null ? "w-1/3 animate-pulse" : ""}`} style={percent != null ? { width: `${percent}%` } : undefined} /></div>
+    <p className="text-[10px] leading-4 text-muted">You can cancel safely. The original video is never changed.</p>
+  </div>;
+}
+
 function EmbeddedVideoPlayer({ item, sourceName, compact = false, onRestore, onClose, onPrevious, onNext, onPlaybackEnded }: { item: LibraryItem; sourceName: string; compact?: boolean; onRestore?: () => void; onClose: () => void; onPrevious?: () => void; onNext?: () => void; onPlaybackEnded?: () => void }) {
   const setError = useAppStore((state) => state.setError);
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -2217,10 +2236,15 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, onRestore, onC
   const consentDialogRef = useRef<HTMLElement | null>(null);
   const consentReturnFocus = useRef<HTMLElement | null>(null);
   const lastSavedPosition = useRef(0);
+  const playbackWatchdog = useRef<number | null>(null);
   const [session, setSession] = useState<LibraryPlaybackSession | null>(null);
   const [preflight, setPreflight] = useState<LibraryPlaybackPreflight | null>(null);
   const [consent, setConsent] = useState<LibraryPlaybackPreflight | null>(null);
   const [consentBusy, setConsentBusy] = useState(false);
+  const [copyPreparationBusy, setCopyPreparationBusy] = useState(false);
+  const [preparation, setPreparation] = useState<LibraryPlaybackPreparationProgress | null>(null);
+  const [cancelBusy, setCancelBusy] = useState(false);
+  const cancelRequested = useRef(false);
   const [rememberAutomatic, setRememberAutomatic] = useState(false);
   const [loading, setLoading] = useState(true);
   const [playbackError, setPlaybackError] = useState<AppError | null>(null);
@@ -2235,6 +2259,10 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, onRestore, onC
     setPreflight(null);
     setConsent(null);
     setConsentBusy(false);
+    setCopyPreparationBusy(false);
+    setPreparation(null);
+    setCancelBusy(false);
+    cancelRequested.current = false;
     setRememberAutomatic(false);
     setLoading(true);
     setPlaybackError(null);
@@ -2263,6 +2291,25 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, onRestore, onC
   }, [item.id]);
 
   useEffect(() => {
+    if (!copyPreparationBusy) {
+      setPreparation(null);
+      return;
+    }
+    let disposed = false;
+    const refresh = () => {
+      void api.getLibraryPlaybackPreparation(item.id)
+        .then((progress) => { if (!disposed && progress) setPreparation(progress); })
+        .catch(() => {});
+    };
+    refresh();
+    const interval = window.setInterval(refresh, 300);
+    return () => {
+      disposed = true;
+      window.clearInterval(interval);
+    };
+  }, [copyPreparationBusy, item.id]);
+
+  useEffect(() => {
     if (!consent) return;
     consentDialogRef.current?.querySelector<HTMLElement>("[data-consent-cancel]")?.focus();
   }, [consent]);
@@ -2272,9 +2319,35 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, onRestore, onC
     const timer = window.setTimeout(() => {
       setPlaybackError(createPlaybackError("embedded_playback_timeout", "Embedded playback did not become ready. Your video is unchanged; try opening it with your system player."));
       setLoading(false);
-    }, 8_000);
+    }, EMBEDDED_PLAYBACK_TIMEOUT_MS);
     return () => window.clearTimeout(timer);
   }, [session, loading]);
+
+  function clearPlaybackWatchdog() {
+    if (playbackWatchdog.current == null) return;
+    window.clearTimeout(playbackWatchdog.current);
+    playbackWatchdog.current = null;
+  }
+
+  function armPlaybackWatchdog() {
+    clearPlaybackWatchdog();
+    playbackWatchdog.current = window.setTimeout(() => {
+      playbackWatchdog.current = null;
+      videoRef.current?.pause();
+      setLoading(false);
+      setPlaybackError(createPlaybackError(
+        "embedded_playback_timeout",
+        "Embedded playback stalled after starting. Try an H.264 playback copy or open the original in your system player.",
+      ));
+    }, EMBEDDED_PLAYBACK_TIMEOUT_MS);
+  }
+
+  function armPlaybackWatchdogWhilePlaying() {
+    const video = videoRef.current;
+    if (video && !video.paused && !video.ended) armPlaybackWatchdog();
+  }
+
+  useEffect(() => () => clearPlaybackWatchdog(), [item.id, session?.url]);
 
   function persistProgress(completed = false) {
     const video = videoRef.current;
@@ -2406,6 +2479,9 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, onRestore, onC
   async function approveCompatibilityCopy() {
     if (!consent || consentBusy) return;
     setConsentBusy(true);
+    setCopyPreparationBusy(true);
+    setPreparation(null);
+    cancelRequested.current = false;
     setLoading(true);
     if (!consent.reencodeRequired) await rememberCompatibilityPreference();
     try {
@@ -2416,12 +2492,31 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, onRestore, onC
       setConsent(null);
       restoreConsentFocus();
     } catch (error) {
+      const normalized = normalizeError(error);
       setConsent(null);
-      setPlaybackError(normalizeError(error));
+      if (!(cancelRequested.current && normalized.code === "embedded_playback_preparation_cancelled")) {
+        setPlaybackError(normalized);
+      }
       setLoading(false);
       restoreConsentFocus();
     } finally {
+      cancelRequested.current = false;
+      setCopyPreparationBusy(false);
       setConsentBusy(false);
+    }
+  }
+
+  async function cancelCompatibilityCopy() {
+    if (!copyPreparationBusy || cancelBusy || !preparation) return;
+    cancelRequested.current = true;
+    setCancelBusy(true);
+    try {
+      await api.cancelLibraryPlaybackPreparation(item.id);
+    } catch (error) {
+      cancelRequested.current = false;
+      setError(normalizeError(error));
+    } finally {
+      setCancelBusy(false);
     }
   }
 
@@ -2452,6 +2547,7 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, onRestore, onC
   }
 
   async function retryEmbeddedPlayback() {
+    clearPlaybackWatchdog();
     setPlaybackError(null);
     setSession(null);
     setLoading(true);
@@ -2506,10 +2602,14 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, onRestore, onC
         crossOrigin="anonymous"
         preload="metadata"
         onLoadedMetadata={onLoadedMetadata}
+        onPlay={armPlaybackWatchdog}
+        onPlaying={clearPlaybackWatchdog}
+        onWaiting={armPlaybackWatchdogWhilePlaying}
+        onStalled={armPlaybackWatchdogWhilePlaying}
         onTimeUpdate={() => { const video = videoRef.current; if (!video) return; setCurrentPosition(video.currentTime); if (Math.abs(video.currentTime - lastSavedPosition.current) >= 5) persistProgress(false); }}
-        onPause={() => persistProgress(false)}
-        onEnded={() => { persistProgress(true); window.setTimeout(() => onPlaybackEnded?.(), 0); }}
-        onError={() => { setLoading(false); setPlaybackError(createPlaybackError("embedded_playback_decode_failed", "The WebView does not support this file's container or codecs. The original file is unchanged and can still be opened with your system player.")); }}
+        onPause={() => { clearPlaybackWatchdog(); persistProgress(false); }}
+        onEnded={() => { clearPlaybackWatchdog(); persistProgress(true); window.setTimeout(() => onPlaybackEnded?.(), 0); }}
+        onError={() => { clearPlaybackWatchdog(); setLoading(false); setPlaybackError(createPlaybackError("embedded_playback_decode_failed", "The WebView does not support this file's container or codecs. The original file is unchanged and can still be opened with your system player.")); }}
       >
         {session.subtitles.map((track) => <track key={track.url} kind="subtitles" src={track.url} srcLang={track.language || "und"} label={track.label} />)}
       </video> : null}
@@ -2523,7 +2623,7 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, onRestore, onC
       {resumedAt != null ? <p className="w-full text-[10px] text-accent" role="status">Resumed at {formatDuration(resumedAt)}</p> : null}
       {session?.compatibilityMode ? <p className="w-full text-[10px] text-accent" role="status">{session.compatibilityTranscoded ? "Using an H.264/AAC embedded-playback copy." : preflight?.compatibilityCached ? "Using an existing cached compatibility copy. AV1 timing is optimized for the embedded player." : "A lossless AV1 timing copy was created for this playback."} The original is unchanged.</p> : null}
     </footer>
-  </section>{!compact ? <CreativeTimeline item={item} currentTime={currentPosition} duration={playbackDuration} playbackReady={Boolean(session && !playbackError)} onSeek={seekTo} /> : null}{consent ? <div className="fixed inset-0 z-[90] grid place-items-center bg-black/75 p-5 backdrop-blur-sm" onMouseDown={dismissConsent}><section ref={consentDialogRef} className="panel-shadow w-full max-w-xl overflow-hidden rounded-[14px] border border-line bg-panel" role="dialog" aria-modal="true" aria-labelledby="compatibility-copy-title" aria-describedby="compatibility-copy-description" aria-busy={consentBusy} onKeyDown={trapConsentFocus} onMouseDown={(event) => event.stopPropagation()}><header className="flex items-start gap-4 border-b border-line/70 px-5 py-5"><div className="grid size-11 shrink-0 place-items-center rounded-[10px] border border-accent/20 bg-accent/10 text-accent"><Copy size={20} /></div><div><p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-accent">Embedded playback compatibility</p><h2 id="compatibility-copy-title" className="mt-1 text-xl font-semibold tracking-[-0.03em]">{consent.reencodeRequired ? "Create an H.264 playback copy?" : "Create a temporary playback copy?"}</h2><p id="compatibility-copy-description" className="mt-2 text-xs leading-5 text-muted">{consent.reason}</p></div></header><div className="space-y-4 px-5 py-5"><dl className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-5 gap-y-2.5 border-y border-line/60 py-4 text-xs"><dt className="text-muted">Estimated copy size</dt><dd className="number-font font-medium text-ink">{formatBytes(consent.estimatedCopyBytes)}</dd><dt className="text-muted">Free space available</dt><dd className="number-font font-medium text-ink">{consent.availableSpaceBytes != null ? formatBytes(consent.availableSpaceBytes) : "Unknown"}</dd><dt className="text-muted">Conversion</dt><dd className="font-medium text-ink">{consent.reencodeRequired ? "H.264/AAC · video re-encode" : "Stream-copy · no re-encoding"}</dd></dl>{consent.availableSpaceBytes != null && consent.estimatedCopyBytes > consent.availableSpaceBytes ? <p className="border-l-2 border-red-400/70 bg-red-400/5 px-3 py-2 text-xs leading-5 text-red-300" role="alert">There may not be enough free space to create this copy.</p> : null}{consent.unusuallyLarge ? <p className="border-l-2 border-amber-400/70 bg-amber-400/5 px-3 py-2 text-xs leading-5 text-amber-200">This is an unusually large copy, so Nice Downloader always asks before creating it—even when automatic copies are enabled.</p> : null}<div className="rounded-[9px] bg-elevated/55 p-3 text-[11px] leading-5 text-muted"><p><strong className="font-semibold text-ink">Your original stays untouched.</strong> The copy exists only in Nice Downloader’s private playback cache.</p><p className="mt-1">The oldest copies are removed automatically before the cache exceeds 4 files or 8 GiB. You can review or clear the cache in Settings.</p></div>{!consent.reencodeRequired && consent.preference === "never" ? <p className="text-[11px] leading-5 text-muted">Your saved preference is <strong className="text-ink">Never create automatically</strong>. “Create copy and play” is a one-time override unless you enable the option below.</p> : null}{!consent.reencodeRequired ? <label className="flex items-start gap-3 text-xs text-muted"><input className="mt-0.5" type="checkbox" checked={rememberAutomatic} onChange={(event) => setRememberAutomatic(event.target.checked)} /><span><strong className="block font-medium text-ink">Automatically create compatible copies in the future</strong>Large copies will still require confirmation.</span></label> : <p className="text-[11px] leading-5 text-muted">This fallback is never created automatically because it changes the cached copy’s video codec. The original file and its quality remain unchanged.</p>}{consentBusy && consent.reencodeRequired ? <p className="flex items-center gap-2 text-xs text-accent" role="status"><LoaderCircle className="animate-spin" size={14} /> Encoding the compatibility copy. Keep Nice Downloader open; this may take several minutes.</p> : null}</div><footer className="flex flex-wrap items-center justify-end gap-2 border-t border-line/70 bg-elevated/25 px-5 py-4"><Button data-consent-cancel variant="ghost" disabled={consentBusy} onClick={dismissConsent}>Cancel</Button><Button variant="secondary" disabled={consentBusy} onClick={() => void openOriginalFromConsent()}><ExternalLink size={15} /> Open original in system player</Button><Button disabled={consentBusy} onClick={() => void approveCompatibilityCopy()}>{consentBusy ? <LoaderCircle className="animate-spin" size={15} /> : <Copy size={15} />} {consentBusy && consent.reencodeRequired ? "Encoding…" : consent.reencodeRequired ? "Create H.264 copy and play" : "Create copy and play"}</Button></footer></section></div> : null}</>;
+  </section>{!compact ? <CreativeTimeline item={item} currentTime={currentPosition} duration={playbackDuration} playbackReady={Boolean(session && !playbackError)} onSeek={seekTo} /> : null}{consent ? <div className="fixed inset-0 z-[90] grid place-items-center bg-black/75 p-5 backdrop-blur-sm" onMouseDown={dismissConsent}><section ref={consentDialogRef} className="panel-shadow w-full max-w-xl overflow-hidden rounded-[14px] border border-line bg-panel" role="dialog" aria-modal="true" aria-labelledby="compatibility-copy-title" aria-describedby="compatibility-copy-description" aria-busy={consentBusy} onKeyDown={trapConsentFocus} onMouseDown={(event) => event.stopPropagation()}><header className="flex items-start gap-4 border-b border-line/70 px-5 py-5"><div className="grid size-11 shrink-0 place-items-center rounded-[10px] border border-accent/20 bg-accent/10 text-accent"><Copy size={20} /></div><div><p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-accent">Embedded playback compatibility</p><h2 id="compatibility-copy-title" className="mt-1 text-xl font-semibold tracking-[-0.03em]">{consent.reencodeRequired ? "Create an H.264 playback copy?" : "Create a temporary playback copy?"}</h2><p id="compatibility-copy-description" className="mt-2 text-xs leading-5 text-muted">{consent.reason}</p></div></header><div className="space-y-4 px-5 py-5"><dl className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-5 gap-y-2.5 border-y border-line/60 py-4 text-xs"><dt className="text-muted">Estimated copy size</dt><dd className="number-font font-medium text-ink">{formatBytes(consent.estimatedCopyBytes)}</dd><dt className="text-muted">Free space available</dt><dd className="number-font font-medium text-ink">{consent.availableSpaceBytes != null ? formatBytes(consent.availableSpaceBytes) : "Unknown"}</dd><dt className="text-muted">Conversion</dt><dd className="font-medium text-ink">{consent.reencodeRequired ? "H.264/AAC · video re-encode" : "Stream-copy · no re-encoding"}</dd></dl>{consent.availableSpaceBytes != null && consent.estimatedCopyBytes > consent.availableSpaceBytes ? <p className="border-l-2 border-red-400/70 bg-red-400/5 px-3 py-2 text-xs leading-5 text-red-300" role="alert">There may not be enough free space to create this copy.</p> : null}{consent.unusuallyLarge ? <p className="border-l-2 border-amber-400/70 bg-amber-400/5 px-3 py-2 text-xs leading-5 text-amber-200">This is an unusually large copy, so Nice Downloader always asks before creating it—even when automatic copies are enabled.</p> : null}<div className="rounded-[9px] bg-elevated/55 p-3 text-[11px] leading-5 text-muted"><p><strong className="font-semibold text-ink">Your original stays untouched.</strong> The copy exists only in Nice Downloader’s private playback cache.</p><p className="mt-1">The oldest copies are removed automatically before the cache exceeds 4 files or 8 GiB. You can review or clear the cache in Settings.</p></div>{!consent.reencodeRequired && consent.preference === "never" ? <p className="text-[11px] leading-5 text-muted">Your saved preference is <strong className="text-ink">Never create automatically</strong>. “Create copy and play” is a one-time override unless you enable the option below.</p> : null}{!consent.reencodeRequired ? <label className="flex items-start gap-3 text-xs text-muted"><input className="mt-0.5" type="checkbox" checked={rememberAutomatic} onChange={(event) => setRememberAutomatic(event.target.checked)} /><span><strong className="block font-medium text-ink">Automatically create compatible copies in the future</strong>Large copies will still require confirmation.</span></label> : <p className="text-[11px] leading-5 text-muted">This fallback is never created automatically because it changes the cached copy’s video codec. The original file and its quality remain unchanged.</p>}{copyPreparationBusy ? <PlaybackPreparationStatus preparation={preparation} reencodeRequired={consent.reencodeRequired} cancelling={cancelBusy || cancelRequested.current} /> : null}</div><footer className="flex flex-wrap items-center justify-end gap-2 border-t border-line/70 bg-elevated/25 px-5 py-4"><Button data-consent-cancel variant="ghost" disabled={cancelBusy || (copyPreparationBusy && !preparation)} onClick={copyPreparationBusy ? () => void cancelCompatibilityCopy() : dismissConsent}>{copyPreparationBusy ? cancelBusy ? "Cancelling…" : "Cancel copy" : "Cancel"}</Button><Button variant="secondary" disabled={consentBusy} onClick={() => void openOriginalFromConsent()}><ExternalLink size={15} /> Open original in system player</Button><Button disabled={consentBusy} onClick={() => void approveCompatibilityCopy()}>{consentBusy ? <LoaderCircle className="animate-spin" size={15} /> : <Copy size={15} />} {consentBusy && consent.reencodeRequired ? "Encoding…" : consent.reencodeRequired ? "Create H.264 copy and play" : "Create copy and play"}</Button></footer></section></div> : null}</>;
 }
 
 function MediaDetails({ item, sourceName, onClose, onWatch, onChanged, onMetadataChanged, onBrowseCreator, onBrowseSeries, onBrowseSite, onSelectRelated, onRemoved, onOperation }: { item: LibraryItem; sourceName: string; onClose: () => void; onWatch: () => void; onChanged: (item: LibraryItem) => void; onMetadataChanged: () => void; onBrowseCreator: (creator: string) => void; onBrowseSeries: (series: string) => void; onBrowseSite: (site: string) => void; onSelectRelated: (item: LibraryItem) => void; onRemoved: () => void; onOperation: (result: LibraryFileOperationResult) => void }) {

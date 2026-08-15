@@ -50,6 +50,7 @@ import type {
   LibraryImageSession,
   LibraryPlaybackEntry,
   LibraryPlaybackPreflight,
+  LibraryPlaybackPreparationProgress,
   LibraryPlaybackCacheStatus,
   LibraryPlaybackSession,
   LibraryPlaybackState,
@@ -172,6 +173,10 @@ export const api = {
     invoke<LibraryPlaybackSession>("prepare_library_playback", { id, userApproved }),
   prepareLibraryPlaybackFallback: (id: string, userApproved = false) =>
     invoke<LibraryPlaybackSession>("prepare_library_playback_fallback", { id, userApproved }),
+  getLibraryPlaybackPreparation: (id: string) =>
+    invoke<LibraryPlaybackPreparationProgress | null>("get_library_playback_preparation", { id }),
+  cancelLibraryPlaybackPreparation: (id: string) =>
+    invoke<void>("cancel_library_playback_preparation", { id }),
   releaseLibraryPlayback: (id: string) => invoke<void>("release_library_playback", { id }),
   saveLibraryPlaybackProgress: (request: SaveLibraryPlaybackRequest) =>
     invoke<LibraryPlaybackState>("save_library_playback_progress", { request }),

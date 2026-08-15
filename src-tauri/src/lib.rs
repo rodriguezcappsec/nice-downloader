@@ -181,6 +181,8 @@ pub fn run() {
             commands::prepare_library_playback,
             commands::inspect_library_playback_fallback,
             commands::prepare_library_playback_fallback,
+            commands::get_library_playback_preparation,
+            commands::cancel_library_playback_preparation,
             commands::release_library_playback,
             commands::get_library_playback_cache_status,
             commands::clear_library_playback_cache,

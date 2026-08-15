@@ -158,6 +158,22 @@ pub async fn prepare_library_playback_fallback(
 }
 
 #[tauri::command]
+pub fn get_library_playback_preparation(
+    media_server: State<'_, MediaServerState>,
+    id: String,
+) -> Result<Option<crate::models::LibraryPlaybackPreparationProgress>, AppError> {
+    media_server.playback_preparation(&id)
+}
+
+#[tauri::command]
+pub fn cancel_library_playback_preparation(
+    media_server: State<'_, MediaServerState>,
+    id: String,
+) -> Result<(), AppError> {
+    media_server.cancel_playback_preparation(&id)
+}
+
+#[tauri::command]
 pub fn release_library_playback(
     media_server: State<'_, MediaServerState>,
     id: String,

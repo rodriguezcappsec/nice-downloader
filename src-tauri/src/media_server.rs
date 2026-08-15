@@ -4,8 +4,9 @@ use crate::{
     errors::AppError,
     models::{
         LibraryCacheResult, LibraryImageSession, LibraryItem, LibraryMediaKind,
-        LibraryPlaybackCacheStatus, LibraryPlaybackPreflight, LibraryPlaybackSession,
-        LibrarySubtitleTrack, PlaybackCompatibilityPreference,
+        LibraryPlaybackCacheStatus, LibraryPlaybackPreflight, LibraryPlaybackPreparationPhase,
+        LibraryPlaybackPreparationProgress, LibraryPlaybackSession, LibrarySubtitleTrack,
+        PlaybackCompatibilityPreference,
     },
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
@@ -32,18 +33,19 @@ use std::{
     io::SeekFrom,
     net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener as StdTcpListener},
     path::{Path, PathBuf},
+    process::Stdio,
     sync::{Arc, RwLock},
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::{
     fs::File,
-    io::{AsyncReadExt, AsyncSeekExt},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, BufReader},
     net::TcpListener,
     process::Command,
-    sync::{Mutex as AsyncMutex, OnceCell},
+    sync::{Mutex as AsyncMutex, OnceCell, Semaphore, SemaphorePermit},
     time::{timeout, Duration},
 };
-use tokio_util::io::ReaderStream;
+use tokio_util::{io::ReaderStream, sync::CancellationToken};
 use uuid::Uuid;
 
 type BoxError = Box<dyn Error + Send + Sync>;
@@ -61,6 +63,72 @@ struct CompatibilityTarget {
 }
 
 #[derive(Clone)]
+struct ActivePlaybackPreparation {
+    progress: LibraryPlaybackPreparationProgress,
+    cancellation: CancellationToken,
+    reserved_bytes: u64,
+}
+
+struct PlaybackPreparationGuard {
+    item_id: String,
+    preparations: Arc<RwLock<HashMap<String, ActivePlaybackPreparation>>>,
+}
+
+impl Drop for PlaybackPreparationGuard {
+    fn drop(&mut self) {
+        self.preparations
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&self.item_id);
+    }
+}
+
+#[derive(Clone)]
+struct PlaybackProgressReporter {
+    item_id: String,
+    preparations: Arc<RwLock<HashMap<String, ActivePlaybackPreparation>>>,
+}
+
+impl PlaybackProgressReporter {
+    fn update(&self, phase: LibraryPlaybackPreparationPhase, processed_seconds: Option<f64>) {
+        let mut preparations = self
+            .preparations
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(active) = preparations.get_mut(&self.item_id) else {
+            return;
+        };
+        active.progress.phase = phase;
+        if let Some(processed_seconds) = processed_seconds.filter(|value| value.is_finite()) {
+            let processed_seconds = processed_seconds.max(0.0);
+            active.progress.processed_seconds = Some(processed_seconds);
+            active.progress.progress_percent = active
+                .progress
+                .duration_seconds
+                .filter(|duration| *duration > 0.0)
+                .map(|duration| (processed_seconds / duration * 100.0).clamp(0.0, 99.5));
+        }
+    }
+
+    fn update_progress(&self, processed_seconds: f64) {
+        let mut preparations = self
+            .preparations
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(active) = preparations.get_mut(&self.item_id) else {
+            return;
+        };
+        let processed_seconds = processed_seconds.max(0.0);
+        active.progress.processed_seconds = Some(processed_seconds);
+        active.progress.progress_percent = active
+            .progress
+            .duration_seconds
+            .filter(|duration| *duration > 0.0)
+            .map(|duration| (processed_seconds / duration * 100.0).clamp(0.0, 99.5));
+    }
+}
+
+#[derive(Clone)]
 pub struct MediaServerState {
     database: Database,
     base_url: Option<String>,
@@ -68,6 +136,8 @@ pub struct MediaServerState {
     cache_directory: PathBuf,
     playback_paths: Arc<RwLock<HashMap<String, PathBuf>>>,
     compatibility_lock: Arc<AsyncMutex<()>>,
+    playback_preparations: Arc<RwLock<HashMap<String, ActivePlaybackPreparation>>>,
+    preparation_slots: Arc<Semaphore>,
     webview_dependency_error: Arc<OnceCell<Option<String>>>,
 }
 
@@ -80,6 +150,8 @@ impl MediaServerState {
             cache_directory: PathBuf::new(),
             playback_paths: Arc::new(RwLock::new(HashMap::new())),
             compatibility_lock: Arc::new(AsyncMutex::new(())),
+            playback_preparations: Arc::new(RwLock::new(HashMap::new())),
+            preparation_slots: Arc::new(Semaphore::new(2)),
             webview_dependency_error: Arc::new(OnceCell::new()),
         }
     }
@@ -98,6 +170,127 @@ impl MediaServerState {
         Ok(())
     }
 
+    fn begin_playback_preparation(
+        &self,
+        item: &LibraryItem,
+        reencode_required: bool,
+        reserved_bytes: u64,
+    ) -> Result<
+        (
+            PlaybackPreparationGuard,
+            PlaybackProgressReporter,
+            CancellationToken,
+        ),
+        AppError,
+    > {
+        let mut preparations = self
+            .playback_preparations
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if preparations.contains_key(&item.id) {
+            return Err(AppError::new(
+                "embedded_playback_preparation_busy",
+                "A playback copy is already being prepared for this video.",
+            ));
+        }
+        let cancellation = CancellationToken::new();
+        preparations.insert(
+            item.id.clone(),
+            ActivePlaybackPreparation {
+                progress: LibraryPlaybackPreparationProgress {
+                    item_id: item.id.clone(),
+                    phase: LibraryPlaybackPreparationPhase::Queued,
+                    progress_percent: Some(0.0),
+                    processed_seconds: Some(0.0),
+                    duration_seconds: item.duration_seconds.filter(|value| *value > 0.0),
+                    reencode_required,
+                },
+                cancellation: cancellation.clone(),
+                reserved_bytes,
+            },
+        );
+        let reporter = PlaybackProgressReporter {
+            item_id: item.id.clone(),
+            preparations: self.playback_preparations.clone(),
+        };
+        let guard = PlaybackPreparationGuard {
+            item_id: item.id.clone(),
+            preparations: self.playback_preparations.clone(),
+        };
+        Ok((guard, reporter, cancellation))
+    }
+
+    fn playback_preparation_reservations(&self) -> (usize, u64) {
+        let preparations = self
+            .playback_preparations
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        (
+            preparations.len(),
+            preparations.values().fold(0u64, |total, active| {
+                total.saturating_add(active.reserved_bytes)
+            }),
+        )
+    }
+
+    async fn wait_for_preparation_slot<'a>(
+        &'a self,
+        cancellation: &CancellationToken,
+    ) -> Result<SemaphorePermit<'a>, AppError> {
+        tokio::select! {
+            _ = cancellation.cancelled() => Err(playback_preparation_cancelled()),
+            permit = self.preparation_slots.acquire() => permit.map_err(|_| {
+                AppError::new(
+                    "embedded_playback_preparation_unavailable",
+                    "Playback-copy preparation is shutting down. Try again after restarting Nice Downloader.",
+                )
+            }),
+        }
+    }
+
+    pub fn playback_preparation(
+        &self,
+        item_id: &str,
+    ) -> Result<Option<LibraryPlaybackPreparationProgress>, AppError> {
+        validate_item_id(item_id)?;
+        Ok(self
+            .playback_preparations
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(item_id)
+            .map(|active| active.progress.clone()))
+    }
+
+    pub fn cancel_playback_preparation(&self, item_id: &str) -> Result<(), AppError> {
+        validate_item_id(item_id)?;
+        let cancellation = self
+            .playback_preparations
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(item_id)
+            .map(|active| active.cancellation.clone())
+            .ok_or_else(|| {
+                AppError::new(
+                    "embedded_playback_preparation_not_running",
+                    "No playback copy is currently being prepared for this video.",
+                )
+            })?;
+        cancellation.cancel();
+        Ok(())
+    }
+
+    fn cancel_playback_preparation_if_active(&self, item_id: &str) {
+        if let Some(cancellation) = self
+            .playback_preparations
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(item_id)
+            .map(|active| active.cancellation.clone())
+        {
+            cancellation.cancel();
+        }
+    }
+
     pub async fn prepare_webview_playback(
         &self,
         item_id: &str,
@@ -107,7 +300,6 @@ impl MediaServerState {
         self.ensure_webview_dependencies().await?;
         let item = self.database.get_library_item(item_id)?;
         validate_playable_item(&item)?;
-        let _guard = self.compatibility_lock.lock().await;
         let compatibility_path = self
             .prepare_compatibility_playback(&item, user_approved)
             .await?;
@@ -208,7 +400,6 @@ impl MediaServerState {
         self.ensure_webview_dependencies().await?;
         let item = self.database.get_library_item(item_id)?;
         validate_playable_item(&item)?;
-        let _guard = self.compatibility_lock.lock().await;
         let compatibility_path = self
             .prepare_transcoded_playback(&item, user_approved)
             .await?;
@@ -223,6 +414,17 @@ impl MediaServerState {
 
     pub async fn clear_compatibility_cache(&self) -> Result<LibraryCacheResult, AppError> {
         let _guard = self.compatibility_lock.lock().await;
+        if !self
+            .playback_preparations
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_empty()
+        {
+            return Err(AppError::new(
+                "playback_cache_in_use",
+                "Cancel active playback-copy preparation before clearing the compatibility cache.",
+            ));
+        }
         if !self
             .playback_paths
             .read()
@@ -244,6 +446,7 @@ impl MediaServerState {
 
     pub fn release_playback(&self, item_id: &str) -> Result<(), AppError> {
         validate_item_id(item_id)?;
+        self.cancel_playback_preparation_if_active(item_id);
         self.set_playback_path(item_id, None);
         Ok(())
     }
@@ -346,48 +549,94 @@ impl MediaServerState {
         let Some(target) = self.compatibility_target(item).await? else {
             return Ok(None);
         };
-        std::fs::create_dir_all(&self.cache_directory).map_err(|error| {
-            AppError::internal("could not create the embedded playback cache", error)
-        })?;
-        if valid_cached_media(&target.output) {
-            touch_cache_entry(&target.output);
-            return Ok(Some(target.output));
-        }
-        let preference = self
-            .database
-            .load_desktop_preferences()?
-            .playback_compatibility;
-        if !user_approved
-            && compatibility_requires_confirmation(preference, target.estimated_bytes, false)
-        {
-            return Err(AppError::new(
-                "compatibility_copy_consent_required",
-                "Confirm the compatibility copy before preparing this video for embedded playback.",
-            ));
-        }
         let ffmpeg = managed::resolve("ffmpeg").ok_or_else(|| {
             AppError::new(
                 "embedded_playback_compatibility_unavailable",
                 "This AV1 video needs FFmpeg preparation for reliable embedded playback. Install FFmpeg in Settings > Engines or open it with the system player.",
             )
         })?;
-        remove_stale_compatibility_files(&self.cache_directory, &item.id, &target.output);
-        enforce_compatibility_cache_limits(&self.cache_directory, None, target.estimated_bytes)?;
-        let required_space = target.estimated_bytes.saturating_add(64 * 1024 * 1024);
-        if fs2::available_space(&self.cache_directory).unwrap_or(u64::MAX) < required_space {
-            return Err(AppError::new(
-                "embedded_playback_cache_full",
-                "There is not enough free space to prepare this AV1 video for embedded playback. Open it with the system player or free space in the application cache.",
-            ));
-        }
-        let temporary =
-            self.cache_directory
-                .join(format!(".{}-{}.part.mkv", item.id, Uuid::new_v4()));
-        let timeout_seconds = (target.estimated_bytes / (5 * 1024 * 1024)).clamp(60, 600);
-        let result = remux_for_webview(&ffmpeg, &target.source, &temporary, timeout_seconds).await;
+        let (temporary, timeout_seconds, _preparation_guard, reporter, cancellation) = {
+            let _cache_guard = self.compatibility_lock.lock().await;
+            std::fs::create_dir_all(&self.cache_directory).map_err(|error| {
+                AppError::internal("could not create the embedded playback cache", error)
+            })?;
+            if valid_cached_media(&target.output) {
+                touch_cache_entry(&target.output);
+                return Ok(Some(target.output));
+            }
+            let preference = self
+                .database
+                .load_desktop_preferences()?
+                .playback_compatibility;
+            if !user_approved
+                && compatibility_requires_confirmation(preference, target.estimated_bytes, false)
+            {
+                return Err(AppError::new(
+                    "compatibility_copy_consent_required",
+                    "Confirm the compatibility copy before preparing this video for embedded playback.",
+                ));
+            }
+            remove_stale_compatibility_files(&self.cache_directory, &item.id, &target.output);
+            enforce_compatibility_cache_limits(
+                &self.cache_directory,
+                None,
+                1,
+                target.estimated_bytes,
+            )?;
+            let required_space = target.estimated_bytes.saturating_add(64 * 1024 * 1024);
+            if fs2::available_space(&self.cache_directory).unwrap_or(u64::MAX) < required_space {
+                return Err(AppError::new(
+                    "embedded_playback_cache_full",
+                    "There is not enough free space to prepare this AV1 video for embedded playback. Open it with the system player or free space in the application cache.",
+                ));
+            }
+            let temporary =
+                self.cache_directory
+                    .join(format!(".{}-{}.part.mkv", item.id, Uuid::new_v4()));
+            let timeout_seconds = (target.estimated_bytes / (5 * 1024 * 1024)).clamp(60, 600);
+            let (guard, reporter, cancellation) =
+                self.begin_playback_preparation(item, false, target.estimated_bytes)?;
+            let (reserved_files, reserved_bytes) = self.playback_preparation_reservations();
+            enforce_compatibility_cache_limits(
+                &self.cache_directory,
+                None,
+                reserved_files,
+                reserved_bytes,
+            )?;
+            if fs2::available_space(&self.cache_directory).unwrap_or(u64::MAX)
+                < reserved_bytes.saturating_add(64 * 1024 * 1024)
+            {
+                return Err(AppError::new(
+                    "embedded_playback_cache_full",
+                    "There is not enough free space for the active playback-copy preparations.",
+                ));
+            }
+            (temporary, timeout_seconds, guard, reporter, cancellation)
+        };
+        let _slot = self.wait_for_preparation_slot(&cancellation).await?;
+        reporter.update(LibraryPlaybackPreparationPhase::Copying, Some(0.0));
+        let result = remux_for_webview(
+            &ffmpeg,
+            &target.source,
+            &temporary,
+            timeout_seconds,
+            &cancellation,
+            reporter.clone(),
+        )
+        .await;
         if let Err(error) = result {
             let _ = std::fs::remove_file(&temporary);
             return Err(error);
+        }
+        if cancellation.is_cancelled() {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(playback_preparation_cancelled());
+        }
+        reporter.update(LibraryPlaybackPreparationPhase::Finalizing, None);
+        let _cache_guard = self.compatibility_lock.lock().await;
+        if cancellation.is_cancelled() {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(playback_preparation_cancelled());
         }
         if !valid_cached_media(&temporary) {
             let _ = std::fs::remove_file(&temporary);
@@ -401,7 +650,7 @@ impl MediaServerState {
             AppError::internal("could not finalize the embedded playback cache", error)
         })?;
         touch_cache_entry(&target.output);
-        enforce_compatibility_cache_limits(&self.cache_directory, Some(&target.output), 0)?;
+        enforce_compatibility_cache_limits(&self.cache_directory, Some(&target.output), 0, 0)?;
         tracing::info!(item_id = %item.id, "prepared AV1 timing compatibility copy for embedded playback");
         Ok(Some(target.output))
     }
@@ -412,49 +661,94 @@ impl MediaServerState {
         user_approved: bool,
     ) -> Result<PathBuf, AppError> {
         let target = self.transcode_target(item)?;
-        std::fs::create_dir_all(&self.cache_directory).map_err(|error| {
-            AppError::internal("could not create the embedded playback cache", error)
-        })?;
-        if valid_cached_media(&target.output) {
-            touch_cache_entry(&target.output);
-            return Ok(target.output);
-        }
-        if !user_approved {
-            return Err(AppError::new(
-                "compatibility_transcode_consent_required",
-                "Confirm the H.264 compatibility transcode before preparing this video.",
-            ));
-        }
-        if target.estimated_bytes > MAX_COMPATIBILITY_CACHE_BYTES {
-            return Err(AppError::new(
-                "embedded_playback_cache_limit",
-                "The estimated H.264 copy is larger than the compatibility cache limit. Open the original with the system player instead.",
-            ));
-        }
         let ffmpeg = managed::resolve("ffmpeg").ok_or_else(|| {
             AppError::new(
                 "embedded_playback_compatibility_unavailable",
                 "This fallback needs FFmpeg. Install FFmpeg in Settings > Engines or open the original with the system player.",
             )
         })?;
-        enforce_compatibility_cache_limits(&self.cache_directory, None, target.estimated_bytes)?;
-        let required_space = target.estimated_bytes.saturating_add(128 * 1024 * 1024);
-        if fs2::available_space(&self.cache_directory).unwrap_or(u64::MAX) < required_space {
-            return Err(AppError::new(
-                "embedded_playback_cache_full",
-                "There is not enough free space for the H.264 playback copy. Open the original with the system player or clear space in the compatibility cache.",
-            ));
-        }
-        let temporary =
-            self.cache_directory
-                .join(format!(".{}-{}.part.mp4", item.id, Uuid::new_v4()));
-        let duration_seconds = item.duration_seconds.unwrap_or(300.0).max(1.0);
-        let timeout_seconds = ((duration_seconds * 3.0) as u64).clamp(300, 7_200);
-        let result =
-            transcode_for_webview(&ffmpeg, &target.source, &temporary, timeout_seconds).await;
+        let (temporary, timeout_seconds, _preparation_guard, reporter, cancellation) = {
+            let _cache_guard = self.compatibility_lock.lock().await;
+            std::fs::create_dir_all(&self.cache_directory).map_err(|error| {
+                AppError::internal("could not create the embedded playback cache", error)
+            })?;
+            if valid_cached_media(&target.output) {
+                touch_cache_entry(&target.output);
+                return Ok(target.output);
+            }
+            if !user_approved {
+                return Err(AppError::new(
+                    "compatibility_transcode_consent_required",
+                    "Confirm the H.264 compatibility transcode before preparing this video.",
+                ));
+            }
+            if target.estimated_bytes > MAX_COMPATIBILITY_CACHE_BYTES {
+                return Err(AppError::new(
+                    "embedded_playback_cache_limit",
+                    "The estimated H.264 copy is larger than the compatibility cache limit. Open the original with the system player instead.",
+                ));
+            }
+            enforce_compatibility_cache_limits(
+                &self.cache_directory,
+                None,
+                1,
+                target.estimated_bytes,
+            )?;
+            let required_space = target.estimated_bytes.saturating_add(128 * 1024 * 1024);
+            if fs2::available_space(&self.cache_directory).unwrap_or(u64::MAX) < required_space {
+                return Err(AppError::new(
+                    "embedded_playback_cache_full",
+                    "There is not enough free space for the H.264 playback copy. Open the original with the system player or clear space in the compatibility cache.",
+                ));
+            }
+            let temporary =
+                self.cache_directory
+                    .join(format!(".{}-{}.part.mp4", item.id, Uuid::new_v4()));
+            let duration_seconds = item.duration_seconds.unwrap_or(300.0).max(1.0);
+            let timeout_seconds = ((duration_seconds * 3.0) as u64).clamp(300, 7_200);
+            let (guard, reporter, cancellation) =
+                self.begin_playback_preparation(item, true, target.estimated_bytes)?;
+            let (reserved_files, reserved_bytes) = self.playback_preparation_reservations();
+            enforce_compatibility_cache_limits(
+                &self.cache_directory,
+                None,
+                reserved_files,
+                reserved_bytes,
+            )?;
+            if fs2::available_space(&self.cache_directory).unwrap_or(u64::MAX)
+                < reserved_bytes.saturating_add(128 * 1024 * 1024)
+            {
+                return Err(AppError::new(
+                    "embedded_playback_cache_full",
+                    "There is not enough free space for the active playback-copy preparations.",
+                ));
+            }
+            (temporary, timeout_seconds, guard, reporter, cancellation)
+        };
+        let _slot = self.wait_for_preparation_slot(&cancellation).await?;
+        reporter.update(LibraryPlaybackPreparationPhase::Encoding, Some(0.0));
+        let result = transcode_for_webview(
+            &ffmpeg,
+            &target.source,
+            &temporary,
+            timeout_seconds,
+            &cancellation,
+            reporter.clone(),
+        )
+        .await;
         if let Err(error) = result {
             let _ = std::fs::remove_file(&temporary);
             return Err(error);
+        }
+        if cancellation.is_cancelled() {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(playback_preparation_cancelled());
+        }
+        reporter.update(LibraryPlaybackPreparationPhase::Finalizing, None);
+        let _cache_guard = self.compatibility_lock.lock().await;
+        if cancellation.is_cancelled() {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(playback_preparation_cancelled());
         }
         let output_size = std::fs::metadata(&temporary)
             .map(|metadata| metadata.len())
@@ -472,7 +766,7 @@ impl MediaServerState {
         })?;
         remove_stale_compatibility_files(&self.cache_directory, &item.id, &target.output);
         touch_cache_entry(&target.output);
-        enforce_compatibility_cache_limits(&self.cache_directory, Some(&target.output), 0)?;
+        enforce_compatibility_cache_limits(&self.cache_directory, Some(&target.output), 0, 0)?;
         tracing::info!(item_id = %item.id, "prepared H.264 fallback copy for embedded playback");
         Ok(target.output)
     }
@@ -762,15 +1056,43 @@ fn remove_stale_compatibility_files(directory: &Path, item_id: &str, current: &P
     }
 }
 
+fn remove_orphaned_playback_partials(directory: &Path) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(OsStr::to_str) else {
+            continue;
+        };
+        if name.starts_with('.')
+            && name.contains(".part.")
+            && (name.ends_with(".mp4") || name.ends_with(".mkv"))
+            && std::fs::symlink_metadata(&path)
+                .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
+        {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
 fn enforce_compatibility_cache_limits(
     directory: &Path,
     preserve: Option<&Path>,
+    reserved_files: usize,
     reserved_bytes: u64,
 ) -> Result<(), AppError> {
     let mut entries = std::fs::read_dir(directory)
         .map_err(|error| AppError::internal("could not inspect the playback cache", error))?
         .filter_map(Result::ok)
         .filter_map(|entry| {
+            if entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with('.'))
+            {
+                return None;
+            }
             let metadata = entry.metadata().ok()?;
             metadata.is_file().then_some((
                 entry.path(),
@@ -784,7 +1106,6 @@ fn enforce_compatibility_cache_limits(
     let mut total_bytes = entries
         .iter()
         .fold(0u64, |total, entry| total.saturating_add(entry.1));
-    let reserved_files = usize::from(reserved_bytes > 0);
     for (path, size, _) in entries {
         if file_count.saturating_add(reserved_files) <= MAX_COMPATIBILITY_CACHE_FILES
             && total_bytes.saturating_add(reserved_bytes) <= MAX_COMPATIBILITY_CACHE_BYTES
@@ -878,6 +1199,8 @@ async fn remux_for_webview(
     source: &Path,
     output: &Path,
     timeout_seconds: u64,
+    cancellation: &CancellationToken,
+    reporter: PlaybackProgressReporter,
 ) -> Result<(), AppError> {
     let mut command = Command::new(ffmpeg);
     crate::utils::process::sanitize_tokio_command(&mut command);
@@ -903,22 +1226,23 @@ async fn remux_for_webview(
         .arg("0")
         .arg("-map_chapters")
         .arg("0")
+        .arg("-progress")
+        .arg("pipe:1")
+        .arg("-nostats")
         .arg("-y")
-        .arg(output)
-        .kill_on_drop(true);
-    let result = timeout(Duration::from_secs(timeout_seconds), command.output())
-        .await
-        .map_err(|_| {
-            AppError::new(
-                "embedded_playback_preparation_timeout",
-                "Preparing this AV1 video for embedded playback took too long. The original is unchanged; open it with the system player instead.",
-            )
-        })?
-        .map_err(|error| {
-            AppError::internal("could not start FFmpeg for embedded playback", error)
-        })?;
-    if !result.status.success() {
-        tracing::warn!(status = ?result.status.code(), "FFmpeg could not prepare AV1 embedded playback");
+        .arg(output);
+    let status = run_playback_ffmpeg(
+        &mut command,
+        timeout_seconds,
+        cancellation,
+        reporter,
+        "embedded_playback_preparation_timeout",
+        "Preparing this AV1 video for embedded playback took too long. The original is unchanged; open it with the system player instead.",
+        "could not start FFmpeg for embedded playback",
+    )
+    .await?;
+    if !status.success() {
+        tracing::warn!(status = ?status.code(), "FFmpeg could not prepare AV1 embedded playback");
         return Err(AppError::new(
             "embedded_playback_preparation_failed",
             "FFmpeg could not prepare this AV1 video for embedded playback. The original is unchanged and can still be opened with the system player.",
@@ -932,6 +1256,8 @@ async fn transcode_for_webview(
     source: &Path,
     output: &Path,
     timeout_seconds: u64,
+    cancellation: &CancellationToken,
+    reporter: PlaybackProgressReporter,
 ) -> Result<(), AppError> {
     let mut command = Command::new(ffmpeg);
     crate::utils::process::sanitize_tokio_command(&mut command);
@@ -968,20 +1294,23 @@ async fn transcode_for_webview(
         .arg("+faststart")
         .arg("-map_metadata")
         .arg("0")
+        .arg("-progress")
+        .arg("pipe:1")
+        .arg("-nostats")
         .arg("-y")
-        .arg(output)
-        .kill_on_drop(true);
-    let result = timeout(Duration::from_secs(timeout_seconds), command.output())
-        .await
-        .map_err(|_| {
-            AppError::new(
-                "embedded_playback_transcode_timeout",
-                "Creating the H.264 playback copy took too long. The original is unchanged; open it with the system player instead.",
-            )
-        })?
-        .map_err(|error| AppError::internal("could not start FFmpeg fallback transcode", error))?;
-    if !result.status.success() {
-        tracing::warn!(status = ?result.status.code(), "FFmpeg could not create H.264 embedded playback fallback");
+        .arg(output);
+    let status = run_playback_ffmpeg(
+        &mut command,
+        timeout_seconds,
+        cancellation,
+        reporter,
+        "embedded_playback_transcode_timeout",
+        "Creating the H.264 playback copy took too long. The original is unchanged; open it with the system player instead.",
+        "could not start FFmpeg fallback transcode",
+    )
+    .await?;
+    if !status.success() {
+        tracing::warn!(status = ?status.code(), "FFmpeg could not create H.264 embedded playback fallback");
         return Err(AppError::new(
             "embedded_playback_transcode_failed",
             "FFmpeg could not create the H.264 playback copy. The original is unchanged and can still be opened with the system player.",
@@ -990,7 +1319,102 @@ async fn transcode_for_webview(
     Ok(())
 }
 
+async fn run_playback_ffmpeg(
+    command: &mut Command,
+    timeout_seconds: u64,
+    cancellation: &CancellationToken,
+    reporter: PlaybackProgressReporter,
+    timeout_code: &'static str,
+    timeout_message: &'static str,
+    start_context: &'static str,
+) -> Result<std::process::ExitStatus, AppError> {
+    command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = command
+        .spawn()
+        .map_err(|error| AppError::internal(start_context, error))?;
+    let stdout = child.stdout.take().ok_or_else(|| {
+        AppError::new(
+            "embedded_playback_preparation_io",
+            "FFmpeg progress output was unavailable.",
+        )
+    })?;
+    let mut stderr = child.stderr.take().ok_or_else(|| {
+        AppError::new(
+            "embedded_playback_preparation_io",
+            "FFmpeg diagnostic output was unavailable.",
+        )
+    })?;
+    let progress_task = tokio::spawn(async move {
+        let mut lines = BufReader::new(stdout).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            if let Some(processed_seconds) = parse_ffmpeg_progress_seconds(&line) {
+                reporter.update_progress(processed_seconds);
+            }
+        }
+    });
+    let diagnostic_task = tokio::spawn(async move {
+        let mut diagnostic = String::new();
+        let _ = stderr.read_to_string(&mut diagnostic).await;
+        diagnostic
+    });
+
+    enum ProcessOutcome {
+        Completed(std::io::Result<std::process::ExitStatus>),
+        Cancelled,
+        TimedOut,
+    }
+
+    let outcome = tokio::select! {
+        result = child.wait() => ProcessOutcome::Completed(result),
+        _ = cancellation.cancelled() => ProcessOutcome::Cancelled,
+        _ = tokio::time::sleep(Duration::from_secs(timeout_seconds)) => ProcessOutcome::TimedOut,
+    };
+    let status = match outcome {
+        ProcessOutcome::Completed(result) => {
+            result.map_err(|error| AppError::internal("could not wait for FFmpeg", error))?
+        }
+        ProcessOutcome::Cancelled => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            let _ = progress_task.await;
+            let _ = diagnostic_task.await;
+            return Err(playback_preparation_cancelled());
+        }
+        ProcessOutcome::TimedOut => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            let _ = progress_task.await;
+            let _ = diagnostic_task.await;
+            return Err(AppError::new(timeout_code, timeout_message));
+        }
+    };
+    let _ = progress_task.await;
+    let diagnostic = diagnostic_task.await.unwrap_or_default();
+    if !status.success() && !diagnostic.is_empty() {
+        tracing::debug!(diagnostic = %diagnostic.chars().take(2_000).collect::<String>(), "FFmpeg playback-copy diagnostic");
+    }
+    Ok(status)
+}
+
+fn parse_ffmpeg_progress_seconds(line: &str) -> Option<f64> {
+    line.strip_prefix("out_time_us=")
+        .or_else(|| line.strip_prefix("out_time_ms="))
+        .and_then(|value| value.parse::<f64>().ok())
+        .map(|value| value / 1_000_000.0)
+}
+
+fn playback_preparation_cancelled() -> AppError {
+    AppError::new(
+        "embedded_playback_preparation_cancelled",
+        "Playback-copy preparation was cancelled. The original video is unchanged.",
+    )
+}
+
 pub fn start(database: Database, cache_directory: PathBuf) -> Result<MediaServerState, AppError> {
+    remove_orphaned_playback_partials(&cache_directory);
     let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
     let listener = StdTcpListener::bind(address)
         .map_err(|error| AppError::internal("could not start the local media player", error))?;
@@ -1007,6 +1431,8 @@ pub fn start(database: Database, cache_directory: PathBuf) -> Result<MediaServer
         cache_directory,
         playback_paths: Arc::new(RwLock::new(HashMap::new())),
         compatibility_lock: Arc::new(AsyncMutex::new(())),
+        playback_preparations: Arc::new(RwLock::new(HashMap::new())),
+        preparation_slots: Arc::new(Semaphore::new(2)),
         webview_dependency_error: Arc::new(OnceCell::new()),
     };
     let server_state = state.clone();
@@ -1446,6 +1872,106 @@ mod tests {
     use chrono::Utc;
     use tempfile::tempdir;
 
+    #[test]
+    fn parses_ffmpeg_progress_timestamps() {
+        assert_eq!(
+            parse_ffmpeg_progress_seconds("out_time_us=12500000"),
+            Some(12.5)
+        );
+        assert_eq!(
+            parse_ffmpeg_progress_seconds("out_time_ms=2500000"),
+            Some(2.5)
+        );
+        assert_eq!(parse_ffmpeg_progress_seconds("progress=continue"), None);
+    }
+
+    #[test]
+    fn playback_preparation_reports_progress_and_can_be_cancelled() {
+        let directory = tempdir().expect("temporary directory");
+        let database = Database::open(&directory.path().join("media.sqlite3")).expect("database");
+        let state = MediaServerState::unavailable(database);
+        let item = video_item(&directory.path().join("video.mp4"), 128);
+        let (guard, reporter, cancellation) = state
+            .begin_playback_preparation(&item, true, 256)
+            .expect("register preparation");
+
+        reporter.update(LibraryPlaybackPreparationPhase::Encoding, Some(5.0));
+        let progress = state
+            .playback_preparation(&item.id)
+            .expect("preparation status")
+            .expect("active preparation");
+        assert_eq!(progress.phase, LibraryPlaybackPreparationPhase::Encoding);
+        assert_eq!(progress.progress_percent, Some(50.0));
+
+        state
+            .cancel_playback_preparation(&item.id)
+            .expect("cancel preparation");
+        assert!(cancellation.is_cancelled());
+        drop(guard);
+        assert!(state
+            .playback_preparation(&item.id)
+            .expect("preparation status")
+            .is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn running_playback_process_stops_after_cancellation() {
+        let directory = tempdir().expect("temporary directory");
+        let database = Database::open(&directory.path().join("media.sqlite3")).expect("database");
+        let state = MediaServerState::unavailable(database);
+        let item = video_item(&directory.path().join("video.mp4"), 128);
+        let (_guard, reporter, cancellation) = state
+            .begin_playback_preparation(&item, false, 128)
+            .expect("register preparation");
+        reporter.update(LibraryPlaybackPreparationPhase::Copying, Some(0.0));
+        let cancellation_request = cancellation.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            cancellation_request.cancel();
+        });
+        let mut command = Command::new("tail");
+        command.args(["-f", "/dev/null"]);
+
+        let error = run_playback_ffmpeg(
+            &mut command,
+            10,
+            &cancellation,
+            reporter,
+            "fixture_timeout",
+            "fixture timeout",
+            "could not start fixture process",
+        )
+        .await
+        .expect_err("cancelled process must stop");
+
+        assert_eq!(error.code, "embedded_playback_preparation_cancelled");
+    }
+
+    #[test]
+    fn cache_pruning_never_removes_active_partial_files() {
+        let directory = tempdir().expect("temporary directory");
+        let partial = directory.path().join(".active.part.mp4");
+        std::fs::write(&partial, [1u8; 8]).expect("partial cache file");
+        for index in 0..5 {
+            std::fs::write(
+                directory.path().join(format!("cached-{index}.mkv")),
+                [1u8; 8],
+            )
+            .expect("completed cache file");
+        }
+
+        enforce_compatibility_cache_limits(directory.path(), None, 0, 0).expect("prune cache");
+
+        assert!(partial.exists());
+        let completed = std::fs::read_dir(directory.path())
+            .expect("cache entries")
+            .filter_map(Result::ok)
+            .filter(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
+            .count();
+        assert_eq!(completed, MAX_COMPATIBILITY_CACHE_FILES);
+    }
+
     fn video_item(path: &Path, size: u64) -> LibraryItem {
         let now = Utc::now();
         LibraryItem {
@@ -1599,6 +2125,8 @@ mod tests {
                 first,
             )]))),
             compatibility_lock: Arc::new(AsyncMutex::new(())),
+            playback_preparations: Arc::new(RwLock::new(HashMap::new())),
+            preparation_slots: Arc::new(Semaphore::new(2)),
             webview_dependency_error: Arc::new(OnceCell::new()),
         };
 
@@ -1649,6 +2177,8 @@ mod tests {
             cache_directory: directory.path().join("playback-cache"),
             playback_paths: Arc::new(RwLock::new(HashMap::new())),
             compatibility_lock: Arc::new(AsyncMutex::new(())),
+            playback_preparations: Arc::new(RwLock::new(HashMap::new())),
+            preparation_slots: Arc::new(Semaphore::new(2)),
             webview_dependency_error: Arc::new(OnceCell::new_with(Some(Some(
                 "GStreamer fixture is missing".to_owned(),
             )))),
@@ -1679,6 +2209,8 @@ mod tests {
             cache_directory: cache_directory.clone(),
             playback_paths: Arc::new(RwLock::new(HashMap::new())),
             compatibility_lock: Arc::new(AsyncMutex::new(())),
+            playback_preparations: Arc::new(RwLock::new(HashMap::new())),
+            preparation_slots: Arc::new(Semaphore::new(2)),
             webview_dependency_error: Arc::new(OnceCell::new_with(Some(None))),
         };
 
@@ -1726,6 +2258,8 @@ mod tests {
             cache_directory: cache_directory.clone(),
             playback_paths: Arc::new(RwLock::new(HashMap::new())),
             compatibility_lock: Arc::new(AsyncMutex::new(())),
+            playback_preparations: Arc::new(RwLock::new(HashMap::new())),
+            preparation_slots: Arc::new(Semaphore::new(2)),
             webview_dependency_error: Arc::new(OnceCell::new()),
         };
 
@@ -1785,6 +2319,8 @@ mod tests {
             cache_directory: directory.path().join("playback-cache"),
             playback_paths: Arc::new(RwLock::new(HashMap::new())),
             compatibility_lock: Arc::new(AsyncMutex::new(())),
+            playback_preparations: Arc::new(RwLock::new(HashMap::new())),
+            preparation_slots: Arc::new(Semaphore::new(2)),
             webview_dependency_error: Arc::new(OnceCell::new()),
         };
 
@@ -1822,6 +2358,8 @@ mod tests {
             cache_directory: directory.path().join("playback-cache"),
             playback_paths: Arc::new(RwLock::new(HashMap::new())),
             compatibility_lock: Arc::new(AsyncMutex::new(())),
+            playback_preparations: Arc::new(RwLock::new(HashMap::new())),
+            preparation_slots: Arc::new(Semaphore::new(2)),
             webview_dependency_error: Arc::new(OnceCell::new()),
         };
 

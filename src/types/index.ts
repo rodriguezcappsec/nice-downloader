@@ -607,6 +607,15 @@ export interface LibraryPlaybackPreflight {
   requiresConfirmation: boolean;
 }
 
+export interface LibraryPlaybackPreparationProgress {
+  itemId: string;
+  phase: "queued" | "copying" | "encoding" | "finalizing";
+  progressPercent?: number | null;
+  processedSeconds?: number | null;
+  durationSeconds?: number | null;
+  reencodeRequired: boolean;
+}
+
 export interface LibraryPlaybackCacheStatus {
   fileCount: number;
   totalBytes: number;
