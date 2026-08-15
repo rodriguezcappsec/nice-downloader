@@ -76,12 +76,22 @@ warning because current builds are not code-signed.
   output containers, filename templates, and reusable presets
 - Searchable download history, duplicate prevention, and output verification
 - Local media library with hierarchical folder filters, stable paginated sorting,
-  tags, collections, change review, exact-duplicate analysis, recoverable Trash
-  cleanup, previewable Move/Copy/Rename with Undo, and metadata backup/restore
+  FTS search, creator/series workspaces, related media, dynamic saved views,
+  multi-value creator/series/site/tag and published-date discovery, sidecar
+  metadata overrides, custom artwork, collections, change review, exact-duplicate analysis,
+  recoverable Trash cleanup, previewable Move/Copy/Rename with Undo, and metadata
+  backup/restore
 - Integrated Watch workspace with embedded playback, resume positions,
   Continue Watching, subtitle tracks, searchable paginated browsing, and an
   persistent in-app mini player; compatibility copies require informed consent
   and have visible cache controls, with an explicit system-player fallback
+- Dedicated two-to-four-video comparison grid with independent controls,
+  single-audio focus, optional audio mixing, shared synchronization controls,
+  compatibility consent per tile, and system-player fallbacks
+- Timestamped moments and clip ranges with notes, color markers, one-click
+  seeking, cancellable FFmpeg clip exports, and cached storyboard navigation
+- Persistent named comparison sessions restore video order, positions, speeds,
+  audio focus, multi-audio intent, and review notes; moment notes export as Markdown or CSV
 - Integrated full-resolution image viewer with zoom, pan, rotation, keyboard
   browsing, slideshows, and explicit system-viewer fallback
 - Scheduled playlist/channel subscriptions with archive-aware deduplication

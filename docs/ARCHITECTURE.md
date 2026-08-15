@@ -49,6 +49,7 @@ The frontend never receives a generic command-execution primitive. Tauri capabil
 - `engines`: routing policy and isolated adapters. yt-dlp handles ordinary media URLs; gallery-dl handles supported gallery URLs, initially Bunkr albums.
 - `queue`: authoritative ordered pending queue, dynamic concurrency (default 2), scheduling, queue/job pause, child lifecycle, cancellation tokens, retry lineage, startup recovery, disk preflight, and normalized events.
 - `database`: SQLite connection, embedded migrations, durable job intent/diagnostics, settings, and history repository.
+- `creative`: Rust-owned, serialized, timeout-bounded storyboard generation from validated catalog videos. Clip exports reuse `transformations` for cancellable FFmpeg execution and staged output publication.
 - `errors`: typed user-facing errors with optional diagnostic details.
 
 ## Frontend modules
@@ -168,6 +169,12 @@ The tray and desktop settings form a small platform boundary. Window close polic
 Migration `0016_library_watch_later.sql` stores ordered video IDs with catalog-delete cascading. Watch Later and Recently Watched are separate bounded SQLite queries: the former reflects explicit user intent, while the latter derives from normalized playback timestamps. Watched/reset mutations validate the catalog media kind in Rust and update the same playback record used by Continue Watching. Autoplay remains presentation state and can request only the next catalog item already returned by the typed Library query.
 
 Migration `0017_library_playlists.sql` stores named playlists and ordered, cascade-safe video membership. Rust owns playlist validation, the 500-item bound, add/remove/reorder transactions, and position normalization. React receives playlist IDs and catalog items through narrow Tauri commands; it never persists order or supplies paths. Playlist playback skips missing entries and stops at both boundaries. Version 2 backup/restore merges validated playlist membership without deleting current data or touching source media.
+
+Migration `0018_library_rich_metadata.sql` stores normalized extracted sidecar fields and user overrides as separate JSON documents keyed by catalog item. Rust computes effective creator, description, upload date, series, episode, and original URL values; rescans replace only the extracted document. Parameterized SQLite queries expose source-aware creator/series/site facets, published-date filters, and static publication sort clauses. Custom artwork accepts only a catalog ID plus a native-picker path, then Rust validates an absolute regular non-symlink JPEG/PNG/WebP. Backup/restore carries bounded override records and remaps their item IDs through the validated catalog restore map.
+
+Migration `0019_library_smart_discovery.sql` adds a trigger-maintained FTS5 table and typed saved smart views. The search table contains only normalized catalog and rich-metadata text; every media/rich insert, relevant update, or delete replaces or removes the corresponding row inside the same SQLite transaction. Rust converts bounded user text into quoted prefix terms, while multi-value facets remain parameterized SQL. Search health compares catalog/index row counts and item-ID sets; rebuild deletes and repopulates the index transactionally. Smart views serialize validated `LibrarySmartViewQuery` intent and are reapplied through the normal query command, never as stored SQL or frozen item IDs.
+
+The comparison workspace stores only an ephemeral ordered set of at most four catalog item IDs in Zustand. It does not persist media paths or playback URLs. Each tile independently requests the existing Rust playback preflight and session commands, and Rust continues to validate media kind, availability, paths, compatibility consent, cache limits, and system-player access. Shared play/pause/seek and audio-focus behavior operates on already-authorized HTML video elements. Unmount releases every Rust playback registration; compatibility generation remains serialized by the media-server lock.
 
 ## Media organizer boundary
 

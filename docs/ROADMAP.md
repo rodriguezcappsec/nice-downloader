@@ -6,6 +6,34 @@ Implementation is tracked in `docs/MEDIA_ORGANIZER.md`. Milestones 1–6 are imp
 
 Milestone 12 adds persistent Watch Later, local playback history, watched/reset controls, and bounded non-looping Autoplay to complete the first YouTube-like repeat-viewing workflow. Milestone 13 adds persistent ordered video playlists, Library and Watch workspace management, non-looping ordered playback, cascade-safe membership, and backup/restore support.
 
+## Milestone 14: rich metadata and creator browsing
+
+Deliver typed yt-dlp `.info.json` metadata import, separate extracted values from user overrides, preserve edits across rescans, add creator/series/site and published-date discovery, validate custom artwork in Rust, and include rich overrides in versioned Library backup/restore.
+
+Status: implemented on `feat/library-rich-metadata`.
+
+## Milestone 15: smart discovery and saved views
+
+Deliver trigger-maintained FTS5 search, multi-value discovery filters, dedicated creator/series workspaces, dynamic saved views, bounded related media, and transactional search-index recovery.
+
+Status: implemented on `feat/library-smart-discovery`.
+
+## Milestone 16: multi-video comparison workspace
+
+Deliver a dedicated two-to-four-video grid, Library selection entry point, independent native controls, one-audio-at-a-time focus, optional audio mixing, bounded shared playback controls, compatibility-copy consent, and per-tile system-player fallback.
+
+Status: implemented on `feat/library-video-compare`.
+
+## Milestone 17: clips, moments, and storyboards
+
+Deliver durable timestamp/range moments, Rust-owned safe clip export through the FFmpeg transformation lifecycle, bounded cached storyboards, player seeking, and version 3 backup/restore.
+
+Status: implemented on `feat/library-creative-workspaces`.
+
+## Next organizer milestones
+
+18: saved comparison sessions and review-note export — implemented on `feat/library-creative-workspaces`. 19: synchronized image comparison and explicit media-version stacks. 20: keyboard-first rapid curation and dynamic rule collections. 21: local subtitle/transcript FTS with timestamp seeking. 22: accessible lean-back playback foundations.
+
 ## Maturity roadmap delivered
 
 - First-run engine/privacy onboarding and Linux AppImage/DEB plus Windows NSIS release workflows.

@@ -1,17 +1,20 @@
 mod operations;
-use crate::models::{LibraryPlaylist, SaveLibraryPlaylistRequest};
+use crate::models::{
+    LibraryMoment, LibraryPlaylist, SaveLibraryMomentRequest, SaveLibraryPlaylistRequest,
+};
 
 use crate::{
-    database::Database,
+    database::{validate_library_metadata_fields, Database},
     engines::managed,
     errors::AppError,
     models::{
         LibraryArtworkCacheStatus, LibraryBulkAction, LibraryCacheResult, LibraryChangeKind,
         LibraryCollection, LibraryDuplicateAnalysisJob, LibraryDuplicateAnalysisState,
         LibraryDuplicateGroup, LibraryDuplicateTrashResult, LibraryFileIdentity, LibraryItem,
-        LibraryMediaKind, LibraryMetadataState, LibraryProbeResult, LibraryScanJob,
-        LibraryScanResult, LibraryScanState, LibrarySource, LibrarySourceStatus,
-        SaveLibraryCollectionRequest, SaveLibrarySourceRequest,
+        LibraryMediaKind, LibraryMetadataFields, LibraryMetadataState, LibraryProbeResult,
+        LibraryRichMetadata, LibraryScanJob, LibraryScanResult, LibraryScanState, LibrarySource,
+        LibrarySourceStatus, SaveLibraryCollectionRequest, SaveLibraryRichMetadataRequest,
+        SaveLibrarySourceRequest,
     },
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -46,7 +49,7 @@ const MAX_CONCURRENT_METADATA_PROBES: usize = 3;
 const WATCH_DEBOUNCE: Duration = Duration::from_secs(2);
 const WATCH_SCAN_RETRY: Duration = Duration::from_secs(1);
 const SOURCE_HEALTH_INTERVAL: Duration = Duration::from_secs(10);
-const LIBRARY_BACKUP_VERSION: u32 = 2;
+const LIBRARY_BACKUP_VERSION: u32 = 3;
 const LIBRARY_CATALOG_SCHEMA_VERSION: u32 = 1;
 const LIBRARY_METADATA_SCHEMA_VERSION: u32 = 1;
 const MAX_LIBRARY_BACKUP_BYTES: u64 = 128 * 1024 * 1024;
@@ -55,6 +58,7 @@ const MAX_LIBRARY_BACKUP_SOURCES: usize = 1_000;
 const MAX_LIBRARY_BACKUP_COLLECTIONS: usize = 2_000;
 const MAX_LIBRARY_BACKUP_PLAYLISTS: usize = 2_000;
 const MAX_LIBRARY_BACKUP_MEMBERSHIPS: usize = 500_000;
+const MAX_LIBRARY_BACKUP_MOMENTS: usize = 500_000;
 const MAX_ARTWORK_CACHE_FILES: usize = 20_000;
 const MAX_ARTWORK_CACHE_BYTES: u64 = 1024 * 1024 * 1024;
 const SCAN_EVENT: &str = "library-scan-updated";
@@ -2488,6 +2492,10 @@ struct LibraryBackup {
     collections: Vec<LibraryCollection>,
     #[serde(default)]
     playlists: Vec<LibraryPlaylist>,
+    #[serde(default)]
+    moments: Vec<LibraryMoment>,
+    #[serde(default)]
+    rich_metadata: Vec<LibraryRichMetadata>,
 }
 
 pub fn export_backup(database: &Database, path: &str) -> Result<(), AppError> {
@@ -2501,6 +2509,9 @@ pub fn export_backup(database: &Database, path: &str) -> Result<(), AppError> {
         items: database.list_library_items_for_backup(MAX_LIBRARY_BACKUP_ITEMS + 1)?,
         collections: database.list_library_collections()?,
         playlists: database.list_library_playlists()?,
+        moments: database.list_library_moments_for_backup(MAX_LIBRARY_BACKUP_MOMENTS + 1)?,
+        rich_metadata: database
+            .list_library_rich_metadata_for_backup(MAX_LIBRARY_BACKUP_ITEMS + 1)?,
     };
     validate_backup_shape(&backup)?;
     let bytes = serde_json::to_vec_pretty(&backup).map_err(|error| {
@@ -2553,8 +2564,39 @@ pub fn restore_backup(database: &Database, path: &str) -> Result<Vec<LibraryItem
         .filter(|(_, item)| item.media_kind == Some(LibraryMediaKind::Video))
         .map(|(backup_id, _)| backup_id.clone())
         .collect::<HashSet<_>>();
+    let video_backup_durations = prepared_items
+        .iter()
+        .filter(|(_, item)| item.media_kind == Some(LibraryMediaKind::Video))
+        .map(|(backup_id, item)| (backup_id.clone(), item.duration_seconds))
+        .collect::<HashMap<_, _>>();
     let prepared_playlists =
         prepare_backup_playlists(database, backup.playlists, &video_backup_ids)?;
+    let prepared_moments = prepare_backup_moments(backup.moments, &video_backup_durations)?;
+    let backup_item_ids = prepared_items
+        .iter()
+        .map(|(backup_id, _)| backup_id.clone())
+        .collect::<HashSet<_>>();
+    let mut rich_metadata_ids = HashSet::new();
+    let mut prepared_rich_metadata = Vec::with_capacity(backup.rich_metadata.len());
+    for metadata in &backup.rich_metadata {
+        if !backup_item_ids.contains(&metadata.item_id)
+            || !rich_metadata_ids.insert(metadata.item_id.clone())
+        {
+            return Err(invalid_backup(
+                "Rich metadata must reference one unique backup item.",
+            ));
+        }
+        let overrides = validate_library_metadata_fields(LibraryMetadataFields {
+            creator: metadata.overrides.creator.clone(),
+            description: metadata.overrides.description.clone(),
+            upload_date: metadata.overrides.upload_date.clone(),
+            series: metadata.overrides.series.clone(),
+            episode: metadata.overrides.episode.clone(),
+            original_url: metadata.overrides.original_url.clone(),
+        })
+        .map_err(|_| invalid_backup("Rich metadata contains an invalid override."))?;
+        prepared_rich_metadata.push((metadata.item_id.clone(), overrides));
+    }
 
     for request in source_requests {
         database.save_library_source(request)?;
@@ -2566,6 +2608,20 @@ pub fn restore_backup(database: &Database, path: &str) -> Result<Vec<LibraryItem
         let stored = database.upsert_library_item(item)?;
         item_id_map.insert(backup_id.clone(), stored.id.clone());
         restored_items.push(stored);
+    }
+
+    for (backup_item_id, overrides) in prepared_rich_metadata {
+        if let Some(item_id) = item_id_map.get(&backup_item_id) {
+            database.save_library_rich_metadata(SaveLibraryRichMetadataRequest {
+                item_id: item_id.clone(),
+                creator: overrides.creator,
+                description: overrides.description,
+                upload_date: overrides.upload_date,
+                series: overrides.series,
+                episode: overrides.episode,
+                original_url: overrides.original_url,
+            })?;
+        }
     }
 
     for collection in prepared_collections {
@@ -2599,12 +2655,25 @@ pub fn restore_backup(database: &Database, path: &str) -> Result<Vec<LibraryItem
             }
         }
     }
+    for moment in prepared_moments {
+        if let Some(item_id) = item_id_map.get(&moment.item_id) {
+            database.save_library_moment(SaveLibraryMomentRequest {
+                id: Some(moment.id),
+                item_id: item_id.clone(),
+                label: moment.label,
+                note: moment.note,
+                start_seconds: moment.start_seconds,
+                end_seconds: moment.end_seconds,
+                color: moment.color,
+            })?;
+        }
+    }
     Ok(restored_items)
 }
 
 fn validate_backup_shape(backup: &LibraryBackup) -> Result<(), AppError> {
     let supported_version = backup.version == 1
-        || (backup.version == LIBRARY_BACKUP_VERSION
+        || ((2..=LIBRARY_BACKUP_VERSION).contains(&backup.version)
             && backup.catalog_schema_version == LIBRARY_CATALOG_SCHEMA_VERSION
             && backup.metadata_schema_version == LIBRARY_METADATA_SCHEMA_VERSION);
     let membership_count = backup
@@ -2623,6 +2692,8 @@ fn validate_backup_shape(backup: &LibraryBackup) -> Result<(), AppError> {
         || backup.sources.len() > MAX_LIBRARY_BACKUP_SOURCES
         || backup.collections.len() > MAX_LIBRARY_BACKUP_COLLECTIONS
         || backup.playlists.len() > MAX_LIBRARY_BACKUP_PLAYLISTS
+        || backup.moments.len() > MAX_LIBRARY_BACKUP_MOMENTS
+        || backup.rich_metadata.len() > MAX_LIBRARY_BACKUP_ITEMS
         || membership_count.is_none_or(|count| count > MAX_LIBRARY_BACKUP_MEMBERSHIPS)
     {
         return Err(AppError::new(
@@ -2870,6 +2941,64 @@ fn prepare_backup_playlists(
     Ok(prepared)
 }
 
+fn prepare_backup_moments(
+    moments: Vec<LibraryMoment>,
+    video_durations: &HashMap<String, Option<f64>>,
+) -> Result<Vec<LibraryMoment>, AppError> {
+    let mut backup_ids = HashSet::new();
+    let mut per_item = HashMap::<String, usize>::new();
+    let mut prepared = Vec::with_capacity(moments.len());
+    for mut moment in moments {
+        if !backup_ids.insert(moment.id.clone()) {
+            return Err(invalid_backup("Moment identifiers must be unique."));
+        }
+        let Some(duration) = video_durations.get(&moment.item_id) else {
+            return Err(invalid_backup("Moments must reference backed-up videos."));
+        };
+        let count = per_item.entry(moment.item_id.clone()).or_default();
+        *count += 1;
+        if *count > 500 {
+            return Err(invalid_backup(
+                "A video may contain no more than 500 moments.",
+            ));
+        }
+        let label = moment.label.trim();
+        if label.is_empty() || label.chars().count() > 100 || label.chars().any(char::is_control) {
+            return Err(invalid_backup("Moment labels contain invalid text."));
+        }
+        let note = moment.note.trim();
+        if note.chars().count() > 2_000
+            || note
+                .chars()
+                .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+        {
+            return Err(invalid_backup("Moment notes contain invalid text."));
+        }
+        if !matches!(
+            moment.color.as_str(),
+            "accent" | "blue" | "amber" | "green" | "rose"
+        ) || !moment.start_seconds.is_finite()
+            || moment.start_seconds < 0.0
+            || moment
+                .end_seconds
+                .is_some_and(|end| !end.is_finite() || end <= moment.start_seconds)
+        {
+            return Err(invalid_backup("Moment timing or color is invalid."));
+        }
+        if let Some(duration) = duration.filter(|value| value.is_finite() && *value > 0.0) {
+            let last = moment.end_seconds.unwrap_or(moment.start_seconds);
+            if last > duration + 1.0 {
+                return Err(invalid_backup("A moment is outside its video's duration."));
+            }
+        }
+        moment.id = Uuid::new_v4().to_string();
+        moment.label = label.to_owned();
+        moment.note = note.to_owned();
+        prepared.push(moment);
+    }
+    Ok(prepared)
+}
+
 fn normalize_backup_source_path(value: &str) -> Result<PathBuf, AppError> {
     let path = PathBuf::from(value);
     if !path.is_absolute() || path.parent().is_none() || value.chars().count() > 32_768 {
@@ -2974,9 +3103,35 @@ fn read_sidecar(path: &Path) -> Option<Value> {
 }
 
 fn safe_sidecar_metadata(value: &Value) -> Value {
+    let uploader = value
+        .get("uploader")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("channel").and_then(Value::as_str));
+    let series = value
+        .get("series")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("playlist_title").and_then(Value::as_str));
+    let episode = value
+        .get("episode")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| {
+            value
+                .get("episode_number")
+                .and_then(Value::as_i64)
+                .map(|number| number.to_string())
+        });
+    let webpage_url = value
+        .get("webpage_url")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("original_url").and_then(Value::as_str));
     json!({
-        "id": value.get("id"), "title": value.get("title"), "uploader": value.get("uploader"),
+        "id": value.get("id"), "title": value.get("title"),
+        "uploader": uploader,
         "uploadDate": value.get("upload_date"), "description": value.get("description").and_then(Value::as_str).map(|text| text.chars().take(2000).collect::<String>()),
+        "series": series,
+        "episode": episode,
+        "webpageUrl": webpage_url,
         "extractor": value.get("extractor"), "format": value.get("format"),
     })
 }
@@ -3030,7 +3185,12 @@ mod tests {
             duration_seconds: Some(12.5),
             site: Some("Example".to_owned()),
             tags: vec!["Favorite".to_owned()],
-            metadata: json!({ "safe": true }),
+            metadata: json!({
+                "safe": true,
+                "uploader": "Extracted creator",
+                "description": "Extracted description",
+                "uploadDate": "2026-02-03"
+            }),
             file_size_bytes: Some(size),
             modified_at_ms: Some(modified_at),
             width: Some(1920),
@@ -3077,7 +3237,7 @@ mod tests {
     }
 
     #[test]
-    fn version_two_backup_restores_sources_collections_and_metadata() {
+    fn version_three_backup_restores_sources_collections_metadata_and_moments() {
         let directory = tempdir().expect("temporary directory");
         let media_directory = directory.path().join("media");
         std::fs::create_dir(&media_directory).expect("media directory");
@@ -3105,6 +3265,17 @@ mod tests {
         let item = source_database
             .upsert_library_item(&backup_test_item(&media_path, Some(source.id.clone())))
             .expect("item");
+        source_database
+            .save_library_rich_metadata(SaveLibraryRichMetadataRequest {
+                item_id: item.id.clone(),
+                creator: Some("Personal creator label".to_owned()),
+                description: Some("Extracted description".to_owned()),
+                upload_date: Some("2026-02-03".to_owned()),
+                series: Some("My series".to_owned()),
+                episode: None,
+                original_url: Some("https://example.invalid/watch/1".to_owned()),
+            })
+            .expect("metadata overrides");
         let collection = source_database
             .save_library_collection(SaveLibraryCollectionRequest {
                 id: None,
@@ -3129,6 +3300,17 @@ mod tests {
         source_database
             .add_library_playlist_item(&playlist.id, &item.id)
             .expect("playlist membership");
+        source_database
+            .save_library_moment(SaveLibraryMomentRequest {
+                id: None,
+                item_id: item.id.clone(),
+                label: "Favorite scene".to_owned(),
+                note: "A timestamped note".to_owned(),
+                start_seconds: 2.0,
+                end_seconds: Some(5.0),
+                color: "amber".to_owned(),
+            })
+            .expect("moment");
 
         let backup_path = directory.path().join("library.json");
         export_backup(&source_database, &backup_path.to_string_lossy()).expect("export");
@@ -3169,6 +3351,28 @@ mod tests {
         assert_eq!(restored_playlists[0].name, "Evening");
         assert_eq!(restored_playlists[0].description, "Ordered viewing");
         assert_eq!(restored_playlists[0].item_ids, [restored[0].id.clone()]);
+        let restored_moments = restored_database
+            .list_library_moments(&restored[0].id)
+            .expect("moments");
+        assert_eq!(restored_moments.len(), 1);
+        assert_eq!(restored_moments[0].label, "Favorite scene");
+        assert_eq!(restored_moments[0].start_seconds, 2.0);
+        assert_eq!(restored_moments[0].end_seconds, Some(5.0));
+        let restored_metadata = restored_database
+            .get_library_rich_metadata(&restored[0].id)
+            .expect("restored rich metadata");
+        assert_eq!(
+            restored_metadata.effective.creator.as_deref(),
+            Some("Personal creator label")
+        );
+        assert_eq!(
+            restored_metadata.effective.series.as_deref(),
+            Some("My series")
+        );
+        assert_eq!(
+            restored_metadata.extracted.description.as_deref(),
+            Some("Extracted description")
+        );
     }
 
     #[test]
@@ -3237,6 +3441,8 @@ mod tests {
             items: Vec::new(),
             collections: Vec::new(),
             playlists: Vec::new(),
+            moments: Vec::new(),
+            rich_metadata: Vec::new(),
         };
         std::fs::write(
             &backup_path,

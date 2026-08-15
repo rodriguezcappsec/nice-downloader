@@ -1,6 +1,16 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { LibraryPlaylist, SaveLibraryPlaylistRequest } from "../types";
+import type {
+  LibraryCompareSession,
+  ExportLibraryMomentsRequest,
+  LibraryMoment,
+  LibraryPlaylist,
+  LibraryStoryboard,
+  SaveLibraryCompareSessionRequest,
+  SaveLibraryMomentRequest,
+  SaveLibraryPlaylistRequest,
+  StartLibraryClipExportRequest,
+} from "../types";
 import type {
   BatchAnalysisResponse,
   DownloadJob,
@@ -26,6 +36,9 @@ import type {
   StartTransformationRequest,
   TransformationTask,
   LibraryItem,
+  LibraryRichMetadata,
+  LibrarySearchStatus,
+  LibrarySmartView,
   LibraryFacetRequest,
   LibraryFacets,
   LibraryQueryRequest,
@@ -56,6 +69,9 @@ import type {
   LibrarySource,
   SaveLibrarySourceRequest,
   UpdateLibraryItemRequest,
+  SaveLibraryRichMetadataRequest,
+  SaveLibrarySmartViewRequest,
+  SetLibraryArtworkRequest,
   SaveLibraryCollectionRequest,
   PreviewLibraryFileOperationRequest,
   PreviewLibraryBulkMoveRequest,
@@ -169,6 +185,16 @@ export const api = {
     invoke<LibraryPlaybackEntry[]>("list_recently_watched", { limit }),
   importLibraryFiles: (paths: string[], tags: string[]) => invoke<LibraryItem[]>("import_library_files", { paths, tags }),
   updateLibraryItem: (request: UpdateLibraryItemRequest) => invoke<LibraryItem>("update_library_item", { request }),
+  getLibraryRichMetadata: (itemId: string) => invoke<LibraryRichMetadata>("get_library_rich_metadata", { itemId }),
+  saveLibraryRichMetadata: (request: SaveLibraryRichMetadataRequest) => invoke<LibraryRichMetadata>("save_library_rich_metadata", { request }),
+  resetLibraryRichMetadata: (itemId: string) => invoke<LibraryRichMetadata>("reset_library_rich_metadata", { itemId }),
+  setLibraryArtwork: (request: SetLibraryArtworkRequest) => invoke<LibraryItem>("set_library_artwork", { request }),
+  getLibrarySearchStatus: () => invoke<LibrarySearchStatus>("get_library_search_status"),
+  rebuildLibrarySearchIndex: () => invoke<LibrarySearchStatus>("rebuild_library_search_index"),
+  listLibrarySmartViews: () => invoke<LibrarySmartView[]>("list_library_smart_views"),
+  saveLibrarySmartView: (request: SaveLibrarySmartViewRequest) => invoke<LibrarySmartView>("save_library_smart_view", { request }),
+  deleteLibrarySmartView: (id: string) => invoke<void>("delete_library_smart_view", { id }),
+  getRelatedLibraryItems: (itemId: string, limit = 8) => invoke<LibraryItem[]>("get_related_library_items", { itemId, limit }),
   listLibraryCollections: () => invoke<LibraryCollection[]>("list_library_collections"),
   saveLibraryCollection: (request: SaveLibraryCollectionRequest) => invoke<LibraryCollection>("save_library_collection", { request }),
   deleteLibraryCollection: (id: string) => invoke<void>("delete_library_collection", { id }),
@@ -184,6 +210,23 @@ export const api = {
     invoke<LibraryPlaylist>("move_library_playlist_item", { playlistId, itemId, newIndex }),
   listLibraryPlaylistItems: (playlistId: string) =>
     invoke<LibraryItem[]>("list_library_playlist_items", { playlistId }),
+  listLibraryMoments: (itemId: string) =>
+    invoke<LibraryMoment[]>("list_library_moments", { itemId }),
+  saveLibraryMoment: (request: SaveLibraryMomentRequest) =>
+    invoke<LibraryMoment>("save_library_moment", { request }),
+  deleteLibraryMoment: (id: string) => invoke<void>("delete_library_moment", { id }),
+  listLibraryCompareSessions: () =>
+    invoke<LibraryCompareSession[]>("list_library_compare_sessions"),
+  saveLibraryCompareSession: (request: SaveLibraryCompareSessionRequest) =>
+    invoke<LibraryCompareSession>("save_library_compare_session", { request }),
+  deleteLibraryCompareSession: (id: string) =>
+    invoke<void>("delete_library_compare_session", { id }),
+  exportLibraryMoments: (request: ExportLibraryMomentsRequest) =>
+    invoke<number>("export_library_moments", { request }),
+  generateLibraryStoryboard: (itemId: string, frameCount = 12) =>
+    invoke<LibraryStoryboard>("generate_library_storyboard", { itemId, frameCount }),
+  startLibraryClipExport: (request: StartLibraryClipExportRequest) =>
+    invoke<TransformationTask>("start_library_clip_export", { request }),
   applyLibraryBulkAction: (ids: string[], action: LibraryBulkAction) => invoke<LibraryItem[]>("apply_library_bulk_action", { ids, action }),
   listLibraryChanges: () => invoke<LibraryChange[]>("list_library_changes"),
   reviewLibraryChanges: (ids: string[]) => invoke<number>("review_library_changes", { ids }),

@@ -3,6 +3,7 @@ use crate::models::{LibraryPlaylist, SaveLibraryPlaylistRequest};
 use crate::DesktopRuntimeState;
 use crate::{
     authentication,
+    creative::CreativeManager,
     database::Database,
     engines::{
         discovery,
@@ -18,19 +19,24 @@ use crate::{
         AuthenticationProfile, BatchAnalysisItem, BatchAnalysisResponse, BatchDownloadFailure,
         BatchDownloadResult, BrowserProfileInfo, DesktopPreferences, DesktopRuntimeStatus,
         DiskSpaceInfo, DownloadArchiveMatch, DownloadJob, EngineId, EngineInfo, EnginePreferences,
-        GalleryItemList, LibraryArtworkCacheStatus, LibraryBulkAction, LibraryBulkMovePlan,
-        LibraryBulkMoveResult, LibraryCacheResult, LibraryChange, LibraryCollection,
-        LibraryDuplicateAnalysisJob, LibraryDuplicateGroup, LibraryDuplicateTrashResult,
-        LibraryFacetRequest, LibraryFacets, LibraryFileOperation, LibraryFileOperationPlan,
-        LibraryFileOperationResult, LibraryImageSession, LibraryItem, LibraryPlaybackCacheStatus,
-        LibraryPlaybackEntry, LibraryPlaybackPreflight, LibraryPlaybackSession,
-        LibraryPlaybackState, LibraryQueryRequest, LibraryQueryResult, LibraryScanJob,
-        LibraryScanResult, LibrarySource, MediaAnalysis, OnboardingStatus, Preset,
+        ExportLibraryMomentsRequest, GalleryItemList, LibraryArtworkCacheStatus, LibraryBulkAction,
+        LibraryBulkMovePlan, LibraryBulkMoveResult, LibraryCacheResult, LibraryChange,
+        LibraryCollection, LibraryCompareSession, LibraryDuplicateAnalysisJob,
+        LibraryDuplicateGroup, LibraryDuplicateTrashResult, LibraryFacetRequest, LibraryFacets,
+        LibraryFileOperation, LibraryFileOperationPlan, LibraryFileOperationResult,
+        LibraryImageSession, LibraryItem, LibraryMediaKind, LibraryMoment,
+        LibraryPlaybackCacheStatus, LibraryPlaybackEntry, LibraryPlaybackPreflight,
+        LibraryPlaybackSession, LibraryPlaybackState, LibraryQueryRequest, LibraryQueryResult,
+        LibraryRichMetadata, LibraryScanJob, LibraryScanResult, LibrarySearchStatus,
+        LibrarySmartView, LibrarySource, MediaAnalysis, OnboardingStatus, Preset,
         PreviewLibraryBulkMoveRequest, PreviewLibraryFileOperationRequest, QueueSettings,
         QueueSnapshot, SaveAuthenticationProfileRequest, SaveLibraryCollectionRequest,
-        SaveLibraryPlaybackRequest, SaveLibrarySourceRequest, SavePresetRequest,
-        SaveSitePresetRuleRequest, SaveSubscriptionRequest, SitePresetRule, StartDownloadRequest,
-        StartTransformationRequest, Subscription, SubscriptionCheckResult, TransformationTask,
+        SaveLibraryCompareSessionRequest, SaveLibraryMomentRequest, SaveLibraryPlaybackRequest,
+        SaveLibraryRichMetadataRequest, SaveLibrarySmartViewRequest, SaveLibrarySourceRequest,
+        SavePresetRequest, SaveSitePresetRuleRequest, SaveSubscriptionRequest,
+        SetLibraryArtworkRequest, SitePresetRule, StartDownloadRequest,
+        StartLibraryClipExportRequest, StartTransformationRequest, Subscription,
+        SubscriptionCheckResult, TransformationOperation, TransformationTask,
         UpdateLibraryItemRequest,
     },
     queue::{disk_space, QueueManager},
@@ -249,6 +255,84 @@ pub fn update_library_item(
 }
 
 #[tauri::command]
+pub fn get_library_rich_metadata(
+    database: State<'_, Database>,
+    item_id: String,
+) -> Result<LibraryRichMetadata, AppError> {
+    database.get_library_rich_metadata(&item_id)
+}
+
+#[tauri::command]
+pub fn save_library_rich_metadata(
+    database: State<'_, Database>,
+    request: SaveLibraryRichMetadataRequest,
+) -> Result<LibraryRichMetadata, AppError> {
+    database.save_library_rich_metadata(request)
+}
+
+#[tauri::command]
+pub fn reset_library_rich_metadata(
+    database: State<'_, Database>,
+    item_id: String,
+) -> Result<LibraryRichMetadata, AppError> {
+    database.reset_library_rich_metadata(&item_id)
+}
+
+#[tauri::command]
+pub fn set_library_artwork(
+    database: State<'_, Database>,
+    request: SetLibraryArtworkRequest,
+) -> Result<LibraryItem, AppError> {
+    database.set_library_artwork(&request.item_id, request.path)
+}
+
+#[tauri::command]
+pub fn get_library_search_status(
+    database: State<'_, Database>,
+) -> Result<LibrarySearchStatus, AppError> {
+    database.library_search_status()
+}
+
+#[tauri::command]
+pub fn rebuild_library_search_index(
+    database: State<'_, Database>,
+) -> Result<LibrarySearchStatus, AppError> {
+    database.rebuild_library_search_index()
+}
+
+#[tauri::command]
+pub fn list_library_smart_views(
+    database: State<'_, Database>,
+) -> Result<Vec<LibrarySmartView>, AppError> {
+    database.list_library_smart_views()
+}
+
+#[tauri::command]
+pub fn save_library_smart_view(
+    database: State<'_, Database>,
+    request: SaveLibrarySmartViewRequest,
+) -> Result<LibrarySmartView, AppError> {
+    database.save_library_smart_view(request)
+}
+
+#[tauri::command]
+pub fn delete_library_smart_view(
+    database: State<'_, Database>,
+    id: String,
+) -> Result<(), AppError> {
+    database.delete_library_smart_view(&id)
+}
+
+#[tauri::command]
+pub fn get_related_library_items(
+    database: State<'_, Database>,
+    item_id: String,
+    limit: usize,
+) -> Result<Vec<LibraryItem>, AppError> {
+    database.related_library_items(&item_id, limit)
+}
+
+#[tauri::command]
 pub fn list_library_collections(
     database: State<'_, Database>,
 ) -> Result<Vec<LibraryCollection>, AppError> {
@@ -325,6 +409,106 @@ pub fn list_library_playlist_items(
     playlist_id: String,
 ) -> Result<Vec<LibraryItem>, AppError> {
     database.list_library_playlist_items(&playlist_id)
+}
+
+#[tauri::command]
+pub fn list_library_moments(
+    database: State<'_, Database>,
+    item_id: String,
+) -> Result<Vec<LibraryMoment>, AppError> {
+    database.list_library_moments(&item_id)
+}
+
+#[tauri::command]
+pub fn save_library_moment(
+    database: State<'_, Database>,
+    request: SaveLibraryMomentRequest,
+) -> Result<LibraryMoment, AppError> {
+    database.save_library_moment(request)
+}
+
+#[tauri::command]
+pub fn delete_library_moment(database: State<'_, Database>, id: String) -> Result<(), AppError> {
+    database.delete_library_moment(&id)
+}
+
+#[tauri::command]
+pub fn list_library_compare_sessions(
+    database: State<'_, Database>,
+) -> Result<Vec<LibraryCompareSession>, AppError> {
+    database.list_library_compare_sessions()
+}
+
+#[tauri::command]
+pub fn save_library_compare_session(
+    database: State<'_, Database>,
+    request: SaveLibraryCompareSessionRequest,
+) -> Result<LibraryCompareSession, AppError> {
+    database.save_library_compare_session(request)
+}
+
+#[tauri::command]
+pub fn delete_library_compare_session(
+    database: State<'_, Database>,
+    id: String,
+) -> Result<(), AppError> {
+    database.delete_library_compare_session(&id)
+}
+
+#[tauri::command]
+pub fn export_library_moments(
+    creative: State<'_, CreativeManager>,
+    request: ExportLibraryMomentsRequest,
+) -> Result<usize, AppError> {
+    creative.export_moments(request)
+}
+
+#[tauri::command]
+pub async fn generate_library_storyboard(
+    creative: State<'_, CreativeManager>,
+    item_id: String,
+    frame_count: u8,
+) -> Result<crate::models::LibraryStoryboard, AppError> {
+    creative.storyboard(&item_id, frame_count).await
+}
+
+#[tauri::command]
+pub async fn start_library_clip_export(
+    app: AppHandle,
+    database: State<'_, Database>,
+    transformations: State<'_, TransformationManager>,
+    request: StartLibraryClipExportRequest,
+) -> Result<TransformationTask, AppError> {
+    let item = database.get_library_item(&request.item_id)?;
+    if item.missing || item.media_kind != Some(LibraryMediaKind::Video) {
+        return Err(AppError::new(
+            "library_clip_video_required",
+            "Clips can only be exported from available videos.",
+        ));
+    }
+    if let Some(duration) = item
+        .duration_seconds
+        .filter(|value| value.is_finite() && *value > 0.0)
+    {
+        if !request.end_seconds.is_finite() || request.end_seconds > duration + 1.0 {
+            return Err(AppError::new(
+                "invalid_library_clip_time",
+                "The clip end must be within the video's duration.",
+            ));
+        }
+    }
+    transformations.start(
+        app,
+        StartTransformationRequest {
+            input_path: item.path,
+            output_path: request.output_path,
+            operation: TransformationOperation::Trim {
+                start_seconds: request.start_seconds,
+                end_seconds: request.end_seconds,
+            },
+            overwrite: request.overwrite,
+        },
+    )
 }
 
 #[tauri::command]

@@ -169,7 +169,7 @@ Status: implementation in progress on `feat/library-accessibility-performance`.
 - Filter and pagination changes announce the exact visible result range. The Watch workspace separately announces its debounced search result page.
 - A keyboard-only and Orca checklist lives in [Library Accessibility QA](ACCESSIBILITY_QA.md), including scan, duplicate, Watch, fallback, scaling, contrast, and reduced-motion expectations.
 - Media details and Bulk Move now trap focus, preserve their invoking control, and use Library search/main content as a fallback when an operation removes that control. Add folder focuses its first action and restores focus when dismissed.
-- SQLite migration recovery now has an automated rollback test that forces a mid-chain migration failure, proves schema and version changes are atomic, repairs the obstruction, and completes the same database through migration 17.
+- SQLite migration recovery has an automated rollback test that forces a mid-chain migration failure, proves schema and version changes are atomic, repairs the obstruction, and completes the same database through migration 19.
 - An ignored, repeatable 10,000–250,000-item Rust profiling harness measures database open, transactional seeding, first-page query, text search, and facet generation. `NICE_DOWNLOADER_LIBRARY_PROFILE_DIR` places the synthetic database on a chosen local, removable, or network filesystem; see [Library Performance Profiling](LIBRARY_PROFILING.md).
 
 Remaining before completion:
@@ -229,6 +229,87 @@ Status: implemented on `feat/library-accessibility-performance`.
 - Async playlist loads and mutations are guarded so stale responses and rapid reorder/remove input cannot overwrite newer UI state.
 
 Acceptance: create a playlist, add videos from Watch, reorder and remove entries, relaunch with the same order, play continuously without looping, restore the playlist from backup, and delete the playlist without changing any source video.
+
+## Milestone 14 - Rich metadata and creator browsing
+
+Status: implemented on `feat/library-rich-metadata`.
+
+- Migration `0018_library_rich_metadata.sql` stores extracted sidecar metadata separately from user overrides. Rescans refresh creator/channel, description, upload date, series, episode, and original URL without replacing intentional edits.
+- `.info.json` import remains bounded and typed. Dates normalize to `YYYY-MM-DD`, original URLs must be HTTP(S), and text limits are enforced before persistence.
+- Library discovery supports creator, series, site, and published-date filters plus deterministic newest/oldest published sorting. Facets remain SQLite-backed and source-aware.
+- Media details show metadata provenance, reset overrides to extracted values, and open filtered creator, series, or site views.
+- Custom JPEG, PNG, or WebP artwork is selected through the native picker and validated by Rust as an absolute regular non-symlink file. Original media and sidecars remain untouched.
+- Version 2 Library backup/restore includes bounded rich-metadata overrides and remaps referenced catalog IDs safely.
+
+Acceptance: scan media with a yt-dlp `.info.json` sidecar, browse its creator/series/site, sort by publication date, edit and reset metadata, choose artwork, rescan without losing edits, and restore overrides from a Library backup.
+
+## Milestone 15 - Smart discovery and saved views
+
+Status: implemented on `feat/library-smart-discovery`.
+
+- Migration `0019_library_smart_discovery.sql` adds a local FTS5 index across title, creator, series, description, site, tags, and relative path. SQLite triggers update exactly one index row for every catalog insert, relevant update, rich-metadata refresh, and deletion.
+- Search input is converted into bounded quoted prefix terms before `MATCH`; React never supplies FTS syntax or SQL. A typed status command detects missing, extra, or duplicate index rows, and rebuilding runs as one Rust-owned SQLite transaction.
+- Creator and series selections open dedicated, paginated discovery headers with representative artwork and live result counts.
+- Tags, creators, series, and sites accept multiple values. Values use OR within their group and AND across groups, with visible removable filter chips and a 20-value backend limit per group.
+- Saved smart views persist validated filter and sort intent rather than item membership. Applying one restores the full query, and newly scanned matching media appears automatically.
+- Media details request a bounded related-media list using series first, then creator, site, or source. Responses are guarded when users navigate quickly, and the current item is never returned as its own recommendation.
+- Existing 5,105-item paging coverage and the manual 10,000–250,000-item profiling harness now exercise trigger-maintained FTS search.
+
+Acceptance: combine several filter values, save and reopen the view, scan matching media and see it appear automatically, browse a creator or series workspace, open related media, deliberately damage the search index in a test, and recover it without modifying source files.
+
+## Milestone 16 - Multi-video comparison workspace
+
+Status: implemented on `feat/library-video-compare`.
+
+- Library selection opens a comparison only for two to four existing, available video records. Images and missing records are rejected before navigation.
+- Compare is a dedicated application workspace. Its ephemeral ordered item IDs remain available while navigating, but are intentionally not restored after restarting the application.
+- Two videos use a side-by-side layout; three or four use a responsive 2x2 grid. Every tile contains unusual and vertical aspect ratios without overflowing.
+- Tiles reuse Rust-authorized playback preflight, URL, compatibility-copy, progress, release, and system-player commands. React never receives or supplies filesystem paths.
+- Only the selected tile emits audio by default. Users can explicitly allow multiple audio streams, while shared controls play, pause, restart, seek, or align all ready players to the active-audio video's absolute time.
+- Compatibility consent and failures remain isolated per tile. Compatibility preparation is serialized by the existing Rust media-server lock, preventing concurrent fallback transcodes.
+- Leaving Compare unmounts all players, saves progress snapshots, and releases every playback session. The comparison selection remains available for a later return.
+
+Acceptance: select two to four videos across paginated Library results, open Compare, transfer audio focus, use shared playback controls, handle an incompatible tile without blocking the others, remove or replace a tile, leave and return to the preserved comparison, and open any playable tile in the system player.
+
+## Milestone 17 - Clips, moments, and storyboards
+
+Status: implemented on `feat/library-creative-workspaces`.
+
+- Migration `0020_library_moments.sql` stores up to 500 ordered timestamp or range annotations per video and cascades them when a catalog record is removed.
+- Watch captures the playhead as a point or bounded clip range with a label, note, and color, then seeks back to any saved moment.
+- Range moments start cancellable FFmpeg stream-copy exports through Transformations. Rust resolves the source path; React only provides a native-dialog output path.
+- Rust generates 4–24 storyboard JPEG frames from a validated regular video. Generation is serialized, timeout-bounded, cached by item ID and modification stamp, and returned without exposing source paths.
+- Version 3 Library backup/restore includes validated moments, remaps catalog references, rejects malformed timing before writing, and remains compatible with versions 1 and 2.
+
+Acceptance: mark and revisit a timestamp, save and export a range without changing the original, generate a storyboard, seek from a frame, relaunch with moments intact, and restore them from backup.
+
+## Milestone 18 - Saved comparison sessions and review annotations
+
+Status: implemented on `feat/library-creative-workspaces`.
+
+- Migration `0021_library_compare_sessions.sql` persists named sessions with normalized 2–4-video membership, order, playback positions, speeds, audio focus, multi-audio intent, and session notes.
+- Save validates unique available videos, bounded names and notes, finite playback state, active-audio membership, and case-insensitive name uniqueness in Rust.
+- Saved sessions are available from Compare even when its ephemeral grid is empty. Loading one updates existing live tiles in place, avoiding playback release/registration races.
+- Catalog deletion cascades membership and clears an affected audio focus. The UI exposes incomplete saved sessions so users can replace missing members rather than silently fabricating state.
+- Saved moment annotations export through Rust as atomic Markdown or spreadsheet-injection-resistant CSV files. Existing outputs are never overwritten implicitly.
+
+Acceptance: save a named comparison, reopen it after clearing the grid or relaunching, restore positions/speeds/audio intent, update or delete it, reconcile a deleted member, and export timestamped review notes.
+
+## Milestone 19 - Image comparison and media stacks
+
+Add synchronized image zoom/pan, overlay and split views, then group alternate encodes, edits, originals, and generated copies without conflating files.
+
+## Milestone 20 - Rapid curation and automatic collections
+
+Provide keyboard-first keep, favorite, rate, tag, move, and review actions. Persist validated rule collections that use the existing SQLite query model.
+
+## Milestone 21 - Transcript discovery
+
+Index trusted local subtitle text with bounded FTS, search across videos, and seek to result timestamps. Speech-to-text remains opt-in.
+
+## Milestone 22 - Lean-back playback
+
+Add large-control keyboard/gamepad navigation while preserving accessibility, pagination, playlist order, and local privacy boundaries.
 
 ## Explicitly deferred
 

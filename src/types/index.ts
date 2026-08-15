@@ -6,6 +6,7 @@ export type ViewId =
   | "subscriptions"
   | "transformations"
   | "library"
+  | "compare"
   | "presets"
   | "settings";
 
@@ -438,7 +439,7 @@ export interface LibraryItem {
 
 export type LibraryAvailabilityFilter = "all" | "available" | "missing";
 export type LibraryFolderScope = "tree" | "direct";
-export type LibrarySort = "recent" | "oldest" | "titleAsc" | "titleDesc" | "durationDesc" | "durationAsc" | "sizeDesc" | "sizeAsc" | "fileDateDesc" | "fileDateAsc";
+export type LibrarySort = "recent" | "oldest" | "titleAsc" | "titleDesc" | "durationDesc" | "durationAsc" | "sizeDesc" | "sizeAsc" | "fileDateDesc" | "fileDateAsc" | "publishedDesc" | "publishedAsc";
 
 export interface LibraryQueryRequest {
   page: number;
@@ -453,12 +454,38 @@ export interface LibraryQueryRequest {
   container?: string | null;
   duration?: string | null;
   dateAdded?: string | null;
+  datePublished?: string | null;
   availability: LibraryAvailabilityFilter;
-  tag?: string | null;
+  tags: string[];
+  creators: string[];
+  series: string[];
+  sites: string[];
   rating?: string | null;
   collectionId?: string | null;
   favoriteOnly: boolean;
   sort: LibrarySort;
+}
+
+export type LibrarySmartViewQuery = Omit<LibraryQueryRequest, "page" | "pageSize">;
+
+export interface LibrarySmartView {
+  id: string;
+  name: string;
+  query: LibrarySmartViewQuery;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SaveLibrarySmartViewRequest {
+  id?: string | null;
+  name: string;
+  query: LibrarySmartViewQuery;
+}
+
+export interface LibrarySearchStatus {
+  catalogItems: number;
+  indexedItems: number;
+  consistent: boolean;
 }
 
 export interface LibraryQueryResult {
@@ -487,7 +514,37 @@ export interface LibraryFacets {
   missingItems: number;
   containers: string[];
   tags: string[];
+  creators: string[];
+  series: string[];
+  sites: string[];
   folders: LibraryFolderFacet[];
+}
+
+export interface LibraryMetadataFields {
+  creator?: string | null;
+  description?: string | null;
+  uploadDate?: string | null;
+  series?: string | null;
+  episode?: string | null;
+  originalUrl?: string | null;
+}
+
+export interface LibraryRichMetadata {
+  itemId: string;
+  extracted: LibraryMetadataFields;
+  overrides: LibraryMetadataFields;
+  effective: LibraryMetadataFields;
+  overriddenFields: string[];
+  updatedAt: string;
+}
+
+export interface SaveLibraryRichMetadataRequest extends LibraryMetadataFields {
+  itemId: string;
+}
+
+export interface SetLibraryArtworkRequest {
+  itemId: string;
+  path?: string | null;
 }
 
 export interface LibraryPlaybackState {
@@ -590,6 +647,83 @@ export interface LibraryPlaylist {
   itemIds: string[];
   createdAt: string;
   updatedAt: string;
+}
+
+export type LibraryMomentColor = "accent" | "blue" | "amber" | "green" | "rose";
+
+export interface LibraryMoment {
+  id: string;
+  itemId: string;
+  label: string;
+  note: string;
+  startSeconds: number;
+  endSeconds?: number | null;
+  color: LibraryMomentColor;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SaveLibraryMomentRequest {
+  id?: string | null;
+  itemId: string;
+  label: string;
+  note: string;
+  startSeconds: number;
+  endSeconds?: number | null;
+  color: LibraryMomentColor;
+}
+
+export interface StartLibraryClipExportRequest {
+  itemId: string;
+  outputPath: string;
+  startSeconds: number;
+  endSeconds: number;
+  overwrite: boolean;
+}
+
+export interface LibraryStoryboardFrame {
+  timeSeconds: number;
+  imageDataUrl: string;
+}
+
+export interface LibraryStoryboard {
+  itemId: string;
+  durationSeconds: number;
+  frames: LibraryStoryboardFrame[];
+  generatedAt: string;
+}
+
+export interface LibraryCompareSessionItem {
+  itemId: string;
+  position: number;
+  playbackPositionSeconds: number;
+  playbackRate: number;
+}
+
+export interface LibraryCompareSession {
+  id: string;
+  name: string;
+  notes: string;
+  items: LibraryCompareSessionItem[];
+  activeAudioItemId?: string | null;
+  multipleAudio: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SaveLibraryCompareSessionRequest {
+  id?: string | null;
+  name: string;
+  notes: string;
+  items: LibraryCompareSessionItem[];
+  activeAudioItemId?: string | null;
+  multipleAudio: boolean;
+}
+
+export interface ExportLibraryMomentsRequest {
+  itemId: string;
+  outputPath: string;
+  format: "markdown" | "csv";
 }
 
 export type LibraryChangeKind = "added" | "modified" | "renamed" | "missing" | "restored";

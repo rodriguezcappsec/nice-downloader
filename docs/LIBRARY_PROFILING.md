@@ -1,6 +1,6 @@
 # Library Performance Profiling
 
-The ignored Rust harness creates a synthetic catalog and reports timings for database open, transactional seed, first page, text search, and facets. It does not create or inspect media files.
+The ignored Rust harness creates a synthetic catalog and reports timings for database open, transactional seed with trigger-maintained FTS rows, first page, FTS text search, and facets. It does not create or inspect media files. Milestone 15 also verifies search-index row parity after seeding so timing results cannot hide trigger drift.
 
 Run the default 50,000-item profile on temporary local storage:
 
