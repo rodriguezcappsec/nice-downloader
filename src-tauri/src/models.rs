@@ -981,6 +981,59 @@ pub struct LibraryPlaylist {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryMoment {
+    pub id: String,
+    pub item_id: String,
+    pub label: String,
+    pub note: String,
+    pub start_seconds: f64,
+    pub end_seconds: Option<f64>,
+    pub color: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveLibraryMomentRequest {
+    pub id: Option<String>,
+    pub item_id: String,
+    pub label: String,
+    pub note: String,
+    pub start_seconds: f64,
+    pub end_seconds: Option<f64>,
+    pub color: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartLibraryClipExportRequest {
+    pub item_id: String,
+    pub output_path: String,
+    pub start_seconds: f64,
+    pub end_seconds: f64,
+    #[serde(default)]
+    pub overwrite: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryStoryboardFrame {
+    pub time_seconds: f64,
+    pub image_data_url: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryStoryboard {
+    pub item_id: String,
+    pub duration_seconds: f64,
+    pub frames: Vec<LibraryStoryboardFrame>,
+    pub generated_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum LibraryChangeKind {

@@ -7,16 +7,16 @@ use crate::{
         LibraryFacetRequest, LibraryFacets, LibraryFileIdentity, LibraryFileOperation,
         LibraryFileOperationKind, LibraryFileOperationState, LibraryFolderFacet,
         LibraryFolderScope, LibraryItem, LibraryMediaKind, LibraryMetadataFields,
-        LibraryMetadataState, LibraryPlaybackEntry, LibraryPlaybackState, LibraryPlaylist,
-        LibraryProbeResult, LibraryQueryRequest, LibraryQueryResult, LibraryRichMetadata,
-        LibraryScanJob, LibraryScanState, LibrarySearchStatus, LibrarySmartView,
-        LibrarySmartViewQuery, LibrarySort, LibrarySource, LibrarySourceStatus, LibraryWatchState,
-        Preset, PresetIntent, QueueSettings, SaveAuthenticationProfileRequest,
-        SaveLibraryCollectionRequest, SaveLibraryPlaybackRequest, SaveLibraryPlaylistRequest,
-        SaveLibraryRichMetadataRequest, SaveLibrarySmartViewRequest, SaveLibrarySourceRequest,
-        SavePresetRequest, SaveSitePresetRuleRequest, SaveSubscriptionRequest, SitePresetRule,
-        StartDownloadRequest, Subscription, TransformationOperation, TransformationState,
-        TransformationTask, UpdateLibraryItemRequest,
+        LibraryMetadataState, LibraryMoment, LibraryPlaybackEntry, LibraryPlaybackState,
+        LibraryPlaylist, LibraryProbeResult, LibraryQueryRequest, LibraryQueryResult,
+        LibraryRichMetadata, LibraryScanJob, LibraryScanState, LibrarySearchStatus,
+        LibrarySmartView, LibrarySmartViewQuery, LibrarySort, LibrarySource, LibrarySourceStatus,
+        LibraryWatchState, Preset, PresetIntent, QueueSettings, SaveAuthenticationProfileRequest,
+        SaveLibraryCollectionRequest, SaveLibraryMomentRequest, SaveLibraryPlaybackRequest,
+        SaveLibraryPlaylistRequest, SaveLibraryRichMetadataRequest, SaveLibrarySmartViewRequest,
+        SaveLibrarySourceRequest, SavePresetRequest, SaveSitePresetRuleRequest,
+        SaveSubscriptionRequest, SitePresetRule, StartDownloadRequest, Subscription,
+        TransformationOperation, TransformationState, TransformationTask, UpdateLibraryItemRequest,
     },
     utils::validation::{
         normalize_engine_preferences, validate_destination, validate_engine_preferences,
@@ -51,6 +51,7 @@ const MIGRATION_0016: &str = include_str!("migrations/0016_library_watch_later.s
 const MIGRATION_0017: &str = include_str!("migrations/0017_library_playlists.sql");
 const MIGRATION_0018: &str = include_str!("migrations/0018_library_rich_metadata.sql");
 const MIGRATION_0019: &str = include_str!("migrations/0019_library_smart_discovery.sql");
+const MIGRATION_0020: &str = include_str!("migrations/0020_library_moments.sql");
 const ENGINE_PREFERENCES_KEY: &str = "engine.preferences";
 const QUEUE_SETTINGS_KEY: &str = "queue.settings";
 const DESKTOP_PREFERENCES_KEY: &str = "desktop.preferences";
@@ -103,6 +104,7 @@ impl Database {
             (17, MIGRATION_0017),
             (18, MIGRATION_0018),
             (19, MIGRATION_0019),
+            (20, MIGRATION_0020),
         ] {
             let migrated: bool = transaction.query_row(
                 "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = ?1)",
@@ -2698,6 +2700,137 @@ impl Database {
         Ok(())
     }
 
+    pub fn list_library_moments(&self, item_id: &str) -> Result<Vec<LibraryMoment>, AppError> {
+        validate_uuid(item_id, "library item")?;
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "Library moments are unavailable.")
+        })?;
+        let exists: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM media_library WHERE id = ?1)",
+            [item_id],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            return Err(library_item_not_found());
+        }
+        let mut statement = connection.prepare(
+            "SELECT id, item_id, label, note, start_seconds, end_seconds, color, created_at, updated_at
+             FROM library_moments
+             WHERE item_id = ?1
+             ORDER BY start_seconds ASC, created_at ASC, id ASC
+             LIMIT 500",
+        )?;
+        let rows = statement.query_map([item_id], library_moment_from_row)?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn list_library_moments_for_backup(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<LibraryMoment>, AppError> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "Library moments are unavailable.")
+        })?;
+        let mut statement = connection.prepare(
+            "SELECT id, item_id, label, note, start_seconds, end_seconds, color, created_at, updated_at
+             FROM library_moments
+             ORDER BY item_id ASC, start_seconds ASC, created_at ASC, id ASC
+             LIMIT ?1",
+        )?;
+        let rows = statement.query_map([limit], library_moment_from_row)?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn save_library_moment(
+        &self,
+        request: SaveLibraryMomentRequest,
+    ) -> Result<LibraryMoment, AppError> {
+        validate_uuid(&request.item_id, "library item")?;
+        let id = request.id.unwrap_or_else(|| Uuid::new_v4().to_string());
+        validate_uuid(&id, "moment")?;
+        let label = validate_moment_label(&request.label)?;
+        let note = validate_moment_note(&request.note)?;
+        let color = validate_moment_color(&request.color)?;
+        validate_moment_times(request.start_seconds, request.end_seconds)?;
+        let now = Utc::now().timestamp_millis();
+        let mut connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "Library moments are unavailable.")
+        })?;
+        let transaction = connection.transaction()?;
+        let item: Option<(String, bool, Option<f64>)> = transaction
+            .query_row(
+                "SELECT COALESCE(media_kind, ''), missing, duration_seconds
+                 FROM media_library WHERE id = ?1",
+                [&request.item_id],
+                |row| Ok((row.get(0)?, row.get::<_, i64>(1)? != 0, row.get(2)?)),
+            )
+            .optional()?;
+        let Some((media_kind, missing, duration)) = item else {
+            return Err(library_item_not_found());
+        };
+        if media_kind != "video" || missing {
+            return Err(AppError::new(
+                "library_moment_video_required",
+                "Moments can only be saved for available videos.",
+            ));
+        }
+        if let Some(duration) = duration.filter(|value| value.is_finite() && *value > 0.0) {
+            let last = request.end_seconds.unwrap_or(request.start_seconds);
+            if last > duration + 1.0 {
+                return Err(AppError::new(
+                    "invalid_library_moment_time",
+                    "The moment must be within the video's duration.",
+                ));
+            }
+        }
+        transaction.execute(
+            "INSERT INTO library_moments
+                (id, item_id, label, note, start_seconds, end_seconds, color, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
+             ON CONFLICT(id) DO UPDATE SET
+                item_id = excluded.item_id,
+                label = excluded.label,
+                note = excluded.note,
+                start_seconds = excluded.start_seconds,
+                end_seconds = excluded.end_seconds,
+                color = excluded.color,
+                updated_at = excluded.updated_at",
+            params![
+                id,
+                request.item_id,
+                label,
+                note,
+                request.start_seconds,
+                request.end_seconds,
+                color,
+                now,
+            ],
+        )?;
+        let saved = transaction.query_row(
+            "SELECT id, item_id, label, note, start_seconds, end_seconds, color, created_at, updated_at
+             FROM library_moments WHERE id = ?1",
+            [&id],
+            library_moment_from_row,
+        )?;
+        transaction.commit()?;
+        Ok(saved)
+    }
+
+    pub fn delete_library_moment(&self, id: &str) -> Result<(), AppError> {
+        validate_uuid(id, "moment")?;
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "Library moments are unavailable.")
+        })?;
+        if connection.execute("DELETE FROM library_moments WHERE id = ?1", [id])? == 0 {
+            return Err(AppError::new(
+                "library_moment_not_found",
+                "The saved moment was not found.",
+            ));
+        }
+        Ok(())
+    }
+
     pub fn add_library_playlist_item(
         &self,
         playlist_id: &str,
@@ -4838,6 +4971,75 @@ fn validate_playlist_description(value: &str) -> Result<String, AppError> {
     Ok(value.to_owned())
 }
 
+fn validate_moment_label(value: &str) -> Result<String, AppError> {
+    let value = value.trim();
+    if value.is_empty() || value.chars().count() > 100 || value.chars().any(char::is_control) {
+        return Err(AppError::new(
+            "invalid_library_moment_label",
+            "Moment labels must contain between 1 and 100 visible characters.",
+        ));
+    }
+    Ok(value.to_owned())
+}
+
+fn validate_moment_note(value: &str) -> Result<String, AppError> {
+    let value = value.trim();
+    if value.chars().count() > 2_000
+        || value
+            .chars()
+            .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+    {
+        return Err(AppError::new(
+            "invalid_library_moment_note",
+            "Moment notes must contain no more than 2,000 characters.",
+        ));
+    }
+    Ok(value.to_owned())
+}
+
+fn validate_moment_color(value: &str) -> Result<String, AppError> {
+    let value = value.trim();
+    if !matches!(value, "accent" | "blue" | "amber" | "green" | "rose") {
+        return Err(AppError::new(
+            "invalid_library_moment_color",
+            "Choose a supported moment color.",
+        ));
+    }
+    Ok(value.to_owned())
+}
+
+fn validate_moment_times(start_seconds: f64, end_seconds: Option<f64>) -> Result<(), AppError> {
+    if !start_seconds.is_finite() || start_seconds < 0.0 {
+        return Err(AppError::new(
+            "invalid_library_moment_time",
+            "The moment start must be a valid non-negative time.",
+        ));
+    }
+    if let Some(end_seconds) = end_seconds {
+        if !end_seconds.is_finite() || end_seconds <= start_seconds {
+            return Err(AppError::new(
+                "invalid_library_moment_time",
+                "The moment end must be later than its start.",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn library_moment_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LibraryMoment> {
+    Ok(LibraryMoment {
+        id: row.get(0)?,
+        item_id: row.get(1)?,
+        label: row.get(2)?,
+        note: row.get(3)?,
+        start_seconds: row.get(4)?,
+        end_seconds: row.get(5)?,
+        color: row.get(6)?,
+        created_at: timestamp_or_epoch(row.get(7)?),
+        updated_at: timestamp_or_epoch(row.get(8)?),
+    })
+}
+
 fn save_library_metadata(connection: &Connection, item: &LibraryItem) -> Result<(), AppError> {
     connection.execute(
         "INSERT INTO library_media_metadata
@@ -5723,7 +5925,7 @@ mod tests {
                 row.get(0)
             })
             .expect("recovered migration version");
-        assert_eq!(latest_version, 19);
+        assert_eq!(latest_version, 20);
         let has_playback: bool = connection
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'library_playback')",
@@ -5741,6 +5943,14 @@ mod tests {
             )
             .expect("playlist table state");
         assert!(has_playlists);
+        let has_moments: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'library_moments')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("moments table state");
+        assert!(has_moments);
         let has_rich_metadata: bool = connection
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM sqlite_master
@@ -6734,6 +6944,86 @@ mod tests {
             database.list_library_playlists().expect("playlists")[0].item_ids,
             vec![first.id]
         );
+    }
+
+    #[test]
+    fn persists_validated_library_moments_and_cascades_with_video() {
+        let directory = tempdir().expect("temporary directory");
+        let database = Database::open(&directory.path().join("moments.sqlite3")).expect("database");
+        let now = Utc::now();
+        let item = LibraryItem {
+            id: Uuid::new_v4().to_string(),
+            path: directory
+                .path()
+                .join("movie.mp4")
+                .to_string_lossy()
+                .into_owned(),
+            source_id: None,
+            relative_path: None,
+            media_kind: Some(LibraryMediaKind::Video),
+            title: "Movie".to_owned(),
+            source_url: None,
+            thumbnail: None,
+            duration_seconds: Some(120.0),
+            site: None,
+            tags: Vec::new(),
+            metadata: serde_json::json!({}),
+            file_size_bytes: Some(100),
+            modified_at_ms: Some(1),
+            width: Some(1920),
+            height: Some(1080),
+            fps: Some(30.0),
+            video_codec: Some("h264".to_owned()),
+            audio_codec: Some("aac".to_owned()),
+            container: Some("mp4".to_owned()),
+            dynamic_range: None,
+            metadata_state: LibraryMetadataState::Ready,
+            metadata_error: None,
+            favorite: false,
+            rating: None,
+            missing: false,
+            added_at: now,
+            updated_at: now,
+        };
+        database.upsert_library_item(&item).expect("video item");
+
+        let saved = database
+            .save_library_moment(SaveLibraryMomentRequest {
+                id: None,
+                item_id: item.id.clone(),
+                label: "Opening scene".to_owned(),
+                note: "Compare the lighting.".to_owned(),
+                start_seconds: 10.0,
+                end_seconds: Some(18.5),
+                color: "blue".to_owned(),
+            })
+            .expect("save moment");
+        assert_eq!(
+            database.list_library_moments(&item.id).expect("moments"),
+            vec![saved.clone()]
+        );
+
+        let invalid = database
+            .save_library_moment(SaveLibraryMomentRequest {
+                id: None,
+                item_id: item.id.clone(),
+                label: "Invalid range".to_owned(),
+                note: String::new(),
+                start_seconds: 20.0,
+                end_seconds: Some(19.0),
+                color: "accent".to_owned(),
+            })
+            .expect_err("reversed range");
+        assert_eq!(invalid.code, "invalid_library_moment_time");
+
+        database
+            .remove_library_item(&item.id)
+            .expect("remove video");
+        let connection = database.connection.lock().expect("database lock");
+        let remaining: i64 = connection
+            .query_row("SELECT COUNT(*) FROM library_moments", [], |row| row.get(0))
+            .expect("moment count");
+        assert_eq!(remaining, 0);
     }
 
     #[test]

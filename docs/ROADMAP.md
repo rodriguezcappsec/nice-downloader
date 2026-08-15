@@ -24,6 +24,16 @@ Deliver a dedicated two-to-four-video grid, Library selection entry point, indep
 
 Status: implemented on `feat/library-video-compare`.
 
+## Milestone 17: clips, moments, and storyboards
+
+Deliver durable timestamp/range moments, Rust-owned safe clip export through the FFmpeg transformation lifecycle, bounded cached storyboards, player seeking, and version 3 backup/restore.
+
+Status: implemented on `feat/library-creative-workspaces`.
+
+## Next organizer milestones
+
+18: saved comparison sessions and review-note export. 19: synchronized image comparison and explicit media-version stacks. 20: keyboard-first rapid curation and dynamic rule collections. 21: local subtitle/transcript FTS with timestamp seeking. 22: accessible lean-back playback foundations.
+
 ## Maturity roadmap delivered
 
 - First-run engine/privacy onboarding and Linux AppImage/DEB plus Windows NSIS release workflows.

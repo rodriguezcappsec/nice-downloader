@@ -649,6 +649,50 @@ export interface LibraryPlaylist {
   updatedAt: string;
 }
 
+export type LibraryMomentColor = "accent" | "blue" | "amber" | "green" | "rose";
+
+export interface LibraryMoment {
+  id: string;
+  itemId: string;
+  label: string;
+  note: string;
+  startSeconds: number;
+  endSeconds?: number | null;
+  color: LibraryMomentColor;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SaveLibraryMomentRequest {
+  id?: string | null;
+  itemId: string;
+  label: string;
+  note: string;
+  startSeconds: number;
+  endSeconds?: number | null;
+  color: LibraryMomentColor;
+}
+
+export interface StartLibraryClipExportRequest {
+  itemId: string;
+  outputPath: string;
+  startSeconds: number;
+  endSeconds: number;
+  overwrite: boolean;
+}
+
+export interface LibraryStoryboardFrame {
+  timeSeconds: number;
+  imageDataUrl: string;
+}
+
+export interface LibraryStoryboard {
+  itemId: string;
+  durationSeconds: number;
+  frames: LibraryStoryboardFrame[];
+  generatedAt: string;
+}
+
 export type LibraryChangeKind = "added" | "modified" | "renamed" | "missing" | "restored";
 
 export interface LibraryChange {

@@ -271,6 +271,38 @@ Status: implemented on `feat/library-video-compare`.
 
 Acceptance: select two to four videos across paginated Library results, open Compare, transfer audio focus, use shared playback controls, handle an incompatible tile without blocking the others, remove or replace a tile, leave and return to the preserved comparison, and open any playable tile in the system player.
 
+## Milestone 17 - Clips, moments, and storyboards
+
+Status: implemented on `feat/library-creative-workspaces`.
+
+- Migration `0020_library_moments.sql` stores up to 500 ordered timestamp or range annotations per video and cascades them when a catalog record is removed.
+- Watch captures the playhead as a point or bounded clip range with a label, note, and color, then seeks back to any saved moment.
+- Range moments start cancellable FFmpeg stream-copy exports through Transformations. Rust resolves the source path; React only provides a native-dialog output path.
+- Rust generates 4–24 storyboard JPEG frames from a validated regular video. Generation is serialized, timeout-bounded, cached by item ID and modification stamp, and returned without exposing source paths.
+- Version 3 Library backup/restore includes validated moments, remaps catalog references, rejects malformed timing before writing, and remains compatible with versions 1 and 2.
+
+Acceptance: mark and revisit a timestamp, save and export a range without changing the original, generate a storyboard, seek from a frame, relaunch with moments intact, and restore them from backup.
+
+## Milestone 18 - Saved comparison sessions and review annotations
+
+Persist named 2–4-video layouts, positions, speeds, audio focus, and notes. Reuse moments for timestamped review and add Markdown/CSV export.
+
+## Milestone 19 - Image comparison and media stacks
+
+Add synchronized image zoom/pan, overlay and split views, then group alternate encodes, edits, originals, and generated copies without conflating files.
+
+## Milestone 20 - Rapid curation and automatic collections
+
+Provide keyboard-first keep, favorite, rate, tag, move, and review actions. Persist validated rule collections that use the existing SQLite query model.
+
+## Milestone 21 - Transcript discovery
+
+Index trusted local subtitle text with bounded FTS, search across videos, and seek to result timestamps. Speech-to-text remains opt-in.
+
+## Milestone 22 - Lean-back playback
+
+Add large-control keyboard/gamepad navigation while preserving accessibility, pagination, playlist order, and local privacy boundaries.
+
 ## Explicitly deferred
 
 Face recognition, cloud sync, server mode, automatic file deletion, and Stash-compatible scraping are not prerequisites for a mature local organizer. Revisit them only after the source scanner, metadata cache, browsing, and recovery behavior are dependable.

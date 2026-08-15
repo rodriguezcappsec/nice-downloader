@@ -49,6 +49,7 @@ The frontend never receives a generic command-execution primitive. Tauri capabil
 - `engines`: routing policy and isolated adapters. yt-dlp handles ordinary media URLs; gallery-dl handles supported gallery URLs, initially Bunkr albums.
 - `queue`: authoritative ordered pending queue, dynamic concurrency (default 2), scheduling, queue/job pause, child lifecycle, cancellation tokens, retry lineage, startup recovery, disk preflight, and normalized events.
 - `database`: SQLite connection, embedded migrations, durable job intent/diagnostics, settings, and history repository.
+- `creative`: Rust-owned, serialized, timeout-bounded storyboard generation from validated catalog videos. Clip exports reuse `transformations` for cancellable FFmpeg execution and staged output publication.
 - `errors`: typed user-facing errors with optional diagnostic details.
 
 ## Frontend modules

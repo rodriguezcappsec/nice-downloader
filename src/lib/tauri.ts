@@ -1,6 +1,13 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { LibraryPlaylist, SaveLibraryPlaylistRequest } from "../types";
+import type {
+  LibraryMoment,
+  LibraryPlaylist,
+  LibraryStoryboard,
+  SaveLibraryMomentRequest,
+  SaveLibraryPlaylistRequest,
+  StartLibraryClipExportRequest,
+} from "../types";
 import type {
   BatchAnalysisResponse,
   DownloadJob,
@@ -200,6 +207,15 @@ export const api = {
     invoke<LibraryPlaylist>("move_library_playlist_item", { playlistId, itemId, newIndex }),
   listLibraryPlaylistItems: (playlistId: string) =>
     invoke<LibraryItem[]>("list_library_playlist_items", { playlistId }),
+  listLibraryMoments: (itemId: string) =>
+    invoke<LibraryMoment[]>("list_library_moments", { itemId }),
+  saveLibraryMoment: (request: SaveLibraryMomentRequest) =>
+    invoke<LibraryMoment>("save_library_moment", { request }),
+  deleteLibraryMoment: (id: string) => invoke<void>("delete_library_moment", { id }),
+  generateLibraryStoryboard: (itemId: string, frameCount = 12) =>
+    invoke<LibraryStoryboard>("generate_library_storyboard", { itemId, frameCount }),
+  startLibraryClipExport: (request: StartLibraryClipExportRequest) =>
+    invoke<TransformationTask>("start_library_clip_export", { request }),
   applyLibraryBulkAction: (ids: string[], action: LibraryBulkAction) => invoke<LibraryItem[]>("apply_library_bulk_action", { ids, action }),
   listLibraryChanges: () => invoke<LibraryChange[]>("list_library_changes"),
   reviewLibraryChanges: (ids: string[]) => invoke<number>("review_library_changes", { ids }),

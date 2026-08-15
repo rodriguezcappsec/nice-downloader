@@ -1,5 +1,6 @@
 mod authentication;
 mod commands;
+mod creative;
 mod database;
 mod engines;
 mod errors;
@@ -12,8 +13,8 @@ mod transformations;
 mod utils;
 
 use crate::{
-    database::Database, engines::managed, library::LibraryManager, queue::QueueManager,
-    transformations::TransformationManager,
+    creative::CreativeManager, database::Database, engines::managed, library::LibraryManager,
+    queue::QueueManager, transformations::TransformationManager,
 };
 use tauri::Manager;
 use tracing_subscriber::EnvFilter;
@@ -98,6 +99,10 @@ pub fn run() {
             }
             let queue = QueueManager::new(database.clone())?;
             let transformations = TransformationManager::new(database.clone())?;
+            let creative = CreativeManager::new(
+                database.clone(),
+                data_directory.join("library-storyboards"),
+            );
             let library = LibraryManager::new(database.clone())?;
             library.start_source_monitor(app.handle().clone());
             let recovery_queue = queue.clone();
@@ -112,6 +117,7 @@ pub fn run() {
             app.manage(database);
             app.manage(queue);
             app.manage(transformations);
+            app.manage(creative);
             app.manage(library);
             app.manage(media_server);
             tracing::info!(path = %data_directory.display(), "application backend initialized");
@@ -207,6 +213,11 @@ pub fn run() {
             commands::remove_library_playlist_item,
             commands::move_library_playlist_item,
             commands::list_library_playlist_items,
+            commands::list_library_moments,
+            commands::save_library_moment,
+            commands::delete_library_moment,
+            commands::generate_library_storyboard,
+            commands::start_library_clip_export,
             commands::apply_library_bulk_action,
             commands::list_library_changes,
             commands::review_library_changes,

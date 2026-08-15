@@ -88,6 +88,8 @@ warning because current builds are not code-signed.
 - Dedicated two-to-four-video comparison grid with independent controls,
   single-audio focus, optional audio mixing, shared synchronization controls,
   compatibility consent per tile, and system-player fallbacks
+- Timestamped moments and clip ranges with notes, color markers, one-click
+  seeking, cancellable FFmpeg clip exports, and cached storyboard navigation
 - Integrated full-resolution image viewer with zoom, pan, rotation, keyboard
   browsing, slideshows, and explicit system-viewer fallback
 - Scheduled playlist/channel subscriptions with archive-aware deduplication
