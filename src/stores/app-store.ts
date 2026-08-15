@@ -17,6 +17,7 @@ import type {
 
 interface AppStore {
   view: ViewId;
+  compareItemIds: string[];
   engines: EngineInfo[];
   enginePreferences: EnginePreferences;
   jobs: Record<string, DownloadJob>;
@@ -33,6 +34,9 @@ interface AppStore {
   notice: { message: string; view?: ViewId } | null;
   defaultDestination: string;
   setView: (view: ViewId) => void;
+  setCompareItems: (itemIds: string[]) => void;
+  removeCompareItem: (itemId: string) => void;
+  clearCompareItems: () => void;
   setError: (error: AppError | null) => void;
   setNotice: (notice: AppStore["notice"]) => void;
   setEnginePreferences: (preferences: EnginePreferences) => void;
@@ -79,6 +83,7 @@ function newerJob(
 
 export const useAppStore = create<AppStore>((set, get) => ({
   view: savedView && ["new", "downloads", "queue", "history", "subscriptions", "transformations", "library", "presets", "settings"].includes(savedView) ? savedView : "library",
+  compareItemIds: [],
   engines: [],
   enginePreferences: {
     browserCookieSource: "none",
@@ -111,6 +116,9 @@ export const useAppStore = create<AppStore>((set, get) => ({
     window.localStorage.setItem("nice-downloader.view", view);
     set({ view });
   },
+  setCompareItems: (itemIds) => set({ compareItemIds: Array.from(new Set(itemIds)).slice(0, 4) }),
+  removeCompareItem: (itemId) => set((state) => ({ compareItemIds: state.compareItemIds.filter((id) => id !== itemId) })),
+  clearCompareItems: () => set({ compareItemIds: [] }),
   setError: (error) => set({ error }),
   setNotice: (notice) => set({ notice }),
   setEnginePreferences: (enginePreferences) => set({ enginePreferences }),

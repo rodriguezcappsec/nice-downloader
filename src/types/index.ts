@@ -6,6 +6,7 @@ export type ViewId =
   | "subscriptions"
   | "transformations"
   | "library"
+  | "compare"
   | "presets"
   | "settings";
 

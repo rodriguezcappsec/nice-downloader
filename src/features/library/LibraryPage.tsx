@@ -102,7 +102,9 @@ type LiveAnnouncement = { signature: string; message: string; assertive?: boolea
 export function LibraryPage({ active = true }: { active?: boolean }) {
   const setError = useAppStore((state) => state.setError);
   const setNotice = useAppStore((state) => state.setNotice);
+  const currentView = useAppStore((state) => state.view);
   const setView = useAppStore((state) => state.setView);
+  const setCompareItems = useAppStore((state) => state.setCompareItems);
   const [queryResult, setQueryResult] = useState<LibraryQueryResult>(EMPTY_LIBRARY_RESULT);
   const [recentResult, setRecentResult] = useState<LibraryQueryResult>({ ...EMPTY_LIBRARY_RESULT, pageSize: 12 });
   const [videoResult, setVideoResult] = useState<LibraryQueryResult>({ ...EMPTY_LIBRARY_RESULT, pageSize: 12 });
@@ -390,6 +392,31 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
     const refreshWatchShelves = () => scheduleLibraryRefresh(0);
     window.addEventListener("nice-downloader:library-watch-state", refreshWatchShelves);
     return () => window.removeEventListener("nice-downloader:library-watch-state", refreshWatchShelves);
+  }, []);
+
+  useEffect(() => {
+    const startSelection = (event: Event) => {
+      const requestedIds = (event as CustomEvent<{ itemIds?: string[] }>).detail?.itemIds || [];
+      setSelectedIds(new Set(Array.from(new Set(requestedIds)).slice(0, 4)));
+      setSelectionMode(true);
+      setActivePlaylist(null);
+      setActivePlaylistItems([]);
+    };
+    const stopSinglePlayback = () => {
+      setWatchItem(null);
+      setPlaybackContext(null);
+      setWatchMinimized(false);
+      setViewImage(null);
+      imageReturnFocus.current = null;
+      setSelectedItem(null);
+      setDetailsExtraItems([]);
+    };
+    window.addEventListener("nice-downloader:start-compare-selection", startSelection);
+    window.addEventListener("nice-downloader:compare-start", stopSinglePlayback);
+    return () => {
+      window.removeEventListener("nice-downloader:start-compare-selection", startSelection);
+      window.removeEventListener("nice-downloader:compare-start", stopSinglePlayback);
+    };
   }, []);
 
   async function refreshArtworkCacheStatus() {
@@ -848,6 +875,45 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
     setSelectedIds(new Set());
   }
 
+  async function openCompareWorkspace() {
+    const itemIds = Array.from(selectedIds);
+    if (itemIds.length < 2 || itemIds.length > 4 || busy) return;
+    setBusy(true);
+    try {
+      const selected = await api.getLibraryItemsByIds(itemIds);
+      const selectedById = new Map(selected.map((item) => [item.id, item]));
+      const ordered = itemIds.map((id) => selectedById.get(id)).filter((item): item is LibraryItem => Boolean(item));
+      if (ordered.length !== itemIds.length) {
+        setNotice({ message: "One or more selected records no longer exist. Refresh the Library and choose the videos again.", view: "library" });
+        scheduleLibraryRefresh(0);
+        return;
+      }
+      if (ordered.some((item) => item.mediaKind !== "video")) {
+        setNotice({ message: "Video comparison accepts videos only. Remove images from the selection and try again.", view: "library" });
+        return;
+      }
+      if (ordered.some((item) => item.missing)) {
+        setNotice({ message: "Unavailable videos cannot be compared. Restore or remove the missing records first.", view: "library" });
+        return;
+      }
+      setCompareItems(itemIds);
+      setWatchItem(null);
+      setPlaybackContext(null);
+      setViewImage(null);
+      imageReturnFocus.current = null;
+      setSelectedItem(null);
+      setDetailsExtraItems([]);
+      closeSelectionMode();
+      window.dispatchEvent(new Event("nice-downloader:compare-start"));
+      setView("compare");
+      window.setTimeout(() => document.getElementById("compare-workspace-heading")?.focus(), 0);
+    } catch (error) {
+      setError(normalizeError(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function resetFilters() {
     setMediaFilter("all"); setSourceFilter("all"); setFolderFilter("all"); setFolderScope("tree"); setResolutionFilter("all"); setContainerFilter("all");
     setDurationFilter("all"); setDateFilter("all"); setPublishedFilter("all"); setAvailabilityFilter("available"); setTagFilters([]); setCreatorFilters([]);
@@ -1134,7 +1200,7 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
   const imageIndex = viewImage ? imageNavigationItems.findIndex((item) => item.id === viewImage.id) : -1;
   const previousImage = imageIndex > 0 ? imageNavigationItems[imageIndex - 1] : null;
   const nextImage = imageIndex >= 0 && imageIndex + 1 < imageNavigationItems.length ? imageNavigationItems[imageIndex + 1] : null;
-  const watchWorkspace = watchItem ? <WatchWorkspace
+  const watchWorkspace = watchItem && currentView !== "compare" ? <WatchWorkspace
     key={watchItem.id}
     item={watchItem}
     sourceName={sourceLabel(watchItem, sourceNames)}
@@ -1313,7 +1379,7 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
         </>
       )}
 
-{selectionMode ? <BulkActionBar selectedIds={selectedIds} collections={collections} busy={busy} onMove={openBulkMove} onApply={applyBulkAction} onClose={closeSelectionMode} /> : null}
+{selectionMode ? <BulkActionBar selectedIds={selectedIds} collections={collections} busy={busy} onCompare={openCompareWorkspace} onMove={openBulkMove} onApply={applyBulkAction} onClose={closeSelectionMode} /> : null}
       {bulkMoveOpen ? <BulkMoveDialog selectedIds={selectedIds} onClose={closeBulkMove} onComplete={(result) => { applyBulkMoveResult(result); closeBulkMove(); }} /> : null}
 </div>{imageWorkspace}{active && selectedItem ? <div className="relative z-[80]"><MediaDetails item={selectedItem} sourceName={sourceLabel(selectedItem, sourceNames)} onClose={closeDetails} onWatch={openSelectedMedia} onChanged={updateItem} onMetadataChanged={() => scheduleLibraryRefresh(0)} onBrowseCreator={(creator) => { closeDetails(false); resetFilters(); setCreatorFilters([creator]); setResultPage(1); }} onBrowseSeries={(series) => { closeDetails(false); resetFilters(); setSeriesFilters([series]); setResultPage(1); }} onBrowseSite={(site) => { closeDetails(false); resetFilters(); setSiteFilters([site]); setResultPage(1); }} onSelectRelated={openRelatedDetails} onRemoved={() => removeItem(selectedItem.id)} onOperation={applyFileOperationResult} /></div> : null}{watchWorkspace}</>
   );
@@ -2522,10 +2588,11 @@ function sourceLabel(item: LibraryItem, sourceNames: Map<string, string>): strin
   return item.sourceId ? sourceNames.get(item.sourceId) || item.site || "Local media" : item.site || "Local media";
 }
 
-function BulkActionBar({ selectedIds, collections, busy, onMove, onApply, onClose }: { selectedIds: Set<string>; collections: LibraryCollection[]; busy: boolean; onMove: () => void; onApply: (action: LibraryBulkAction, message: string) => Promise<void>; onClose: () => void }) {
+function BulkActionBar({ selectedIds, collections, busy, onCompare, onMove, onApply, onClose }: { selectedIds: Set<string>; collections: LibraryCollection[]; busy: boolean; onCompare: () => Promise<void>; onMove: () => void; onApply: (action: LibraryBulkAction, message: string) => Promise<void>; onClose: () => void }) {
   const [tag, setTag] = useState("");
   const disabled = busy || selectedIds.size === 0;
-  return <aside className="panel-shadow fixed bottom-6 left-1/2 z-40 flex w-[min(1080px,calc(100vw-320px))] -translate-x-1/2 flex-wrap items-center gap-2 border border-line/80 bg-panel/95 p-3 backdrop-blur-xl" aria-label="Bulk library actions"><div className="mr-2 min-w-24"><p className="number-font text-sm font-semibold">{selectedIds.size} selected</p><button className="mt-0.5 text-[10px] font-medium text-muted hover:text-ink" onClick={onClose}>Clear selection</button></div><Button className="h-9 px-3 text-xs" disabled={disabled} onClick={onMove}><FolderInput size={14} /> Move</Button><Button variant="secondary" className="h-9 px-3 text-xs" disabled={disabled} onClick={() => void onApply({ type: "setFavorite", favorite: true }, `Marked ${selectedIds.size} item${selectedIds.size === 1 ? "" : "s"} as favorites.`)}><Heart size={14} /> Favorite</Button><Button variant="secondary" className="h-9 px-3 text-xs" disabled={disabled} onClick={() => void onApply({ type: "setFavorite", favorite: false }, `Removed ${selectedIds.size} item${selectedIds.size === 1 ? "" : "s"} from favorites.`)}><Heart size={14} fill="none" /> Unfavorite</Button><label><span className="sr-only">Set rating</span><Select className="h-9 w-32 text-xs" disabled={disabled} defaultValue="" onChange={(event) => { const value = event.target.value; if (value !== "") void onApply({ type: "setRating", rating: value === "clear" ? null : Number(value) }, value === "clear" ? "Cleared selected ratings." : `Rated selected media ${value} stars.`); event.currentTarget.value = ""; }}><option value="" disabled>Set rating</option>{[5, 4, 3, 2, 1].map((rating) => <option key={rating} value={rating}>{rating} star{rating === 1 ? "" : "s"}</option>)}<option value="clear">Clear rating</option></Select></label><label><span className="sr-only">Add to collection</span><Select className="h-9 w-44 text-xs" disabled={disabled || collections.length === 0} defaultValue="" onChange={(event) => { if (event.target.value) void onApply({ type: "addToCollection", collectionId: event.target.value }, "Added selected media to the collection."); event.currentTarget.value = ""; }}><option value="" disabled>{collections.length ? "Add to collection" : "No collections"}</option>{collections.map((collection) => <option key={collection.id} value={collection.id}>{collection.name}</option>)}</Select></label><label><span className="sr-only">Remove from collection</span><Select className="h-9 w-48 text-xs" disabled={disabled || collections.length === 0} defaultValue="" onChange={(event) => { if (event.target.value) void onApply({ type: "removeFromCollection", collectionId: event.target.value }, "Removed selected media from the collection."); event.currentTarget.value = ""; }}><option value="" disabled>{collections.length ? "Remove from collection" : "No collections"}</option>{collections.map((collection) => <option key={collection.id} value={collection.id}>{collection.name}</option>)}</Select></label><div className="flex min-w-48 flex-1"><Input className="h-9 rounded-r-none text-xs" value={tag} onChange={(event) => setTag(event.target.value)} placeholder="Add a tag" /><Button variant="secondary" className="h-9 rounded-l-none px-3 text-xs" disabled={disabled || !tag.trim()} onClick={() => { const value = tag.trim(); if (!value) return; void onApply({ type: "addTags", tags: [value] }, `Added #${value} to selected media.`); setTag(""); }}><Tags size={14} /> Add</Button></div></aside>;
+  const compareDisabled = busy || selectedIds.size < 2 || selectedIds.size > 4;
+  return <aside className="panel-shadow fixed bottom-6 left-1/2 z-40 flex w-[min(1180px,calc(100vw-320px))] -translate-x-1/2 flex-wrap items-center gap-2 border border-line/80 bg-panel/95 p-3 backdrop-blur-xl" aria-label="Bulk library actions"><div className="mr-2 min-w-24"><p className="number-font text-sm font-semibold">{selectedIds.size} selected</p><button className="mt-0.5 text-[10px] font-medium text-muted hover:text-ink" onClick={onClose}>Clear selection</button></div><Button className="h-9 px-3 text-xs" disabled={compareDisabled} onClick={() => void onCompare()} title={compareDisabled ? "Select between 2 and 4 videos to compare" : "Open selected videos in the comparison grid"}><LayoutGrid size={14} /> Compare</Button><Button className="h-9 px-3 text-xs" disabled={disabled} onClick={onMove}><FolderInput size={14} /> Move</Button><Button variant="secondary" className="h-9 px-3 text-xs" disabled={disabled} onClick={() => void onApply({ type: "setFavorite", favorite: true }, `Marked ${selectedIds.size} item${selectedIds.size === 1 ? "" : "s"} as favorites.`)}><Heart size={14} /> Favorite</Button><Button variant="secondary" className="h-9 px-3 text-xs" disabled={disabled} onClick={() => void onApply({ type: "setFavorite", favorite: false }, `Removed ${selectedIds.size} item${selectedIds.size === 1 ? "" : "s"} from favorites.`)}><Heart size={14} fill="none" /> Unfavorite</Button><label><span className="sr-only">Set rating</span><Select className="h-9 w-32 text-xs" disabled={disabled} defaultValue="" onChange={(event) => { const value = event.target.value; if (value !== "") void onApply({ type: "setRating", rating: value === "clear" ? null : Number(value) }, value === "clear" ? "Cleared selected ratings." : `Rated selected media ${value} stars.`); event.currentTarget.value = ""; }}><option value="" disabled>Set rating</option>{[5, 4, 3, 2, 1].map((rating) => <option key={rating} value={rating}>{rating} star{rating === 1 ? "" : "s"}</option>)}<option value="clear">Clear rating</option></Select></label><label><span className="sr-only">Add to collection</span><Select className="h-9 w-44 text-xs" disabled={disabled || collections.length === 0} defaultValue="" onChange={(event) => { if (event.target.value) void onApply({ type: "addToCollection", collectionId: event.target.value }, "Added selected media to the collection."); event.currentTarget.value = ""; }}><option value="" disabled>{collections.length ? "Add to collection" : "No collections"}</option>{collections.map((collection) => <option key={collection.id} value={collection.id}>{collection.name}</option>)}</Select></label><label><span className="sr-only">Remove from collection</span><Select className="h-9 w-48 text-xs" disabled={disabled || collections.length === 0} defaultValue="" onChange={(event) => { if (event.target.value) void onApply({ type: "removeFromCollection", collectionId: event.target.value }, "Removed selected media from the collection."); event.currentTarget.value = ""; }}><option value="" disabled>{collections.length ? "Remove from collection" : "No collections"}</option>{collections.map((collection) => <option key={collection.id} value={collection.id}>{collection.name}</option>)}</Select></label><div className="flex min-w-48 flex-1"><Input className="h-9 rounded-r-none text-xs" value={tag} onChange={(event) => setTag(event.target.value)} placeholder="Add a tag" /><Button variant="secondary" className="h-9 rounded-l-none px-3 text-xs" disabled={disabled || !tag.trim()} onClick={() => { const value = tag.trim(); if (!value) return; void onApply({ type: "addTags", tags: [value] }, `Added #${value} to selected media.`); setTag(""); }}><Tags size={14} /> Add</Button></div></aside>;
 }
 
 function BulkMoveDialog({ selectedIds, onClose, onComplete }: { selectedIds: Set<string>; onClose: () => void; onComplete: (result: LibraryBulkMoveResult) => void }) {

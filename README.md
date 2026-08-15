@@ -85,6 +85,9 @@ warning because current builds are not code-signed.
   Continue Watching, subtitle tracks, searchable paginated browsing, and an
   persistent in-app mini player; compatibility copies require informed consent
   and have visible cache controls, with an explicit system-player fallback
+- Dedicated two-to-four-video comparison grid with independent controls,
+  single-audio focus, optional audio mixing, shared synchronization controls,
+  compatibility consent per tile, and system-player fallbacks
 - Integrated full-resolution image viewer with zoom, pan, rotation, keyboard
   browsing, slideshows, and explicit system-viewer fallback
 - Scheduled playlist/channel subscriptions with archive-aware deduplication

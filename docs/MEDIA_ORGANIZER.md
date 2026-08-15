@@ -257,6 +257,20 @@ Status: implemented on `feat/library-smart-discovery`.
 
 Acceptance: combine several filter values, save and reopen the view, scan matching media and see it appear automatically, browse a creator or series workspace, open related media, deliberately damage the search index in a test, and recover it without modifying source files.
 
+## Milestone 16 - Multi-video comparison workspace
+
+Status: implemented on `feat/library-video-compare`.
+
+- Library selection opens a comparison only for two to four existing, available video records. Images and missing records are rejected before navigation.
+- Compare is a dedicated application workspace. Its ephemeral ordered item IDs remain available while navigating, but are intentionally not restored after restarting the application.
+- Two videos use a side-by-side layout; three or four use a responsive 2x2 grid. Every tile contains unusual and vertical aspect ratios without overflowing.
+- Tiles reuse Rust-authorized playback preflight, URL, compatibility-copy, progress, release, and system-player commands. React never receives or supplies filesystem paths.
+- Only the selected tile emits audio by default. Users can explicitly allow multiple audio streams, while shared controls play, pause, restart, seek, or align all ready players to the active-audio video's absolute time.
+- Compatibility consent and failures remain isolated per tile. Compatibility preparation is serialized by the existing Rust media-server lock, preventing concurrent fallback transcodes.
+- Leaving Compare unmounts all players, saves progress snapshots, and releases every playback session. The comparison selection remains available for a later return.
+
+Acceptance: select two to four videos across paginated Library results, open Compare, transfer audio focus, use shared playback controls, handle an incompatible tile without blocking the others, remove or replace a tile, leave and return to the preserved comparison, and open any playable tile in the system player.
+
 ## Explicitly deferred
 
 Face recognition, cloud sync, server mode, automatic file deletion, and Stash-compatible scraping are not prerequisites for a mature local organizer. Revisit them only after the source scanner, metadata cache, browsing, and recovery behavior are dependable.

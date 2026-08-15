@@ -18,6 +18,12 @@ Deliver trigger-maintained FTS5 search, multi-value discovery filters, dedicated
 
 Status: implemented on `feat/library-smart-discovery`.
 
+## Milestone 16: multi-video comparison workspace
+
+Deliver a dedicated two-to-four-video grid, Library selection entry point, independent native controls, one-audio-at-a-time focus, optional audio mixing, bounded shared playback controls, compatibility-copy consent, and per-tile system-player fallback.
+
+Status: implemented on `feat/library-video-compare`.
+
 ## Maturity roadmap delivered
 
 - First-run engine/privacy onboarding and Linux AppImage/DEB plus Windows NSIS release workflows.

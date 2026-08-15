@@ -1,5 +1,5 @@
 import { AlertTriangle, CheckCircle2, X } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { AppShell } from "./components/AppShell";
@@ -14,6 +14,8 @@ import { TransformationsPage } from "./features/transformations/TransformationsP
 import { useAppStore } from "./stores/app-store";
 import { api, normalizeError } from "./lib/tauri";
 import type { DesktopPreferences, OnboardingStatus } from "./types";
+
+const ComparePage = lazy(() => import("./features/library/ComparePage").then((module) => ({ default: module.ComparePage })));
 
 export default function App() {
   const view = useAppStore((state) => state.view);
@@ -167,6 +169,7 @@ export default function App() {
       <div className={view === "subscriptions" ? "" : "hidden"}><SubscriptionsPage /></div>
       <div className={view === "transformations" ? "" : "hidden"}><TransformationsPage /></div>
       <LibraryPage active={view === "library"} />
+      {view === "compare" ? <Suspense fallback={<div className="grid min-h-[60vh] place-items-center text-sm text-muted" role="status">Opening comparison workspace…</div>}><ComparePage /></Suspense> : null}
       <div className={view === "presets" ? "" : "hidden"}><PresetsPage /></div>
       <div className={view === "settings" ? "" : "hidden"}><SettingsPage /></div>
       {notice ? (
