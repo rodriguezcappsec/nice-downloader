@@ -26,16 +26,17 @@ use crate::{
         LibraryCollection, LibraryCompareSession, LibraryCurationDecision, LibraryCurationState,
         LibraryDuplicateAnalysisJob, LibraryDuplicateGroup, LibraryDuplicateTrashResult,
         LibraryFacetRequest, LibraryFacets, LibraryFileOperation, LibraryFileOperationPlan,
-        LibraryFileOperationResult, LibraryImageSession, LibraryItem, LibraryMediaKind,
-        LibraryMediaStack, LibraryMoment, LibraryMontage, LibraryPlaybackCacheStatus,
-        LibraryPlaybackEntry, LibraryPlaybackPreflight, LibraryPlaybackSession,
-        LibraryPlaybackState, LibraryQueryRequest, LibraryQueryResult, LibraryRichMetadata,
-        LibraryScanJob, LibraryScanResult, LibrarySearchStatus, LibrarySmartView, LibrarySource,
-        LibraryTranscriptIndexStatus, LibraryTranscriptMatch, LibraryVisualSimilarityJob,
-        LibraryVisualSimilarityMatch, LibraryVisualSimilarityStatus, LocalShareSession,
-        MediaAnalysis, NativePlaybackSession, NativePlaybackStatus, OnboardingStatus, Preset,
-        PreviewLibraryBulkMoveRequest, PreviewLibraryFileOperationRequest, QueueSettings,
-        QueueSnapshot, SaveAuthenticationProfileRequest, SaveLibraryCollectionRequest,
+        LibraryFileOperationResult, LibraryHealthSummary, LibraryImageSession, LibraryItem,
+        LibraryMediaKind, LibraryMediaStack, LibraryMoment, LibraryMontage,
+        LibraryPlaybackCacheStatus, LibraryPlaybackEntry, LibraryPlaybackPreflight,
+        LibraryPlaybackSession, LibraryPlaybackState, LibraryQueryRequest, LibraryQueryResult,
+        LibraryRichMetadata, LibraryScanJob, LibraryScanResult, LibrarySearchStatus,
+        LibrarySmartView, LibrarySource, LibraryTranscriptIndexStatus, LibraryTranscriptMatch,
+        LibraryVisualSimilarityJob, LibraryVisualSimilarityMatch, LibraryVisualSimilarityStatus,
+        LocalShareSession, MediaAnalysis, NativePlaybackSession, NativePlaybackStatus,
+        OnboardingStatus, Preset, PreviewLibraryBulkMoveRequest,
+        PreviewLibraryFileOperationRequest, QueueSettings, QueueSnapshot,
+        SaveAuthenticationProfileRequest, SaveLibraryCollectionRequest,
         SaveLibraryCompareSessionRequest, SaveLibraryMediaStackRequest, SaveLibraryMomentRequest,
         SaveLibraryMontageRequest, SaveLibraryPlaybackRequest, SaveLibraryRichMetadataRequest,
         SaveLibrarySmartViewRequest, SaveLibrarySourceRequest, SavePresetRequest,
@@ -99,6 +100,13 @@ pub fn query_library_items(
     request: LibraryQueryRequest,
 ) -> Result<LibraryQueryResult, AppError> {
     database.query_library_items(request)
+}
+
+#[tauri::command]
+pub fn get_library_health_summary(
+    database: State<'_, Database>,
+) -> Result<LibraryHealthSummary, AppError> {
+    database.library_health_summary()
 }
 
 #[tauri::command]

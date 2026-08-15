@@ -1,6 +1,8 @@
 import { open, save } from "@tauri-apps/plugin-dialog";
 import {
   ArrowRight,
+  ArrowDown,
+  ArrowUp,
   ArchiveRestore,
   Ban,
   BellDot,
@@ -20,6 +22,7 @@ import {
   HardDrive,
   Heart,
   ListPlus,
+  ListVideo,
   LayoutGrid,
   Layers,
   List,
@@ -60,6 +63,7 @@ import { canOfferPlaybackFallback, createPlaybackError, EMBEDDED_PLAYBACK_TIMEOU
 import { api, normalizeError } from "../../lib/tauri";
 import { useAppStore } from "../../stores/app-store";
 import { CreativeTimeline } from "./CreativeTimeline";
+import { readLibraryWorkspace, writeLibraryWorkspace, type LibraryWorkspaceSnapshot } from "./library-workspace";
 import type {
   AppError,
   LibraryArtworkCacheStatus,
@@ -124,6 +128,12 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
   const setView = useAppStore((state) => state.setView);
   const setCompareItems = useAppStore((state) => state.setCompareItems);
   const setImageCompareItems = useAppStore((state) => state.setImageCompareItems);
+  const playNextItemIds = useAppStore((state) => state.playNextItemIds);
+  const setPlayNextItems = useAppStore((state) => state.setPlayNextItems);
+  const removePlayNextItem = useAppStore((state) => state.removePlayNextItem);
+  const movePlayNextItem = useAppStore((state) => state.movePlayNextItem);
+  const clearPlayNext = useAppStore((state) => state.clearPlayNext);
+  const initialWorkspace = useMemo(readLibraryWorkspace, []);
   const [queryResult, setQueryResult] = useState<LibraryQueryResult>(EMPTY_LIBRARY_RESULT);
   const [recentResult, setRecentResult] = useState<LibraryQueryResult>({ ...EMPTY_LIBRARY_RESULT, pageSize: 12 });
   const [videoResult, setVideoResult] = useState<LibraryQueryResult>({ ...EMPTY_LIBRARY_RESULT, pageSize: 12 });
@@ -162,34 +172,35 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
   const [playlistLoading, setPlaylistLoading] = useState(false);
   const [playlistMutationBusy, setPlaylistMutationBusy] = useState(false);
   const [playbackContext, setPlaybackContext] = useState<LibraryItem[] | null>(null);
+  const [playNextItems, setPlayNextQueueItems] = useState<LibraryItem[]>([]);
   const [changes, setChanges] = useState<LibraryChange[]>([]);
   const [duplicateJob, setDuplicateJob] = useState<LibraryDuplicateAnalysisJob | null>(null);
   const [duplicateGroups, setDuplicateGroups] = useState<LibraryDuplicateGroup[]>([]);
   const [fileOperations, setFileOperations] = useState<LibraryFileOperation[]>([]);
-  const [search, setSearch] = useState("");
-  const [debouncedSearch, setDebouncedSearch] = useState("");
-  const [sourceFilter, setSourceFilter] = useState("all");
-  const [folderFilter, setFolderFilter] = useState("all");
-  const [folderScope, setFolderScope] = useState<FolderScope>("tree");
-  const [mediaFilter, setMediaFilter] = useState<MediaFilter>("all");
-  const [resolutionFilter, setResolutionFilter] = useState<ResolutionFilter>("all");
-  const [containerFilter, setContainerFilter] = useState("all");
-  const [durationFilter, setDurationFilter] = useState<DurationFilter>("all");
-  const [dateFilter, setDateFilter] = useState<DateFilter>("all");
-  const [publishedFilter, setPublishedFilter] = useState<DateFilter>("all");
-  const [sort, setSort] = useState<LibrarySort>("recent");
-  const [availabilityFilter, setAvailabilityFilter] = useState<AvailabilityFilter>("available");
-  const [tagFilters, setTagFilters] = useState<string[]>([]);
-  const [creatorFilters, setCreatorFilters] = useState<string[]>([]);
-  const [seriesFilters, setSeriesFilters] = useState<string[]>([]);
-  const [siteFilters, setSiteFilters] = useState<string[]>([]);
-  const [ratingFilter, setRatingFilter] = useState("all");
-  const [collectionFilter, setCollectionFilter] = useState("all");
-  const [favoriteOnly, setFavoriteOnly] = useState(false);
+  const [search, setSearch] = useState(initialWorkspace.search);
+  const [debouncedSearch, setDebouncedSearch] = useState(initialWorkspace.search);
+  const [sourceFilter, setSourceFilter] = useState(initialWorkspace.sourceFilter);
+  const [folderFilter, setFolderFilter] = useState(initialWorkspace.folderFilter);
+  const [folderScope, setFolderScope] = useState<FolderScope>(initialWorkspace.folderScope);
+  const [mediaFilter, setMediaFilter] = useState<MediaFilter>(initialWorkspace.mediaFilter);
+  const [resolutionFilter, setResolutionFilter] = useState<ResolutionFilter>(initialWorkspace.resolutionFilter);
+  const [containerFilter, setContainerFilter] = useState(initialWorkspace.containerFilter);
+  const [durationFilter, setDurationFilter] = useState<DurationFilter>(initialWorkspace.durationFilter);
+  const [dateFilter, setDateFilter] = useState<DateFilter>(initialWorkspace.dateFilter);
+  const [publishedFilter, setPublishedFilter] = useState<DateFilter>(initialWorkspace.publishedFilter);
+  const [sort, setSort] = useState<LibrarySort>(initialWorkspace.sort);
+  const [availabilityFilter, setAvailabilityFilter] = useState<AvailabilityFilter>(initialWorkspace.availabilityFilter);
+  const [tagFilters, setTagFilters] = useState<string[]>(initialWorkspace.tagFilters);
+  const [creatorFilters, setCreatorFilters] = useState<string[]>(initialWorkspace.creatorFilters);
+  const [seriesFilters, setSeriesFilters] = useState<string[]>(initialWorkspace.seriesFilters);
+  const [siteFilters, setSiteFilters] = useState<string[]>(initialWorkspace.siteFilters);
+  const [ratingFilter, setRatingFilter] = useState(initialWorkspace.ratingFilter);
+  const [collectionFilter, setCollectionFilter] = useState(initialWorkspace.collectionFilter);
+  const [favoriteOnly, setFavoriteOnly] = useState(initialWorkspace.favoriteOnly);
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
   const [bulkMoveOpen, setBulkMoveOpen] = useState(false);
-  const [viewMode, setViewMode] = useState<"grid" | "list">(() => window.localStorage.getItem("nice-downloader.library-view") === "list" ? "list" : "grid");
+  const [viewMode, setViewMode] = useState<"grid" | "list">(initialWorkspace.viewMode);
   const [selectedItem, setSelectedItem] = useState<LibraryItem | null>(null);
   const [detailsExtraItems, setDetailsExtraItems] = useState<LibraryItem[]>([]);
   const [watchItem, setWatchItem] = useState<LibraryItem | null>(null);
@@ -205,9 +216,10 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
   const [showSourceForm, setShowSourceForm] = useState(false);
   const [importTags, setImportTags] = useState("");
   const [busy, setBusy] = useState(false);
-  const [resultPage, setResultPage] = useState(1);
+  const [resultPage, setResultPage] = useState(initialWorkspace.resultPage);
   const [artworkCacheStatus, setArtworkCacheStatus] = useState<LibraryArtworkCacheStatus | null>(null);
   const [queryLoading, setQueryLoading] = useState(true);
+  const [libraryCatalogContextLoaded, setLibraryCatalogContextLoaded] = useState(false);
   const [libraryRevision, setLibraryRevision] = useState(0);
   const [libraryAnnouncement, setLibraryAnnouncement] = useState("");
   const [libraryAlert, setLibraryAlert] = useState("");
@@ -223,6 +235,11 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
   const playlistLoadRevision = useRef(0);
   const mediaStackLoadRevision = useRef(0);
   const transcriptSeekSequence = useRef(0);
+  const filterResetReady = useRef(false);
+  const workspaceScrollTop = useRef(initialWorkspace.scrollTop);
+  const workspaceScrollRestored = useRef(false);
+  const workspaceSelectionRestored = useRef(false);
+  const workspaceSnapshotRef = useRef<LibraryWorkspaceSnapshot>(initialWorkspace);
 
   function activeElement(): HTMLElement | null {
     return document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -242,6 +259,102 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
     if (!active && watchItem) setWatchMinimized(true);
   }, [active, watchItem]);
 
+  workspaceSnapshotRef.current = {
+    search,
+    sourceFilter,
+    folderFilter,
+    folderScope,
+    mediaFilter,
+    resolutionFilter,
+    containerFilter,
+    durationFilter,
+    dateFilter,
+    publishedFilter,
+    sort,
+    availabilityFilter,
+    tagFilters,
+    creatorFilters,
+    seriesFilters,
+    siteFilters,
+    ratingFilter,
+    collectionFilter,
+    favoriteOnly,
+    resultPage,
+    viewMode,
+    selectedItemId: workspaceSelectionRestored.current ? selectedItem?.id || null : initialWorkspace.selectedItemId,
+    scrollTop: workspaceScrollTop.current,
+  };
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => writeLibraryWorkspace(workspaceSnapshotRef.current), 150);
+    return () => window.clearTimeout(timer);
+  }, [availabilityFilter, collectionFilter, containerFilter, creatorFilters, dateFilter, durationFilter, favoriteOnly, folderFilter, folderScope, mediaFilter, publishedFilter, ratingFilter, resolutionFilter, resultPage, search, selectedItem?.id, seriesFilters, siteFilters, sort, sourceFilter, tagFilters, viewMode]);
+
+  useEffect(() => {
+    if (!active) return;
+    const main = document.getElementById("main-content");
+    if (!main) return;
+    if (!queryLoading && !workspaceScrollRestored.current) {
+      workspaceScrollRestored.current = true;
+      window.requestAnimationFrame(() => { main.scrollTop = workspaceScrollTop.current; });
+    }
+    let timer = 0;
+    const onScroll = () => {
+      workspaceScrollTop.current = main.scrollTop;
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => writeLibraryWorkspace({ ...workspaceSnapshotRef.current, scrollTop: main.scrollTop }), 180);
+    };
+    main.addEventListener("scroll", onScroll, { passive: true });
+    return () => { window.clearTimeout(timer); main.removeEventListener("scroll", onScroll); };
+  }, [active, queryLoading]);
+
+  useEffect(() => {
+    if (!active || workspaceSelectionRestored.current) return;
+    workspaceSelectionRestored.current = true;
+    const itemId = initialWorkspace.selectedItemId;
+    if (!itemId) return;
+    let disposed = false;
+    void api.getLibraryItemsByIds([itemId])
+      .then(([item]) => {
+        if (disposed) return;
+        if (item) setSelectedItem(item);
+        else writeLibraryWorkspace({ ...workspaceSnapshotRef.current, selectedItemId: null });
+      })
+      .catch(() => writeLibraryWorkspace({ ...workspaceSnapshotRef.current, selectedItemId: null }));
+    return () => { disposed = true; };
+  }, [active, initialWorkspace.selectedItemId]);
+
+  useEffect(() => {
+    let disposed = false;
+    if (!playNextItemIds.length) {
+      setPlayNextQueueItems([]);
+      return;
+    }
+    void api.getLibraryItemsByIds(playNextItemIds).then((items) => {
+      if (disposed) return;
+      const byId = new Map(items.filter((item) => item.mediaKind === "video" && !item.missing).map((item) => [item.id, item]));
+      const ordered = playNextItemIds.flatMap((id) => byId.get(id) ? [byId.get(id)!] : []);
+      setPlayNextQueueItems(ordered);
+      const validIds = ordered.map((item) => item.id);
+      if (validIds.length !== playNextItemIds.length) setPlayNextItems(validIds);
+    }).catch((error) => { if (!disposed) setError(normalizeError(error)); });
+    return () => { disposed = true; };
+  }, [playNextItemIds, setError, setPlayNextItems]);
+
+  useEffect(() => {
+    const applyHealthFilter = (event: Event) => {
+      const detail = (event as CustomEvent<{ availability?: AvailabilityFilter; manage?: boolean }>).detail || {};
+      if (detail.availability) {
+        resetFilters();
+        setAvailabilityFilter(detail.availability);
+        setResultPage(1);
+      }
+      if (detail.manage) setManageOpen(true);
+    };
+    window.addEventListener("nice-downloader:library-health-filter", applyHealthFilter);
+    return () => window.removeEventListener("nice-downloader:library-health-filter", applyHealthFilter);
+  }, []);
+
   function startWatching(item: LibraryItem, queue: LibraryItem[] | null = null, startAtSeconds?: number) {
     setViewImage(null);
     imageReturnFocus.current = null;
@@ -254,6 +367,28 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
     setWatchMinimized(false);
     setView("library");
     window.setTimeout(() => document.getElementById("main-content")?.scrollTo({ top: 0 }), 0);
+  }
+
+  function playFirstQueued() {
+    const next = playNextItems[0];
+    if (!next) return;
+    removePlayNextItem(next.id);
+    setPlayNextQueueItems((current) => current.filter((item) => item.id !== next.id));
+    setSelectedItem(null);
+    setPlaybackContext(null);
+    setTranscriptSeekRequest(null);
+    setWatchItem(next);
+    setWatchMinimized(false);
+  }
+
+  function playQueuedItem(item: LibraryItem) {
+    removePlayNextItem(item.id);
+    setPlayNextQueueItems((current) => current.filter((candidate) => candidate.id !== item.id));
+    setSelectedItem(null);
+    setPlaybackContext(null);
+    setTranscriptSeekRequest(null);
+    setWatchItem(item);
+    setWatchMinimized(false);
   }
 
   async function rebuildTranscriptIndex() {
@@ -428,6 +563,7 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
         setSmartViews(nextSmartViews);
       }
       setSearchStatus(nextSearchStatus);
+      setLibraryCatalogContextLoaded(true);
       nextJobs.filter((job) => job.state === "running").forEach(announceScan);
       if (nextDuplicateJob?.state === "running") announceDuplicateAnalysis(nextDuplicateJob);
       scheduleLibraryRefresh(0);
@@ -817,6 +953,10 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
       : null;
 
   useEffect(() => {
+    if (!filterResetReady.current) {
+      filterResetReady.current = true;
+      return;
+    }
     setResultPage(1);
   }, [availabilityFilter, collectionFilter, containerFilter, creatorFilters, dateFilter, durationFilter, favoriteOnly, folderFilter, folderScope, mediaFilter, publishedFilter, ratingFilter, resolutionFilter, search, selectionMode, seriesFilters, siteFilters, sort, sourceFilter, tagFilters]);
 
@@ -829,6 +969,13 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
       setFolderScope("tree");
     }
   }, [availabilityFilter, facetsContext, folderFilter, folderOptions, sourceFilter]);
+
+  useEffect(() => {
+    if (!libraryCatalogContextLoaded) return;
+    if (sourceFilter !== "all" && !sources.some((source) => source.id === sourceFilter)) setSourceFilter("all");
+    if (collectionFilter !== "all" && !collections.some((collection) => collection.id === collectionFilter)) setCollectionFilter("all");
+    if (facetsContext === `${sourceFilter}:${availabilityFilter}` && containerFilter !== "all" && !containers.includes(containerFilter)) setContainerFilter("all");
+  }, [availabilityFilter, collectionFilter, collections, containerFilter, containers, facetsContext, libraryCatalogContextLoaded, sourceFilter, sources]);
 
   const navigationItems = useMemo(() => activeMediaStack ? activeMediaStackItems : isFiltered || selectionMode
     ? Array.from(new Map([...items, ...detailsExtraItems].map((item) => [item.id, item])).values())
@@ -1400,11 +1547,12 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
       ? watchPlaybackQueue[watchIndex - 1]
       : orderedPlayback ? null : watchPlaybackQueue.at(-1) || null
     : null;
-  const nextVideo = watchItem && watchPlaybackQueue.length > 1
+  const browseNextVideo = watchItem && watchPlaybackQueue.length > 1
     ? watchIndex >= 0 && watchIndex + 1 < watchPlaybackQueue.length
       ? watchPlaybackQueue[watchIndex + 1]
       : orderedPlayback ? null : watchPlaybackQueue[0]
     : null;
+  const nextVideo = playNextItems[0] || browseNextVideo;
   const autoNextVideo = watchIndex >= 0 && watchIndex + 1 < watchPlaybackQueue.length
     ? watchPlaybackQueue[watchIndex + 1]
     : null;
@@ -1426,6 +1574,7 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
     compact={compactPlayer}
     autoplayNext={autoplayNext}
     playlists={playlists}
+    playNextItems={playNextItems}
     seekRequest={transcriptSeekRequest?.itemId === watchItem.id ? transcriptSeekRequest : null}
     onSearch={setWatchSearch}
     onBack={minimizeWatching}
@@ -1434,10 +1583,30 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
     onDetails={() => openDetails(watchItem)}
     onSelectVideo={(item) => { setSelectedItem(null); setWatchItem(item); setWatchMinimized(false); }}
     onPrevious={previousVideo ? () => setWatchItem(previousVideo) : undefined}
-    onNext={nextVideo ? () => setWatchItem(nextVideo) : undefined}
+    onNext={nextVideo ? playNextItems.length ? playFirstQueued : () => setWatchItem(nextVideo) : undefined}
     onAutoplayNext={updateAutoplayNext}
     onPlaylistChanged={updatePlaylist}
-    onPlaybackEnded={autoplayNext && autoNextVideo ? () => setWatchItem(autoNextVideo) : undefined}
+    onPlaybackEnded={playNextItems.length ? playFirstQueued : autoplayNext && autoNextVideo ? () => setWatchItem(autoNextVideo) : undefined}
+    onPlayNextSelect={playQueuedItem}
+    onPlayNextMove={(itemId, newIndex) => {
+      movePlayNextItem(itemId, newIndex);
+      setPlayNextQueueItems((current) => {
+        const currentIndex = current.findIndex((item) => item.id === itemId);
+        if (currentIndex < 0) return current;
+        const next = [...current];
+        const [moved] = next.splice(currentIndex, 1);
+        next.splice(Math.min(Math.max(0, newIndex), next.length), 0, moved);
+        return next;
+      });
+    }}
+    onPlayNextRemove={(itemId) => {
+      removePlayNextItem(itemId);
+      setPlayNextQueueItems((current) => current.filter((item) => item.id !== itemId));
+    }}
+    onPlayNextClear={() => {
+      clearPlayNext();
+      setPlayNextQueueItems([]);
+    }}
     onBrowsePage={(page) => {
       if (!orderedPlayback) {
         setWatchBrowsePage(Math.min(Math.max(1, page), watchBrowseResult.totalPages));
@@ -2201,7 +2370,7 @@ function ImageWorkspace({ item, sourceName, position, total, shortcutsEnabled, o
   </div>;
 }
 
-function WatchWorkspace({ item, sourceName, browseItems, browseTotal, browsePage, browsePages, browseLoading, search, sourceNames, compact, autoplayNext, playlists, seekRequest, onSearch, onBack, onRestore, onClose, onDetails, onSelectVideo, onPrevious, onNext, onAutoplayNext, onPlaylistChanged, onPlaybackEnded, onBrowsePage }: {
+function WatchWorkspace({ item, sourceName, browseItems, browseTotal, browsePage, browsePages, browseLoading, search, sourceNames, compact, autoplayNext, playlists, playNextItems, seekRequest, onSearch, onBack, onRestore, onClose, onDetails, onSelectVideo, onPrevious, onNext, onAutoplayNext, onPlaylistChanged, onPlaybackEnded, onBrowsePage, onPlayNextSelect, onPlayNextMove, onPlayNextRemove, onPlayNextClear }: {
   item: LibraryItem;
   sourceName: string;
   browseItems: LibraryItem[];
@@ -2214,6 +2383,7 @@ function WatchWorkspace({ item, sourceName, browseItems, browseTotal, browsePage
   compact: boolean;
   autoplayNext: boolean;
   playlists: LibraryPlaylist[];
+  playNextItems: LibraryItem[];
   seekRequest: TranscriptSeekRequest | null;
   onSearch: (value: string) => void;
   onBack: () => void;
@@ -2227,6 +2397,10 @@ function WatchWorkspace({ item, sourceName, browseItems, browseTotal, browsePage
   onPlaylistChanged: (playlist: LibraryPlaylist) => void;
   onPlaybackEnded?: () => void;
   onBrowsePage: (page: number) => void;
+  onPlayNextSelect: (item: LibraryItem) => void;
+  onPlayNextMove: (itemId: string, newIndex: number) => void;
+  onPlayNextRemove: (itemId: string) => void;
+  onPlayNextClear: () => void;
 }) {
   const [leanBack, setLeanBack] = useState(false);
   const leanBackReturnFocus = useRef<HTMLElement | null>(null);
@@ -2278,6 +2452,7 @@ function WatchWorkspace({ item, sourceName, browseItems, browseTotal, browsePage
 
       <aside className={`${compact || leanBack ? "hidden" : "flex"} panel-shadow max-h-[calc(100vh-104px)] min-h-[540px] flex-col overflow-hidden rounded-[12px] border border-line/70 bg-panel/65 xl:sticky xl:top-[76px] xl:self-start`} aria-label="Browse videos while watching">
         <div className="flex items-start justify-between gap-3 border-b border-line/60 px-4 py-4"><div><h2 className="text-sm font-semibold">{search.trim() ? "Search results" : "Up next"}</h2><p className="mt-1 text-[10px] text-muted">{browseLoading ? "Updating videos…" : `${browseTotal} available video${browseTotal === 1 ? "" : "s"}`}</p><p className="sr-only" role="status" aria-live="polite" aria-atomic="true">{browseLoading ? "Updating watch browser results." : `Watch browser showing page ${browsePage} of ${browsePages}, with ${browseTotal} available videos.`}</p></div><div className="flex items-center gap-3">{!search.trim() ? <label className="flex items-center gap-2 text-[10px] font-medium text-muted"><span>Autoplay</span><input type="checkbox" checked={autoplayNext} onChange={(event) => onAutoplayNext(event.target.checked)} /></label> : null}{browsePages > 1 ? <span className="number-font text-[10px] text-muted">{browsePage}/{browsePages}</span> : null}</div></div>
+        {playNextItems.length ? <section className="border-b border-line/60 bg-accent/[0.035]" aria-labelledby="play-next-title"><header className="flex items-center gap-2 px-4 py-2.5"><ListVideo className="text-accent" size={14} /><div className="min-w-0 flex-1"><h3 id="play-next-title" className="text-[11px] font-semibold">Play Next queue</h3><p className="text-[9px] text-muted">{playNextItems.length} temporary item{playNextItems.length === 1 ? "" : "s"}</p></div><button className="rounded-[6px] px-2 py-1 text-[9px] font-medium text-muted hover:bg-elevated hover:text-ink" onClick={onPlayNextClear}>Clear</button></header><div className="max-h-48 overflow-y-auto px-2 pb-2">{playNextItems.map((queued, index) => <div key={queued.id} className="flex items-center gap-1 rounded-[7px] px-1.5 py-1 hover:bg-elevated/60"><button className="min-w-0 flex-1 truncate px-1 py-1.5 text-left text-[10px] font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60" onClick={() => onPlayNextSelect(queued)} title={queued.title}><span className="mr-2 text-accent">{index + 1}</span>{queued.title}</button><button className="grid size-7 shrink-0 place-items-center rounded-[6px] text-muted hover:bg-panel hover:text-ink disabled:opacity-30" disabled={index === 0} onClick={() => onPlayNextMove(queued.id, index - 1)} aria-label={`Move ${queued.title} earlier`}><ArrowUp size={12} /></button><button className="grid size-7 shrink-0 place-items-center rounded-[6px] text-muted hover:bg-panel hover:text-ink disabled:opacity-30" disabled={index === playNextItems.length - 1} onClick={() => onPlayNextMove(queued.id, index + 1)} aria-label={`Move ${queued.title} later`}><ArrowDown size={12} /></button><button className="grid size-7 shrink-0 place-items-center rounded-[6px] text-muted hover:bg-red-400/10 hover:text-red-300" onClick={() => onPlayNextRemove(queued.id)} aria-label={`Remove ${queued.title} from Play Next`}><X size={12} /></button></div>)}</div></section> : null}
         <div className="min-h-0 flex-1 overflow-y-auto p-2" aria-busy={browseLoading}>
           {browseLoading && browseItems.length === 0 ? <WatchQueueSkeleton /> : browseItems.length > 0 ? browseItems.map((candidate) => <WatchQueueItem key={candidate.id} item={candidate} sourceName={sourceLabel(candidate, sourceNames)} active={candidate.id === item.id} onSelect={() => onSelectVideo(candidate)} />) : <div className="px-5 py-12 text-center"><Film className="mx-auto text-muted/40" size={28} /><p className="mt-3 text-xs font-medium">No videos found</p><p className="mt-1 text-[10px] leading-4 text-muted">Try a title, tag, filename, or folder name.</p></div>}
         </div>
@@ -2352,10 +2527,17 @@ function WatchStateActions({ itemId, playlists, onPlaylistChanged }: { itemId: s
 }
 
 function WatchQueueItem({ item, sourceName, active, onSelect }: { item: LibraryItem; sourceName: string; active: boolean; onSelect: () => void }) {
-  return <button className={`group grid w-full grid-cols-[128px_minmax(0,1fr)] gap-3 rounded-[9px] p-2 text-left transition active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70 ${active ? "bg-accent/[0.09] shadow-[inset_2px_0_rgb(var(--accent))]" : "hover:bg-elevated/75"}`} onClick={onSelect} aria-current={active ? "true" : undefined}>
-    <span className="relative aspect-video overflow-hidden rounded-[7px] bg-elevated"><MediaArtwork item={item} />{item.durationSeconds != null ? <span className="number-font absolute bottom-1 right-1 rounded-[4px] bg-black/80 px-1.5 py-0.5 text-[9px] font-semibold text-white">{formatDuration(item.durationSeconds)}</span> : null}{active ? <span className="absolute inset-0 grid place-items-center bg-black/40"><span className="grid size-8 place-items-center rounded-full bg-accent text-[#081426]"><Play size={13} fill="currentColor" /></span></span> : null}</span>
-    <span className="min-w-0 py-0.5"><strong className="line-clamp-2 text-[11px] font-semibold leading-[1.35] text-ink">{item.title}</strong><span className="mt-1.5 block truncate text-[9px] text-muted">{sourceName}</span><span className={`mt-1 block text-[9px] font-medium ${active ? "text-accent" : "text-muted/75"}`}>{active ? "Playing now" : [resolutionLabel(item), item.container?.toLocaleUpperCase()].filter(Boolean).join(" · ") || "Video"}</span></span>
-  </button>;
+  const playNextItemIds = useAppStore((state) => state.playNextItemIds);
+  const enqueuePlayNext = useAppStore((state) => state.enqueuePlayNext);
+  const setNotice = useAppStore((state) => state.setNotice);
+  const queued = playNextItemIds.includes(item.id);
+  return <div className={`group flex w-full items-center rounded-[9px] pr-1 transition ${active ? "bg-accent/[0.09] shadow-[inset_2px_0_rgb(var(--accent))]" : "hover:bg-elevated/75"}`}>
+    <button className="grid min-w-0 flex-1 grid-cols-[128px_minmax(0,1fr)] gap-3 p-2 text-left active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70" onClick={onSelect} aria-current={active ? "true" : undefined}>
+      <span className="relative aspect-video overflow-hidden rounded-[7px] bg-elevated"><MediaArtwork item={item} />{item.durationSeconds != null ? <span className="number-font absolute bottom-1 right-1 rounded-[4px] bg-black/80 px-1.5 py-0.5 text-[9px] font-semibold text-white">{formatDuration(item.durationSeconds)}</span> : null}{active ? <span className="absolute inset-0 grid place-items-center bg-black/40"><span className="grid size-8 place-items-center rounded-full bg-accent text-[#081426]"><Play size={13} fill="currentColor" /></span></span> : null}</span>
+      <span className="min-w-0 py-0.5"><strong className="line-clamp-2 text-[11px] font-semibold leading-[1.35] text-ink">{item.title}</strong><span className="mt-1.5 block truncate text-[9px] text-muted">{sourceName}</span><span className={`mt-1 block text-[9px] font-medium ${active ? "text-accent" : "text-muted/75"}`}>{active ? "Playing now" : [resolutionLabel(item), item.container?.toLocaleUpperCase()].filter(Boolean).join(" · ") || "Video"}</span></span>
+    </button>
+    <button className="grid size-8 shrink-0 place-items-center rounded-[7px] text-muted hover:bg-panel hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 disabled:opacity-35" disabled={active || queued} onClick={() => { enqueuePlayNext(item.id); setNotice({ message: `Queued “${item.title}” to play next.`, view: "library" }); }} aria-label={queued ? `${item.title} is already in Play Next` : `Queue ${item.title} to play next`} title={queued ? "Already queued" : "Play next"}><ListVideo size={14} /></button>
+  </div>;
 }
 
 function WatchQueueSkeleton() {

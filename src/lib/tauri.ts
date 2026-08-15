@@ -44,6 +44,7 @@ import type {
   TransformationTask,
   LibraryItem,
   LibraryRichMetadata,
+  LibraryHealthSummary,
   LibrarySearchStatus,
   LibrarySmartView,
   LibraryFacetRequest,
@@ -170,6 +171,7 @@ export const api = {
   listLibraryItems: () => invoke<LibraryItem[]>("list_library_items"),
   queryLibraryItems: (request: LibraryQueryRequest) =>
     invoke<LibraryQueryResult>("query_library_items", { request }),
+  getLibraryHealthSummary: () => invoke<LibraryHealthSummary>("get_library_health_summary"),
   getLibraryFacets: (request: LibraryFacetRequest) =>
     invoke<LibraryFacets>("get_library_facets", { request }),
   getLibraryItemsByIds: (ids: string[]) =>

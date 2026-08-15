@@ -383,6 +383,18 @@ Status: implemented.
 
 Acceptance: enter and exit without restarting playback, operate every large control with keyboard and a standard gamepad, preserve playlist order and end boundaries, and return focus to the entry control.
 
+## Milestone 26 - Daily-use Library polish
+
+Status: implemented.
+
+- A bounded versioned local workspace snapshot restores Library search, filters, sorting, result page, grid/list presentation, scroll position, and the last details selection. Values are validated before use, stale source/collection/container filters self-heal, and restoration never stores media bytes, playback tokens, or filesystem authority.
+- The existing `Ctrl+K` palette now debounces typed SQLite Library search and returns at most eight available media records alongside workspace commands. Catalog-ID actions open details, add videos to Play Next, seed visual similarity, or preselect temporary sharing without exposing process or path primitives.
+- Play Next is a session-only Zustand queue of at most 100 unique catalog IDs. Library lookup revalidates availability and media kind, prunes stale entries, lets users reorder/remove/clear from Watch, and gives explicit queued intent priority over ordinary autoplay without creating a permanent playlist.
+- Active LAN shares render a QR code locally through a lazy-loaded encoder. It contains exactly the existing expiring capability URL; no URL, title, token, or media metadata is sent to an external QR service.
+- Media Health uses a read-only aggregate SQLite query and at most 100 bounded issue samples. It surfaces missing/changed files, pending or failed inspection, conservative embedded-playback risk, source connectivity, search/similarity index gaps, and playback/artwork cache usage with direct recovery actions. Compatibility risk is advisory rather than an unsupported-codec verdict.
+
+Acceptance: relaunch into the previous bounded Library workspace, find media and run each `Ctrl+K` quick action, queue/reorder/consume videos without saving a playlist, scan a live share QR code from another LAN device, and use Media Health to open or repair every surfaced issue class.
+
 ## Explicitly deferred
 
 Face recognition, cloud sync, server mode, automatic file deletion, and Stash-compatible scraping are not prerequisites for a mature local organizer. Revisit them only after the source scanner, metadata cache, browsing, and recovery behavior are dependable.

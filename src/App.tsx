@@ -7,6 +7,7 @@ import { OnboardingDialog } from "./components/OnboardingDialog";
 import { DownloadsPage } from "./features/downloads/DownloadsPage";
 import { HistoryPage } from "./features/history/HistoryPage";
 import { LibraryPage } from "./features/library/LibraryPage";
+import { HealthPage } from "./features/library/HealthPage";
 import { MontagePage } from "./features/library/MontagePage";
 import { SimilarityPage } from "./features/library/SimilarityPage";
 import { SharingPage } from "./features/library/SharingPage";
@@ -180,6 +181,7 @@ export default function App() {
       <div className={view === "montages" ? "" : "hidden"}><MontagePage /></div>
       <div className={view === "similarity" ? "" : "hidden"}><SimilarityPage /></div>
       <div className={view === "sharing" ? "" : "hidden"}><SharingPage /></div>
+      <div className={view === "health" ? "" : "hidden"}><HealthPage /></div>
       <div className={view === "presets" ? "" : "hidden"}><PresetsPage /></div>
       <div className={view === "settings" ? "" : "hidden"}><SettingsPage /></div>
       {notice ? (

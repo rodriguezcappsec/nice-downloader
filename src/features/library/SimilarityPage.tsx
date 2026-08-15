@@ -50,6 +50,27 @@ export function SimilarityPage() {
 
   useEffect(() => {
     let disposed = false;
+    const chooseReference = (event: Event) => {
+      const itemId = (event as CustomEvent<{ itemId?: string }>).detail?.itemId;
+      if (!itemId) return;
+      void api.getLibraryItemsByIds([itemId])
+        .then(([item]) => {
+          if (!disposed && item) {
+            setSeed(item);
+            setSearch("");
+          }
+        })
+        .catch((error) => { if (!disposed) setError(normalizeError(error)); });
+    };
+    window.addEventListener("nice-downloader:similarity-reference", chooseReference);
+    return () => {
+      disposed = true;
+      window.removeEventListener("nice-downloader:similarity-reference", chooseReference);
+    };
+  }, [setError]);
+
+  useEffect(() => {
+    let disposed = false;
     const timer = window.setTimeout(() => {
       setSourceLoading(true);
       void api.queryLibraryItems({

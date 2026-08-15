@@ -12,6 +12,7 @@ export type ViewId =
   | "montages"
   | "similarity"
   | "sharing"
+  | "health"
   | "presets"
   | "settings";
 
@@ -492,6 +493,26 @@ export interface LibrarySearchStatus {
   catalogItems: number;
   indexedItems: number;
   consistent: boolean;
+}
+
+export type LibraryHealthIssueKind = "missing" | "changed" | "metadataPending" | "metadataFailed" | "compatibilityRisk";
+
+export interface LibraryHealthIssue {
+  itemId: string;
+  title: string;
+  mediaKind?: LibraryMediaKind | null;
+  kinds: LibraryHealthIssueKind[];
+}
+
+export interface LibraryHealthSummary {
+  totalItems: number;
+  availableItems: number;
+  missingItems: number;
+  changedItems: number;
+  metadataPendingItems: number;
+  metadataFailedItems: number;
+  compatibilityRiskItems: number;
+  issues: LibraryHealthIssue[];
 }
 
 export interface LibraryQueryResult {

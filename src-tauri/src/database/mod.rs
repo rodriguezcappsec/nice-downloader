@@ -7,7 +7,8 @@ use crate::{
         LibraryCompareSession, LibraryCompareSessionItem, LibraryCurationDecision,
         LibraryCurationState, LibraryFacetRequest, LibraryFacets, LibraryFileIdentity,
         LibraryFileOperation, LibraryFileOperationKind, LibraryFileOperationState,
-        LibraryFolderFacet, LibraryFolderScope, LibraryItem, LibraryMediaKind, LibraryMediaStack,
+        LibraryFolderFacet, LibraryFolderScope, LibraryHealthIssue, LibraryHealthIssueKind,
+        LibraryHealthSummary, LibraryItem, LibraryMediaKind, LibraryMediaStack,
         LibraryMediaStackMember, LibraryMediaStackRole, LibraryMetadataFields,
         LibraryMetadataState, LibraryMoment, LibraryMontage, LibraryMontageSegment,
         LibraryPlaybackEntry, LibraryPlaybackState, LibraryPlaylist, LibraryProbeResult,
@@ -2590,6 +2591,119 @@ impl Database {
             consistent: catalog_items == indexed_items
                 && indexed_rows == i64::try_from(indexed_items).unwrap_or(i64::MAX)
                 && same_item_ids,
+        })
+    }
+
+    pub fn library_health_summary(&self) -> Result<LibraryHealthSummary, AppError> {
+        const COMPATIBILITY_RISK: &str = "(
+            media.media_kind = 'video' AND metadata.state = 'ready' AND (
+                LOWER(COALESCE(metadata.video_codec, '')) IN ('av1', 'hevc', 'h265', 'mpeg4')
+                OR LOWER(COALESCE(metadata.container, '')) IN ('avi', 'flv', 'mpeg', 'mpg', 'ts', 'm2ts', 'mts', '3gp', '3g2', 'ogg', 'ogv')
+            )
+        )";
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "The media library is unavailable.")
+        })?;
+        let aggregate_sql = format!(
+            "SELECT
+                COUNT(*),
+                COALESCE(SUM(CASE WHEN media.missing = 0 THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN media.missing = 1 THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN EXISTS(
+                    SELECT 1 FROM library_changes change
+                    WHERE change.item_id = media.id AND change.reviewed_at IS NULL
+                ) THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN media.missing = 0 AND (metadata.state IS NULL OR metadata.state = 'pending') THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN media.missing = 0 AND metadata.state IN ('failed', 'unavailable') THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN {COMPATIBILITY_RISK} THEN 1 ELSE 0 END), 0)
+             FROM media_library media
+             LEFT JOIN library_media_metadata metadata ON metadata.item_id = media.id"
+        );
+        let counts: (i64, i64, i64, i64, i64, i64, i64) =
+            connection.query_row(&aggregate_sql, [], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ))
+            })?;
+        let issues_sql = format!(
+            "SELECT
+                media.id,
+                media.title,
+                media.media_kind,
+                media.missing,
+                COALESCE(metadata.state, 'pending'),
+                EXISTS(
+                    SELECT 1 FROM library_changes change
+                    WHERE change.item_id = media.id AND change.reviewed_at IS NULL
+                ),
+                CASE WHEN {COMPATIBILITY_RISK} THEN 1 ELSE 0 END
+             FROM media_library media
+             LEFT JOIN library_media_metadata metadata ON metadata.item_id = media.id
+             WHERE media.missing = 1
+                OR metadata.state IS NULL
+                OR metadata.state IN ('pending', 'failed', 'unavailable')
+                OR EXISTS(
+                    SELECT 1 FROM library_changes change
+                    WHERE change.item_id = media.id AND change.reviewed_at IS NULL
+                )
+                OR {COMPATIBILITY_RISK}
+             ORDER BY
+                media.missing DESC,
+                CASE COALESCE(metadata.state, 'pending') WHEN 'failed' THEN 0 WHEN 'unavailable' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END,
+                media.updated_at DESC,
+                media.id
+             LIMIT 100"
+        );
+        let mut statement = connection.prepare(&issues_sql)?;
+        let issues = statement
+            .query_map([], |row| {
+                let missing = row.get::<_, i64>(3)? != 0;
+                let metadata_state = row.get::<_, String>(4)?;
+                let changed = row.get::<_, i64>(5)? != 0;
+                let compatibility_risk = row.get::<_, i64>(6)? != 0;
+                let mut kinds = Vec::with_capacity(3);
+                if missing {
+                    kinds.push(LibraryHealthIssueKind::Missing);
+                }
+                if changed {
+                    kinds.push(LibraryHealthIssueKind::Changed);
+                }
+                if !missing && metadata_state == "pending" {
+                    kinds.push(LibraryHealthIssueKind::MetadataPending);
+                }
+                if !missing && matches!(metadata_state.as_str(), "failed" | "unavailable") {
+                    kinds.push(LibraryHealthIssueKind::MetadataFailed);
+                }
+                if compatibility_risk {
+                    kinds.push(LibraryHealthIssueKind::CompatibilityRisk);
+                }
+                Ok(LibraryHealthIssue {
+                    item_id: row.get(0)?,
+                    title: row.get(1)?,
+                    media_kind: row
+                        .get::<_, Option<String>>(2)?
+                        .as_deref()
+                        .and_then(library_media_kind_from_name),
+                    kinds,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let count = |value: i64| usize::try_from(value).unwrap_or(usize::MAX);
+        Ok(LibraryHealthSummary {
+            total_items: count(counts.0),
+            available_items: count(counts.1),
+            missing_items: count(counts.2),
+            changed_items: count(counts.3),
+            metadata_pending_items: count(counts.4),
+            metadata_failed_items: count(counts.5),
+            compatibility_risk_items: count(counts.6),
+            issues,
         })
     }
 
@@ -8196,6 +8310,54 @@ mod tests {
             .list_library_smart_views()
             .expect("smart views")
             .is_empty());
+    }
+
+    #[test]
+    fn summarizes_library_health_without_persisting_derived_state() {
+        let directory = tempdir().expect("temporary directory");
+        let database = Database::open(&directory.path().join("health.sqlite3")).expect("database");
+        let healthy = media_stack_test_item(directory.path(), "healthy", LibraryMediaKind::Video);
+        let mut risky = media_stack_test_item(directory.path(), "risky", LibraryMediaKind::Video);
+        risky.video_codec = Some("av1".to_owned());
+        let mut pending =
+            media_stack_test_item(directory.path(), "pending", LibraryMediaKind::Image);
+        pending.metadata_state = LibraryMetadataState::Pending;
+        let mut failed = media_stack_test_item(directory.path(), "failed", LibraryMediaKind::Video);
+        failed.metadata_state = LibraryMetadataState::Failed;
+        failed.metadata_error = Some("fixture probe failure".to_owned());
+        let mut missing =
+            media_stack_test_item(directory.path(), "missing", LibraryMediaKind::Image);
+        missing.missing = true;
+        for item in [&healthy, &risky, &pending, &failed, &missing] {
+            database.upsert_library_item(item).expect("library item");
+        }
+        {
+            let connection = database.connection.lock().expect("database lock");
+            connection
+                .execute(
+                    "INSERT INTO library_changes (id, item_id, kind, detected_at) VALUES (?1, ?2, 'modified', ?3)",
+                    params![Uuid::new_v4().to_string(), healthy.id, Utc::now().timestamp_millis()],
+                )
+                .expect("pending change");
+        }
+
+        let summary = database.library_health_summary().expect("health summary");
+        assert_eq!(summary.total_items, 5);
+        assert_eq!(summary.available_items, 4);
+        assert_eq!(summary.missing_items, 1);
+        assert_eq!(summary.changed_items, 1);
+        assert_eq!(summary.metadata_pending_items, 1);
+        assert_eq!(summary.metadata_failed_items, 1);
+        assert_eq!(summary.compatibility_risk_items, 1);
+        assert!(summary.issues.iter().any(|issue| {
+            issue.item_id == risky.id
+                && issue
+                    .kinds
+                    .contains(&LibraryHealthIssueKind::CompatibilityRisk)
+        }));
+        assert!(summary.issues.iter().any(|issue| {
+            issue.item_id == healthy.id && issue.kinds.contains(&LibraryHealthIssueKind::Changed)
+        }));
     }
 
     #[test]

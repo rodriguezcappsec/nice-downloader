@@ -743,6 +743,38 @@ pub struct LibrarySearchStatus {
     pub consistent: bool,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum LibraryHealthIssueKind {
+    Missing,
+    Changed,
+    MetadataPending,
+    MetadataFailed,
+    CompatibilityRisk,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryHealthIssue {
+    pub item_id: String,
+    pub title: String,
+    pub media_kind: Option<LibraryMediaKind>,
+    pub kinds: Vec<LibraryHealthIssueKind>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryHealthSummary {
+    pub total_items: usize,
+    pub available_items: usize,
+    pub missing_items: usize,
+    pub changed_items: usize,
+    pub metadata_pending_items: usize,
+    pub metadata_failed_items: usize,
+    pub compatibility_risk_items: usize,
+    pub issues: Vec<LibraryHealthIssue>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LibraryQueryResult {

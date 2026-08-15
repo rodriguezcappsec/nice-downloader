@@ -190,6 +190,7 @@ pub fn run() {
             commands::cancel_transformation,
             commands::list_library_items,
             commands::query_library_items,
+            commands::get_library_health_summary,
             commands::get_library_facets,
             commands::get_library_items_by_ids,
             commands::search_library_transcripts,

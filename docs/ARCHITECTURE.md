@@ -214,6 +214,12 @@ Migration `0026_library_visual_similarity.sql` is a rebuildable derived index, n
 
 Lean-back playback is presentation state inside the existing Watch workspace. React retains the same keyed `EmbeddedVideoPlayer` and authorized loopback session while changing its surrounding layout, so current time and native media state are not serialized or recreated. Keyboard and edge-triggered Gamepad API actions invoke the same bounded previous/next, seek, play, and exit functions. Playlist ends remain non-looping, and no gamepad or lean-back preference crosses into SQLite or Library backup.
 
+Milestone 26 presentation state remains outside Library backup. A versioned, bounded `localStorage` workspace snapshot contains only validated query/presentation values, scroll offset, and an optional catalog ID. The session-only Play Next Zustand queue stores at most 100 unique catalog IDs; every materialization returns through `get_library_items_by_ids`, removes missing or non-video records, and never persists a playlist implicitly. The command palette uses the existing typed Library query with an eight-result bound and translates actions into catalog-ID events consumed by already-mounted workspaces.
+
+Media Health is a read-only database projection with no migration or derived health table. One aggregate query counts catalog availability, pending change review, metadata state, and a conservative closed set of codec/container compatibility risks; a second query returns at most 100 ID/title issue samples. Search consistency, similarity coverage, source status, and cache usage continue to come from their authoritative existing managers. UI wording treats playback compatibility as advisory because installed WebKitGTK/GStreamer capabilities can differ.
+
+Temporary-share QR rendering is lazy-loaded browser code operating only on the existing capability URL. It performs no network lookup and creates no additional authority: expiry, selected-ID authorization, byte-range serving, and session teardown remain wholly owned by `LocalShareManager`.
+
 ## Remaining extension points
 
 The gallery-dl route can expand beyond Bunkr. Release builds stage pinned,

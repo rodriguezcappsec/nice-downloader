@@ -46,6 +46,8 @@ Status: implemented on `feat/library-creative-workspaces`.
 
 25: accessible lean-back playback with large keyboard and gamepad controls — implemented.
 
+26: restored Library workspaces, universal media commands, session-only Play Next, local share QR codes, and a bounded media-health dashboard — implemented.
+
 ## Maturity roadmap delivered
 
 - First-run engine/privacy onboarding and Linux AppImage/DEB plus Windows NSIS release workflows.
