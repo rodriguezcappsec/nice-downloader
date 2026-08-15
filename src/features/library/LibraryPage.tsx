@@ -50,10 +50,12 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Button, Field, Input, Select, Textarea } from "../../components/ui";
 import { formatBytes, formatDuration } from "../../lib/format";
+import { canOfferPlaybackFallback, createPlaybackError } from "../../lib/playback";
 import { api, normalizeError } from "../../lib/tauri";
 import { useAppStore } from "../../stores/app-store";
 import { CreativeTimeline } from "./CreativeTimeline";
 import type {
+  AppError,
   LibraryArtworkCacheStatus,
   LibraryItem,
   LibraryImageSession,
@@ -2221,7 +2223,7 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, onRestore, onC
   const [consentBusy, setConsentBusy] = useState(false);
   const [rememberAutomatic, setRememberAutomatic] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [playbackError, setPlaybackError] = useState<string | null>(null);
+  const [playbackError, setPlaybackError] = useState<AppError | null>(null);
   const [resumedAt, setResumedAt] = useState<number | null>(null);
   const [playbackRate, setPlaybackRate] = useState(1);
   const [currentPosition, setCurrentPosition] = useState(0);
@@ -2253,7 +2255,7 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, onRestore, onC
       })
       .catch((error) => {
         if (!disposed) {
-          setPlaybackError(normalizeError(error).message);
+          setPlaybackError(normalizeError(error));
           setLoading(false);
         }
       });
@@ -2268,7 +2270,7 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, onRestore, onC
   useEffect(() => {
     if (!session || !loading) return;
     const timer = window.setTimeout(() => {
-      setPlaybackError("Embedded playback did not become ready. Your video is unchanged; try opening it with your system player.");
+      setPlaybackError(createPlaybackError("embedded_playback_timeout", "Embedded playback did not become ready. Your video is unchanged; try opening it with your system player."));
       setLoading(false);
     }, 8_000);
     return () => window.clearTimeout(timer);
@@ -2371,7 +2373,7 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, onRestore, onC
     if (consentBusy) return;
     setConsent(null);
     setLoading(false);
-    setPlaybackError("Embedded playback was not started. The original video is unchanged and can still be opened with your system player.");
+    setPlaybackError(createPlaybackError("embedded_playback_cancelled", "Embedded playback was not started. The original video is unchanged and can still be opened with your system player."));
     restoreConsentFocus();
   }
 
@@ -2415,7 +2417,7 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, onRestore, onC
       restoreConsentFocus();
     } catch (error) {
       setConsent(null);
-      setPlaybackError(normalizeError(error).message);
+      setPlaybackError(normalizeError(error));
       setLoading(false);
       restoreConsentFocus();
     } finally {
@@ -2430,7 +2432,7 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, onRestore, onC
       await api.openLibraryItem(item.id);
       setConsent(null);
       setLoading(false);
-      setPlaybackError("The original video was opened in your system player. No compatibility copy was created.");
+      setPlaybackError(createPlaybackError("embedded_playback_opened_externally", "The original video was opened in your system player. No compatibility copy was created."));
       restoreConsentFocus();
     } catch (error) {
       setError(normalizeError(error));
@@ -2465,7 +2467,7 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, onRestore, onC
       const prepared = await api.prepareLibraryPlaybackFallback(item.id, false);
       setSession(prepared);
     } catch (error) {
-      setPlaybackError(normalizeError(error).message);
+      setPlaybackError(normalizeError(error));
       setLoading(false);
     }
   }
@@ -2494,7 +2496,7 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, onRestore, onC
     </header>
     <div className={`relative flex min-h-0 items-center justify-center overflow-auto bg-black ${compact ? "aspect-video" : "aspect-video min-h-[240px] max-h-[calc(100dvh-250px)]"}`}>
       {loading ? <div className="absolute inset-0 z-[1] flex items-center justify-center gap-2 bg-black/80 text-sm text-white/60" role="status"><LoaderCircle className="animate-spin text-accent" size={18} /> Preparing embedded playback…</div> : null}
-      {playbackError ? <div className="max-w-lg border border-white/10 bg-white/5 p-6 text-center"><Film className="mx-auto text-white/35" size={34} /><h2 className="mt-4 text-lg font-semibold">This video could not be played here</h2><p className="mt-2 text-sm leading-6 text-white/55">{playbackError}</p><div className="mt-5 flex flex-wrap justify-center gap-2">{!session?.compatibilityTranscoded ? <Button variant="secondary" onClick={() => void retryEmbeddedPlayback()}><RotateCcw size={15} /> Create H.264 playback copy</Button> : null}<Button onClick={() => void openExternal()}><ExternalLink size={15} /> Open in system player</Button></div></div> : null}
+      {playbackError ? <div className="max-w-lg border border-white/10 bg-white/5 p-6 text-center"><Film className="mx-auto text-white/35" size={34} /><h2 className="mt-4 text-lg font-semibold">This video could not be played here</h2><p className="mt-2 text-sm leading-6 text-white/55">{playbackError.message}</p><div className="mt-5 flex flex-wrap justify-center gap-2">{canOfferPlaybackFallback(playbackError) && !session?.compatibilityTranscoded ? <Button variant="secondary" onClick={() => void retryEmbeddedPlayback()}><RotateCcw size={15} /> Create H.264 playback copy</Button> : null}<Button onClick={() => void openExternal()}><ExternalLink size={15} /> Open in system player</Button></div></div> : null}
       {session && !playbackError ? <video
         ref={videoRef}
         className="h-full w-full max-h-full max-w-full bg-black object-contain shadow-[0_30px_100px_rgb(0_0_0/0.65)]"
@@ -2507,7 +2509,7 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, onRestore, onC
         onTimeUpdate={() => { const video = videoRef.current; if (!video) return; setCurrentPosition(video.currentTime); if (Math.abs(video.currentTime - lastSavedPosition.current) >= 5) persistProgress(false); }}
         onPause={() => persistProgress(false)}
         onEnded={() => { persistProgress(true); window.setTimeout(() => onPlaybackEnded?.(), 0); }}
-        onError={() => { setLoading(false); setPlaybackError("The WebView does not support this file's container or codecs. The original file is unchanged and can still be opened with your system player."); }}
+        onError={() => { setLoading(false); setPlaybackError(createPlaybackError("embedded_playback_decode_failed", "The WebView does not support this file's container or codecs. The original file is unchanged and can still be opened with your system player.")); }}
       >
         {session.subtitles.map((track) => <track key={track.url} kind="subtitles" src={track.url} srcLang={track.language || "und"} label={track.label} />)}
       </video> : null}

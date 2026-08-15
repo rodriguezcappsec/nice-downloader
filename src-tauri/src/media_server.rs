@@ -84,12 +84,7 @@ impl MediaServerState {
         }
     }
 
-    pub async fn prepare_webview_playback(
-        &self,
-        item_id: &str,
-        user_approved: bool,
-    ) -> Result<LibraryPlaybackSession, AppError> {
-        validate_item_id(item_id)?;
+    async fn ensure_webview_dependencies(&self) -> Result<(), AppError> {
         let dependency_error = self
             .webview_dependency_error
             .get_or_init(detect_webview_dependency_error)
@@ -100,6 +95,16 @@ impl MediaServerState {
                 message.clone(),
             ));
         }
+        Ok(())
+    }
+
+    pub async fn prepare_webview_playback(
+        &self,
+        item_id: &str,
+        user_approved: bool,
+    ) -> Result<LibraryPlaybackSession, AppError> {
+        validate_item_id(item_id)?;
+        self.ensure_webview_dependencies().await?;
         let item = self.database.get_library_item(item_id)?;
         validate_playable_item(&item)?;
         let _guard = self.compatibility_lock.lock().await;
@@ -115,6 +120,7 @@ impl MediaServerState {
         item_id: &str,
     ) -> Result<LibraryPlaybackPreflight, AppError> {
         validate_item_id(item_id)?;
+        self.ensure_webview_dependencies().await?;
         let item = self.database.get_library_item(item_id)?;
         validate_playable_item(&item)?;
         let preference = self
@@ -164,6 +170,7 @@ impl MediaServerState {
         item_id: &str,
     ) -> Result<LibraryPlaybackPreflight, AppError> {
         validate_item_id(item_id)?;
+        self.ensure_webview_dependencies().await?;
         let item = self.database.get_library_item(item_id)?;
         validate_playable_item(&item)?;
         let target = self.transcode_target(&item)?;
@@ -198,16 +205,7 @@ impl MediaServerState {
         user_approved: bool,
     ) -> Result<LibraryPlaybackSession, AppError> {
         validate_item_id(item_id)?;
-        let dependency_error = self
-            .webview_dependency_error
-            .get_or_init(detect_webview_dependency_error)
-            .await;
-        if let Some(message) = dependency_error {
-            return Err(AppError::new(
-                "embedded_playback_dependency_missing",
-                message.clone(),
-            ));
-        }
+        self.ensure_webview_dependencies().await?;
         let item = self.database.get_library_item(item_id)?;
         validate_playable_item(&item)?;
         let _guard = self.compatibility_lock.lock().await;
@@ -1641,6 +1639,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn playback_preflight_reports_missing_runtime_before_copy_consent() {
+        let directory = tempdir().expect("temporary directory");
+        let database = Database::open(&directory.path().join("media.sqlite3")).expect("database");
+        let state = MediaServerState {
+            database,
+            base_url: Some("http://127.0.0.1:1".to_owned()),
+            token: "fixture-token".to_owned(),
+            cache_directory: directory.path().join("playback-cache"),
+            playback_paths: Arc::new(RwLock::new(HashMap::new())),
+            compatibility_lock: Arc::new(AsyncMutex::new(())),
+            webview_dependency_error: Arc::new(OnceCell::new_with(Some(Some(
+                "GStreamer fixture is missing".to_owned(),
+            )))),
+        };
+
+        let error = state
+            .inspect_webview_playback(&Uuid::new_v4().to_string())
+            .await
+            .expect_err("dependency failure must stop preflight");
+
+        assert_eq!(error.code, "embedded_playback_dependency_missing");
+        assert_eq!(error.message, "GStreamer fixture is missing");
+    }
+
+    #[tokio::test]
     async fn h264_fallback_preflight_always_requires_explicit_consent_until_cached() {
         let directory = tempdir().expect("temporary directory");
         let source = directory.path().join("video.mp4");
@@ -1656,7 +1679,7 @@ mod tests {
             cache_directory: cache_directory.clone(),
             playback_paths: Arc::new(RwLock::new(HashMap::new())),
             compatibility_lock: Arc::new(AsyncMutex::new(())),
-            webview_dependency_error: Arc::new(OnceCell::new()),
+            webview_dependency_error: Arc::new(OnceCell::new_with(Some(None))),
         };
 
         let first = state

@@ -145,6 +145,14 @@ Generated Library artwork is an app-cache concern, never source-folder state. A 
 
 Embedded playback uses the platform WebView's HTML5 media engine. Rust starts an ephemeral HTTP/1 loopback server on `127.0.0.1` with a process-scoped token, resolves only UUID catalog IDs, rejects symlinks and missing/non-video records, and streams regular files with bounded request parsing and byte-range support. Each preparation issues a unique, non-authoritative session query value so WebKitGTK cannot reuse stale media-resource state when the same catalog item is reopened; authorization and path resolution still depend only on the process token and catalog ID. The server never accepts a filesystem path from React and its token is not persisted or logged. The CSP permits media only from the randomized loopback endpoint; opening through the operating-system default player remains a separate ID-based command.
 
+Linux AppImages stage a curated GStreamer plugin set and matching
+`gst-plugin-scanner` before the final `linuxdeploy` dependency pass. A small
+AppRun wrapper pins WebKitGTK to that packaged runtime rather than mixing the
+bundled GStreamer core with host plugins from another distribution. Rust checks
+the required audio-output element before compatibility preflight, so a missing
+runtime is reported before any copy consent. React retains the typed error code
+and offers H.264 fallback only for decode or readiness failures.
+
 Playback preparation probes ISO Base Media video timing before returning a session. Affected AV1 MP4/M4V/MOV tracks whose fractional frame rate WebKitGTK's QuickTime demuxer exposes as `0/1` are stream-copied by FFmpeg into an app-private Matroska compatibility cache. This preserves the encoded AV1, audio, frame count, and duration while routing timing through GStreamer's Matroska demuxer. Cache identity uses only the UUID catalog ID and current source fingerprint, not untrusted filenames. Rust registers resulting paths per catalog item so overlapping or stale preparation requests cannot displace the active video; the loopback route still accepts only an item ID and rejects registered paths outside the cache. The cache retains at most four files or 8 GiB, invalidates changed sources, and never modifies the original media.
 
 Compatibility creation uses a two-step Rust-owned consent boundary. `inspect_library_playback` returns typed preflight data without running FFmpeg; `prepare_library_playback` enforces the persisted Ask/Automatic/Never policy again and requires an explicit approval bit when policy demands it. Cached targets bypass repeat prompts, while targets at or above 2 GiB always require approval. React cannot manufacture a filesystem target or weaken this check. Cache status and clear commands operate only on the app-private compatibility directory, and desktop preferences are persisted through the existing settings store.

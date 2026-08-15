@@ -17,9 +17,11 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button, Input, Select, Textarea } from "../../components/ui";
 import { formatBytes, formatDuration } from "../../lib/format";
+import { canOfferPlaybackFallback, createPlaybackError } from "../../lib/playback";
 import { api, normalizeError } from "../../lib/tauri";
 import { useAppStore } from "../../stores/app-store";
 import type {
+  AppError,
   LibraryCompareSession,
   LibraryCompareSessionItem,
   LibraryItem,
@@ -336,7 +338,7 @@ function CompareVideoTile({ item, position, sourceName, audible, multipleAudio, 
   const [pending, setPending] = useState<PendingPlayback | null>(null);
   const [loading, setLoading] = useState(!item.missing && item.mediaKind === "video");
   const [busy, setBusy] = useState(false);
-  const [playbackError, setPlaybackError] = useState<string | null>(null);
+  const [playbackError, setPlaybackError] = useState<AppError | null>(null);
   const [playbackRate, setPlaybackRate] = useState(initialPlayback?.playbackRate || 1);
 
   useEffect(() => {
@@ -383,7 +385,7 @@ function CompareVideoTile({ item, position, sourceName, audible, multipleAudio, 
       })
       .catch((error) => {
         if (!disposed) {
-          setPlaybackError(normalizeError(error).message);
+          setPlaybackError(normalizeError(error));
           setLoading(false);
         }
       });
@@ -393,7 +395,7 @@ function CompareVideoTile({ item, position, sourceName, audible, multipleAudio, 
   useEffect(() => {
     if (!session || !loading) return;
     const timer = window.setTimeout(() => {
-      setPlaybackError("Embedded playback did not become ready. Try the H.264 compatibility option or your system player.");
+      setPlaybackError(createPlaybackError("embedded_playback_timeout", "Embedded playback did not become ready. Try the H.264 compatibility option or your system player."));
       setLoading(false);
     }, 8_000);
     return () => window.clearTimeout(timer);
@@ -467,7 +469,7 @@ function CompareVideoTile({ item, position, sourceName, audible, multipleAudio, 
     } catch (error) {
       if (mounted.current) {
         setPending(null);
-        setPlaybackError(normalizeError(error).message);
+        setPlaybackError(normalizeError(error));
         setLoading(false);
       }
     } finally {
@@ -502,7 +504,7 @@ function CompareVideoTile({ item, position, sourceName, audible, multipleAudio, 
       }
     } catch (error) {
       if (mounted.current) {
-        setPlaybackError(normalizeError(error).message);
+        setPlaybackError(normalizeError(error));
         setLoading(false);
       }
     } finally {
@@ -531,8 +533,8 @@ function CompareVideoTile({ item, position, sourceName, audible, multipleAudio, 
     <div className="relative flex aspect-video min-h-56 items-center justify-center overflow-hidden bg-black">
       {loading ? <div className="absolute inset-0 z-[2] flex items-center justify-center gap-2 bg-black/80 text-xs text-white/55" role="status"><LoaderCircle className="animate-spin text-accent" size={16} /> Preparing video {position}…</div> : null}
       {unavailable ? <div className="max-w-md px-7 text-center"><Film className="mx-auto text-white/30" size={30} /><h3 className="mt-3 text-sm font-semibold">Video unavailable</h3><p className="mt-2 text-xs leading-5 text-white/50">{item.missing ? "This file is missing from its indexed location." : "Only videos can be used in the comparison grid."}</p><Button variant="secondary" className="mt-4 h-8 text-xs" onClick={onRemove}>Remove tile</Button></div> : null}
-      {pending ? <div className="max-w-lg px-7 py-6 text-center"><Film className="mx-auto text-amber-300/70" size={30} /><h3 className="mt-3 text-sm font-semibold">Compatibility copy required</h3><p className="mt-2 text-xs leading-5 text-white/55">{pending.preflight.reason || "This video needs a private compatibility copy for embedded playback."}</p><p className="mt-2 text-[10px] text-white/40">Estimated copy: {formatBytes(pending.preflight.estimatedCopyBytes)} · original remains unchanged</p><div className="mt-4 flex flex-wrap justify-center gap-2"><Button variant="secondary" className="h-8 text-xs" disabled={busy} onClick={() => { setPending(null); setPlaybackError("Compatibility copy was skipped for this tile."); }}><X size={13} /> Skip</Button><Button className="h-8 text-xs" disabled={busy} onClick={() => void approvePending()}>{busy ? <LoaderCircle className="animate-spin" size={13} /> : <Film size={13} />} Create copy</Button></div></div> : null}
-      {playbackError && !pending ? <div className="max-w-lg px-7 py-6 text-center"><Film className="mx-auto text-white/30" size={30} /><h3 className="mt-3 text-sm font-semibold">Could not play this tile</h3><p className="mt-2 text-xs leading-5 text-white/50">{playbackError}</p><div className="mt-4 flex flex-wrap justify-center gap-2"><Button variant="secondary" className="h-8 text-xs" disabled={busy} onClick={() => void retryWithFallback()}><RotateCcw size={13} /> Try H.264 copy</Button><Button className="h-8 text-xs" onClick={() => void openExternal()}><ExternalLink size={13} /> System player</Button></div></div> : null}
+      {pending ? <div className="max-w-lg px-7 py-6 text-center"><Film className="mx-auto text-amber-300/70" size={30} /><h3 className="mt-3 text-sm font-semibold">Compatibility copy required</h3><p className="mt-2 text-xs leading-5 text-white/55">{pending.preflight.reason || "This video needs a private compatibility copy for embedded playback."}</p><p className="mt-2 text-[10px] text-white/40">Estimated copy: {formatBytes(pending.preflight.estimatedCopyBytes)} · original remains unchanged</p><div className="mt-4 flex flex-wrap justify-center gap-2"><Button variant="secondary" className="h-8 text-xs" disabled={busy} onClick={() => { setPending(null); setPlaybackError(createPlaybackError("embedded_playback_copy_skipped", "Compatibility copy was skipped for this tile.")); }}><X size={13} /> Skip</Button><Button className="h-8 text-xs" disabled={busy} onClick={() => void approvePending()}>{busy ? <LoaderCircle className="animate-spin" size={13} /> : <Film size={13} />} Create copy</Button></div></div> : null}
+      {playbackError && !pending ? <div className="max-w-lg px-7 py-6 text-center"><Film className="mx-auto text-white/30" size={30} /><h3 className="mt-3 text-sm font-semibold">Could not play this tile</h3><p className="mt-2 text-xs leading-5 text-white/50">{playbackError.message}</p><div className="mt-4 flex flex-wrap justify-center gap-2">{canOfferPlaybackFallback(playbackError) ? <Button variant="secondary" className="h-8 text-xs" disabled={busy} onClick={() => void retryWithFallback()}><RotateCcw size={13} /> Try H.264 copy</Button> : null}<Button className="h-8 text-xs" onClick={() => void openExternal()}><ExternalLink size={13} /> System player</Button></div></div> : null}
       {session && !playbackError && !pending ? <video
         ref={registerVideo}
         aria-label={`Comparison video ${position}: ${item.title}`}
@@ -551,7 +553,7 @@ function CompareVideoTile({ item, position, sourceName, audible, multipleAudio, 
         onTimeUpdate={() => captureProgress(false)}
         onPause={() => captureProgress(false)}
         onEnded={() => captureProgress(true)}
-        onError={() => { onReady(item.id, false); setLoading(false); setPlaybackError("The WebView could not decode this container or codec."); }}
+        onError={() => { onReady(item.id, false); setLoading(false); setPlaybackError(createPlaybackError("embedded_playback_decode_failed", "The WebView could not decode this container or codec.")); }}
       >{session.subtitles.map((track) => <track key={track.url} kind="subtitles" src={track.url} srcLang={track.language || "und"} label={track.label} />)}</video> : null}
     </div>
     <footer className="flex min-h-11 flex-wrap items-center gap-3 border-t border-white/10 bg-[#0c0f14] px-4 py-2 text-[10px] text-white/40"><span>{item.width && item.height ? `${item.width} × ${item.height}` : "Resolution unknown"}{item.container ? ` · ${item.container.toLocaleUpperCase()}` : ""}</span><label className="ml-auto flex items-center gap-1.5"><span>Speed</span><Select className="h-7 w-20 border-white/10 bg-white/5 text-[10px] text-white" value={playbackRate} disabled={!session} onChange={(event) => { const rate = Number(event.target.value); setPlaybackRate(rate); if (videoRef.current) videoRef.current.playbackRate = rate; }}><option value={0.5}>0.5×</option><option value={0.75}>0.75×</option><option value={1}>1×</option><option value={1.25}>1.25×</option><option value={1.5}>1.5×</option><option value={2}>2×</option></Select></label><Button variant="ghost" className="h-7 px-2 text-[10px] text-white/55 hover:text-white" disabled={unavailable} onClick={() => void openExternal()}><ExternalLink size={12} /> System player</Button></footer>

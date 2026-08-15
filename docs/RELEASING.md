@@ -13,7 +13,8 @@ npm run build
 cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 cargo test --manifest-path src-tauri/Cargo.toml --all-targets --no-fail-fast
-npm run tauri:build -- --bundles appimage,deb
+npm run tauri:build -- --bundles deb
+npm run tauri:build:appimage:arch
 ```
 
 On Arch Linux, an unrelated unreadable symlink below `/usr/bin` can crash
@@ -27,7 +28,10 @@ npm run tauri:build:appimage:arch
 
 The script sets `NO_STRIP=1` and masks an unreadable `/var/lib/searxng` only in
 the build process's mount namespace. It does not change system permissions.
-The output is written to `src-tauri/target/release/bundle/appimage/`.
+The AppImage wrapper stages a curated GStreamer playback plugin set and matching
+scanner, reruns `linuxdeploy` so their shared-library dependencies are included,
+and installs the project AppRun launcher before generating the final image. The
+output is written to `src-tauri/target/release/bundle/appimage/`.
 
 Test AppImages on Ubuntu and Arch-based hosts. AppImage requires compatible
 FUSE setup or extraction via `--appimage-extract-and-run`. The Windows workflow
