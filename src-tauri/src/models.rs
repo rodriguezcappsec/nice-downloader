@@ -928,6 +928,24 @@ pub struct LibraryPlaybackCacheStatus {
     pub max_bytes: u64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativePlaybackSession {
+    pub item_id: String,
+    pub title: String,
+    pub resumed_at_seconds: f64,
+    pub duration_seconds: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativePlaybackStatus {
+    pub available: bool,
+    pub version: Option<String>,
+    pub active: Option<NativePlaybackSession>,
+    pub detail: String,
+}
+
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum LibraryMetadataState {

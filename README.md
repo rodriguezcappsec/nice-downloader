@@ -164,6 +164,14 @@ automatic, or prevent automatic creation; copies of 2 GiB or larger are always
 confirmed. Compatibility cache usage and clearing are available under
 Settings > Desktop and accessibility.
 
+Nice Downloader also detects an optional system `mpv` installation. Copy-consent
+and embedded-playback error screens offer **Play with native mpv**, which opens
+the original cataloged file through mpv's FFmpeg decoders without creating a
+compatibility copy. Rust resolves the path from the catalog UUID, launches mpv
+without shell interpolation or user configuration, tracks one native session,
+and synchronizes its resume position back to the Library. On Wayland, mpv owns a
+separate native window because foreign-surface embedding is not portable.
+
 If WebKitGTK still rejects the lossless AV1 timing copy, the player offers a
 separate H.264/AAC MP4 fallback. This second-stage copy requires explicit
 confirmation because it re-encodes video, may take several minutes, and may be
@@ -176,10 +184,10 @@ packages continue to use the operating system's GStreamer runtime:
 
 ```bash
 # Arch Linux
-sudo pacman -S --needed gst-plugins-good gst-libav
+sudo pacman -S --needed gst-plugins-good gst-libav mpv
 
 # Debian or Ubuntu
-sudo apt install gstreamer1.0-plugins-good gstreamer1.0-libav
+sudo apt install gstreamer1.0-plugins-good gstreamer1.0-libav mpv
 ```
 
 `gst-plugins-good` supplies the required audio-output element. `gst-libav` is

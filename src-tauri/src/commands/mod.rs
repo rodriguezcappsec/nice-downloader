@@ -1,5 +1,6 @@
 use crate::models::LibraryWatchState;
 use crate::models::{LibraryPlaylist, SaveLibraryPlaylistRequest};
+use crate::native_player::NativePlayerManager;
 use crate::DesktopRuntimeState;
 use crate::{
     authentication,
@@ -29,9 +30,9 @@ use crate::{
         LibraryPlaybackPreflight, LibraryPlaybackSession, LibraryPlaybackState,
         LibraryQueryRequest, LibraryQueryResult, LibraryRichMetadata, LibraryScanJob,
         LibraryScanResult, LibrarySearchStatus, LibrarySmartView, LibrarySource, MediaAnalysis,
-        OnboardingStatus, Preset, PreviewLibraryBulkMoveRequest,
-        PreviewLibraryFileOperationRequest, QueueSettings, QueueSnapshot,
-        SaveAuthenticationProfileRequest, SaveLibraryCollectionRequest,
+        NativePlaybackSession, NativePlaybackStatus, OnboardingStatus, Preset,
+        PreviewLibraryBulkMoveRequest, PreviewLibraryFileOperationRequest, QueueSettings,
+        QueueSnapshot, SaveAuthenticationProfileRequest, SaveLibraryCollectionRequest,
         SaveLibraryCompareSessionRequest, SaveLibraryMediaStackRequest, SaveLibraryMomentRequest,
         SaveLibraryPlaybackRequest, SaveLibraryRichMetadataRequest, SaveLibrarySmartViewRequest,
         SaveLibrarySourceRequest, SavePresetRequest, SaveSitePresetRuleRequest,
@@ -193,6 +194,37 @@ pub async fn clear_library_playback_cache(
     media_server: State<'_, MediaServerState>,
 ) -> Result<crate::models::LibraryCacheResult, AppError> {
     media_server.clear_compatibility_cache().await
+}
+
+#[tauri::command]
+pub async fn get_native_playback_status(
+    native_player: State<'_, NativePlayerManager>,
+) -> Result<NativePlaybackStatus, AppError> {
+    Ok(native_player.status().await)
+}
+
+#[tauri::command]
+pub fn open_library_native_playback(
+    app: AppHandle,
+    library: State<'_, library::LibraryManager>,
+    native_player: State<'_, NativePlayerManager>,
+    id: String,
+) -> Result<NativePlaybackSession, AppError> {
+    match native_player.open(&id) {
+        Ok(session) => Ok(session),
+        Err(error) if error.code == "library_file_not_found" => {
+            if let Err(mark_error) = library.mark_item_missing(&app, &id) {
+                tracing::warn!(%mark_error, item_id = %id, "could not mark unavailable native-playback media as missing");
+            }
+            Err(error)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[tauri::command]
+pub fn close_library_native_playback(native_player: State<'_, NativePlayerManager>) {
+    native_player.close();
 }
 
 #[tauri::command]
@@ -882,7 +914,8 @@ pub fn hide_to_tray(
 }
 
 #[tauri::command]
-pub fn quit_app(app: AppHandle) {
+pub fn quit_app(app: AppHandle, native_player: State<'_, NativePlayerManager>) {
+    native_player.close();
     app.exit(0);
 }
 

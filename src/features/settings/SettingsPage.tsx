@@ -6,6 +6,7 @@ import {
   Eraser,
   Globe2,
   HardDrive,
+  MonitorPlay,
   Network,
   RefreshCw,
   RotateCcw,
@@ -28,6 +29,7 @@ import type {
   BrowserProfileInfo,
   DesktopPreferences,
   LibraryPlaybackCacheStatus,
+  NativePlaybackStatus,
   EngineId,
   EngineUpdateCandidate,
   ManagedEngineStatus,
@@ -404,10 +406,11 @@ function DesktopSettings() {
   const [preferences, setPreferences] = useState<DesktopPreferences | null>(null);
   const [trayAvailable, setTrayAvailable] = useState(true);
   const [playbackCache, setPlaybackCache] = useState<LibraryPlaybackCacheStatus | null>(null);
+  const [nativePlayback, setNativePlayback] = useState<NativePlaybackStatus | null>(null);
   const [clearingPlaybackCache, setClearingPlaybackCache] = useState(false);
   useEffect(() => {
-    void Promise.all([api.getDesktopPreferences(), api.getDesktopRuntimeStatus(), api.getLibraryPlaybackCacheStatus()])
-      .then(([saved, runtime, cache]) => { setPreferences(saved); setTrayAvailable(runtime.trayAvailable); setPlaybackCache(cache); })
+    void Promise.all([api.getDesktopPreferences(), api.getDesktopRuntimeStatus(), api.getLibraryPlaybackCacheStatus(), api.getNativePlaybackStatus()])
+      .then(([saved, runtime, cache, native]) => { setPreferences(saved); setTrayAvailable(runtime.trayAvailable); setPlaybackCache(cache); setNativePlayback(native); })
       .catch((error) => setError(normalizeError(error)));
   }, [setError]);
   async function saveDesktop() {
@@ -447,6 +450,7 @@ function DesktopSettings() {
         <Field label="Embedded playback compatibility" hint="Controls whether Nice Downloader may make a temporary stream-copy when the Linux WebView cannot play a file reliably."><Select value={preferences.playbackCompatibility} onChange={(event) => setPreferences({ ...preferences, playbackCompatibility: event.target.value as DesktopPreferences["playbackCompatibility"] })}><option value="ask">Ask before creating a copy</option><option value="automatic">Create copies automatically</option><option value="never">Never create automatically</option></Select></Field>
         <div className="rounded-[10px] border border-line/60 bg-elevated/35 p-4"><div className="flex items-start gap-3"><div className="grid size-9 shrink-0 place-items-center rounded-[8px] bg-elevated text-accent"><HardDrive size={16} /></div><div className="min-w-0 flex-1"><h3 className="text-xs font-semibold text-ink">Compatibility cache</h3><p className="mt-1 text-[11px] leading-5 text-muted">Timing copies use lossless stream-copy. Explicit H.264 fallbacks re-encode only when the WebView rejects that copy. Originals are never changed.</p>{playbackCache ? <p className="number-font mt-2 text-[10px] text-muted">{playbackCache.fileCount} {playbackCache.fileCount === 1 ? "copy" : "copies"} · {formatBytes(playbackCache.totalBytes)} of {formatBytes(playbackCache.maxBytes)} · {playbackCache.maxFiles} file limit</p> : <p className="mt-2 text-[10px] text-muted">Cache usage unavailable.</p>}</div></div><Button variant="secondary" className="mt-3 h-9 w-full text-xs" disabled={clearingPlaybackCache || !playbackCache || playbackCache.fileCount === 0} onClick={() => void clearPlaybackCache()}>{clearingPlaybackCache ? <RefreshCw className="animate-spin" size={14} /> : <Eraser size={14} />} Clear compatibility cache</Button></div>
       </div>
+      <div className={`mt-5 flex items-start gap-3 rounded-[10px] border p-4 ${nativePlayback?.available ? "border-accent/25 bg-accent/5" : "border-line/60 bg-elevated/25"}`}><div className={`grid size-9 shrink-0 place-items-center rounded-[8px] ${nativePlayback?.available ? "bg-accent/10 text-accent" : "bg-elevated text-muted"}`}><MonitorPlay size={17} /></div><div><h3 className="text-xs font-semibold text-ink">Native mpv playback · {nativePlayback?.available ? "Ready" : "Unavailable"}</h3><p className="mt-1 text-[11px] leading-5 text-muted">{nativePlayback?.detail || "Checking whether mpv is available…"}</p>{nativePlayback?.version ? <p className="number-font mt-2 text-[10px] text-muted">{nativePlayback.version}</p> : null}</div></div>
       <div className="mt-5 flex items-center justify-between border-t border-line/60 pt-4"><p className="text-xs text-muted">System reduced-motion and increased-contrast preferences are also honored automatically.</p><Button onClick={() => void saveDesktop()}><Save size={15} /> Save preferences</Button></div>
     </div>
   </section>;

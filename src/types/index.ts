@@ -623,6 +623,20 @@ export interface LibraryPlaybackCacheStatus {
   maxBytes: number;
 }
 
+export interface NativePlaybackSession {
+  itemId: string;
+  title: string;
+  resumedAtSeconds: number;
+  durationSeconds: number;
+}
+
+export interface NativePlaybackStatus {
+  available: boolean;
+  version?: string | null;
+  active?: NativePlaybackSession | null;
+  detail: string;
+}
+
 export interface LibraryCacheResult {
   removedFiles: number;
   freedBytes: number;

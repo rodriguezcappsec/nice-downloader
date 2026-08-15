@@ -7,6 +7,7 @@ mod errors;
 mod library;
 mod media_server;
 mod models;
+mod native_player;
 mod queue;
 mod subscriptions;
 mod transformations;
@@ -42,7 +43,12 @@ fn install_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                     let _ = window.set_focus();
                 }
             }
-            "quit" => app.exit(0),
+            "quit" => {
+                if let Some(native_player) = app.try_state::<native_player::NativePlayerManager>() {
+                    native_player.close();
+                }
+                app.exit(0);
+            }
             _ => {}
         });
     if let Some(icon) = app.default_window_icon() {
@@ -91,7 +97,8 @@ pub fn run() {
                 .unwrap_or_else(|error| {
                 tracing::warn!(%error, "embedded playback is unavailable; system-player fallback remains enabled");
                 media_server::MediaServerState::unavailable(database.clone())
-            });
+                });
+            let native_player = native_player::NativePlayerManager::new(database.clone());
             if tray_available && database.load_desktop_preferences()?.start_minimized {
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.hide();
@@ -120,6 +127,7 @@ pub fn run() {
             app.manage(creative);
             app.manage(library);
             app.manage(media_server);
+            app.manage(native_player);
             tracing::info!(path = %data_directory.display(), "application backend initialized");
             Ok(())
         })
@@ -186,6 +194,9 @@ pub fn run() {
             commands::release_library_playback,
             commands::get_library_playback_cache_status,
             commands::clear_library_playback_cache,
+            commands::get_native_playback_status,
+            commands::open_library_native_playback,
+            commands::close_library_native_playback,
             commands::save_library_playback_progress,
             commands::list_continue_watching,
             commands::get_library_watch_state,
