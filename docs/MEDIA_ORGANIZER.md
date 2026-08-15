@@ -297,11 +297,28 @@ Acceptance: save a named comparison, reopen it after clearing the grid or relaun
 
 ## Milestone 19 - Image comparison and media stacks
 
-Add synchronized image zoom/pan, overlay and split views, then group alternate encodes, edits, originals, and generated copies without conflating files.
+Status: implemented on `feat/library-visual-curation`.
+
+- A dedicated two-to-four-image studio uses the existing tokenized Rust image route. Grid, two-image opacity overlay, and split reveal modes share bounded 25%–800% zoom and drag pan without exposing source paths.
+- Library selection validates every requested record before navigation. Missing, deleted, non-image, mixed-media, and decode failures reconcile to understandable recovery actions with system-viewer fallback.
+- Migration `0022_library_media_stacks.sql` persists normalized same-kind stacks with one original, ordered roles (`original`, `alternate`, `edit`, `generated`, `other`), a cover, notes, and at most 100 members.
+- Rust enforces one-stack-per-item, case-insensitive names, catalog availability, same media kind, membership uniqueness, and automatic cleanup when catalog deletion leaves fewer than two members. Removing a stack never changes files.
+- Library Home exposes durable stack shelves and a focused stack workspace. Bulk selection creates stacks and lets users label every version before saving.
+- Version 5 Library backup/restore includes bounded stacks and curation decisions, validates all untrusted references before writes, remaps restored catalog IDs, and preserves existing stack ownership when organizations conflict.
+
+Acceptance: compare two to four images with synchronized navigation, use overlay and split modes for two images, open either original in the system viewer, create and reopen a labeled version stack, relaunch with it intact, remove it without touching files, and round-trip it through Library backup/restore.
 
 ## Milestone 20 - Rapid curation and automatic collections
 
-Provide keyboard-first keep, favorite, rate, tag, move, and review actions. Persist validated rule collections that use the existing SQLite query model.
+Status: implemented on `feat/library-visual-curation`.
+
+- Migration `0023_library_curation_decisions.sql` persists typed Keep and Review later decisions with catalog-delete cascading. Rust owns bounded unreviewed/review-later queues and rejects missing records.
+- Review Library presents one item at a time with keyboard actions: `K` keep, `L` review later, `F` favorite, `1`–`5` rate, `T` tag, `M` enter safe Move, `O` open in the system app, and arrows move through the loaded queue.
+- Metadata shortcuts use the existing transactional bulk-action command. Move hands one catalog ID to the existing Rust-owned preview/confirmation flow; the review page never receives a source path.
+- Existing validated dynamic smart-view persistence is surfaced as Automatic collections. A saved filter stores typed `LibrarySmartViewQuery` intent, re-runs against current SQLite data when opened, and never freezes item IDs or stores SQL.
+- Version 5 backup/restore carries curation decisions alongside stacks and validates that every decision references one unique backed-up item before writing.
+
+Acceptance: process an unreviewed queue without a mouse, defer an item and recover it from Review later, favorite/rate/tag without leaving the workspace, enter safe Move, create an automatic collection from filters, see its membership update after catalog changes, and restore decisions from backup.
 
 ## Milestone 21 - Transcript discovery
 

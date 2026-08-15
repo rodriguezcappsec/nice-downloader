@@ -4,16 +4,18 @@ use crate::{
         AuthenticationProfile, BrowserCookieSource, DesktopPreferences, DownloadArchiveMatch,
         DownloadJob, DownloadState, EnginePreferences, LibraryAvailabilityFilter,
         LibraryBulkAction, LibraryChange, LibraryChangeKind, LibraryCollection,
-        LibraryCompareSession, LibraryCompareSessionItem, LibraryFacetRequest, LibraryFacets,
-        LibraryFileIdentity, LibraryFileOperation, LibraryFileOperationKind,
-        LibraryFileOperationState, LibraryFolderFacet, LibraryFolderScope, LibraryItem,
-        LibraryMediaKind, LibraryMetadataFields, LibraryMetadataState, LibraryMoment,
-        LibraryPlaybackEntry, LibraryPlaybackState, LibraryPlaylist, LibraryProbeResult,
-        LibraryQueryRequest, LibraryQueryResult, LibraryRichMetadata, LibraryScanJob,
-        LibraryScanState, LibrarySearchStatus, LibrarySmartView, LibrarySmartViewQuery,
-        LibrarySort, LibrarySource, LibrarySourceStatus, LibraryWatchState, Preset, PresetIntent,
-        QueueSettings, SaveAuthenticationProfileRequest, SaveLibraryCollectionRequest,
-        SaveLibraryCompareSessionRequest, SaveLibraryMomentRequest, SaveLibraryPlaybackRequest,
+        LibraryCompareSession, LibraryCompareSessionItem, LibraryCurationDecision,
+        LibraryCurationState, LibraryFacetRequest, LibraryFacets, LibraryFileIdentity,
+        LibraryFileOperation, LibraryFileOperationKind, LibraryFileOperationState,
+        LibraryFolderFacet, LibraryFolderScope, LibraryItem, LibraryMediaKind, LibraryMediaStack,
+        LibraryMediaStackMember, LibraryMediaStackRole, LibraryMetadataFields,
+        LibraryMetadataState, LibraryMoment, LibraryPlaybackEntry, LibraryPlaybackState,
+        LibraryPlaylist, LibraryProbeResult, LibraryQueryRequest, LibraryQueryResult,
+        LibraryRichMetadata, LibraryScanJob, LibraryScanState, LibrarySearchStatus,
+        LibrarySmartView, LibrarySmartViewQuery, LibrarySort, LibrarySource, LibrarySourceStatus,
+        LibraryWatchState, Preset, PresetIntent, QueueSettings, SaveAuthenticationProfileRequest,
+        SaveLibraryCollectionRequest, SaveLibraryCompareSessionRequest,
+        SaveLibraryMediaStackRequest, SaveLibraryMomentRequest, SaveLibraryPlaybackRequest,
         SaveLibraryPlaylistRequest, SaveLibraryRichMetadataRequest, SaveLibrarySmartViewRequest,
         SaveLibrarySourceRequest, SavePresetRequest, SaveSitePresetRuleRequest,
         SaveSubscriptionRequest, SitePresetRule, StartDownloadRequest, Subscription,
@@ -54,6 +56,8 @@ const MIGRATION_0018: &str = include_str!("migrations/0018_library_rich_metadata
 const MIGRATION_0019: &str = include_str!("migrations/0019_library_smart_discovery.sql");
 const MIGRATION_0020: &str = include_str!("migrations/0020_library_moments.sql");
 const MIGRATION_0021: &str = include_str!("migrations/0021_library_compare_sessions.sql");
+const MIGRATION_0022: &str = include_str!("migrations/0022_library_media_stacks.sql");
+const MIGRATION_0023: &str = include_str!("migrations/0023_library_curation_decisions.sql");
 const ENGINE_PREFERENCES_KEY: &str = "engine.preferences";
 const QUEUE_SETTINGS_KEY: &str = "queue.settings";
 const DESKTOP_PREFERENCES_KEY: &str = "desktop.preferences";
@@ -108,6 +112,8 @@ impl Database {
             (19, MIGRATION_0019),
             (20, MIGRATION_0020),
             (21, MIGRATION_0021),
+            (22, MIGRATION_0022),
+            (23, MIGRATION_0023),
         ] {
             let migrated: bool = transaction.query_row(
                 "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = ?1)",
@@ -3047,6 +3053,363 @@ impl Database {
         Ok(())
     }
 
+    pub fn list_library_media_stacks(&self) -> Result<Vec<LibraryMediaStack>, AppError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| AppError::new("database_unavailable", "Media stacks are unavailable."))?;
+        let mut statement = connection.prepare(
+            "SELECT id, name, notes, cover_item_id, created_at, updated_at
+             FROM library_media_stacks
+             ORDER BY updated_at DESC, name COLLATE NOCASE ASC
+             LIMIT 2000",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?,
+            ))
+        })?;
+        let base = rows.collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        let mut member_statement = connection.prepare(
+            "SELECT item_id, position, role
+             FROM library_media_stack_items
+             WHERE stack_id = ?1
+             ORDER BY position ASC, item_id ASC",
+        )?;
+        let mut stacks = Vec::with_capacity(base.len());
+        for (id, name, notes, cover_item_id, created_at, updated_at) in base {
+            let members = member_statement
+                .query_map([&id], |row| {
+                    Ok(LibraryMediaStackMember {
+                        item_id: row.get(0)?,
+                        position: usize::try_from(row.get::<_, i64>(1)?).unwrap_or(usize::MAX),
+                        role: parse_media_stack_role(&row.get::<_, String>(2)?),
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            stacks.push(LibraryMediaStack {
+                id,
+                name,
+                notes,
+                cover_item_id,
+                members,
+                created_at: timestamp_or_epoch(created_at),
+                updated_at: timestamp_or_epoch(updated_at),
+            });
+        }
+        Ok(stacks)
+    }
+
+    pub fn save_library_media_stack(
+        &self,
+        request: SaveLibraryMediaStackRequest,
+    ) -> Result<LibraryMediaStack, AppError> {
+        let id = request.id.unwrap_or_else(|| Uuid::new_v4().to_string());
+        validate_uuid(&id, "media stack")?;
+        let name = validate_media_stack_name(&request.name)?;
+        let notes = validate_media_stack_notes(&request.notes)?;
+        if !(2..=100).contains(&request.members.len()) {
+            return Err(AppError::new(
+                "invalid_media_stack_size",
+                "A media stack must contain between 2 and 100 items.",
+            ));
+        }
+
+        let mut members = request.members;
+        members.sort_by_key(|member| member.position);
+        let mut item_ids = HashSet::with_capacity(members.len());
+        let mut original_count = 0usize;
+        for member in &members {
+            validate_uuid(&member.item_id, "library item")?;
+            if !item_ids.insert(member.item_id.clone()) {
+                return Err(AppError::new(
+                    "invalid_media_stack_members",
+                    "Each item may appear only once in a media stack.",
+                ));
+            }
+            if member.role == LibraryMediaStackRole::Original {
+                original_count += 1;
+            }
+        }
+        if original_count != 1 {
+            return Err(AppError::new(
+                "invalid_media_stack_original",
+                "Choose exactly one original item for the media stack.",
+            ));
+        }
+        let cover_item_id = request.cover_item_id.or_else(|| {
+            members
+                .iter()
+                .find(|member| member.role == LibraryMediaStackRole::Original)
+                .map(|member| member.item_id.clone())
+        });
+        if cover_item_id
+            .as_ref()
+            .is_some_and(|cover| !item_ids.contains(cover))
+        {
+            return Err(AppError::new(
+                "invalid_media_stack_cover",
+                "The stack cover must be one of its items.",
+            ));
+        }
+
+        let now = Utc::now().timestamp_millis();
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| AppError::new("database_unavailable", "Media stacks are unavailable."))?;
+        let transaction = connection.transaction()?;
+        let duplicate: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM library_media_stacks
+             WHERE name = ?1 COLLATE NOCASE AND id <> ?2)",
+            params![name, id],
+            |row| row.get(0),
+        )?;
+        if duplicate {
+            return Err(AppError::new(
+                "media_stack_name_exists",
+                "Choose a different media stack name.",
+            ));
+        }
+
+        let mut media_kind: Option<String> = None;
+        for member in &members {
+            let catalog: Option<(String, bool)> = transaction
+                .query_row(
+                    "SELECT COALESCE(media_kind, ''), missing FROM media_library WHERE id = ?1",
+                    [&member.item_id],
+                    |row| Ok((row.get(0)?, row.get::<_, i64>(1)? != 0)),
+                )
+                .optional()?;
+            let Some((kind, missing)) = catalog else {
+                return Err(library_item_not_found());
+            };
+            if missing || !matches!(kind.as_str(), "video" | "image") {
+                return Err(AppError::new(
+                    "media_stack_available_media_required",
+                    "Media stacks require available videos or images.",
+                ));
+            }
+            if media_kind
+                .as_ref()
+                .is_some_and(|expected| expected != &kind)
+            {
+                return Err(AppError::new(
+                    "media_stack_kind_mismatch",
+                    "A media stack cannot mix videos and images.",
+                ));
+            }
+            media_kind.get_or_insert(kind);
+            let owner: Option<String> = transaction
+                .query_row(
+                    "SELECT stack_id FROM library_media_stack_items
+                     WHERE item_id = ?1 AND stack_id <> ?2",
+                    params![member.item_id, id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if owner.is_some() {
+                return Err(AppError::new(
+                    "media_stack_item_in_use",
+                    "One of these items already belongs to another media stack.",
+                ));
+            }
+        }
+
+        transaction.execute(
+            "DELETE FROM library_media_stack_items WHERE stack_id = ?1",
+            [&id],
+        )?;
+        transaction.execute(
+            "INSERT INTO library_media_stacks
+                (id, name, notes, cover_item_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+             ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                notes = excluded.notes,
+                cover_item_id = excluded.cover_item_id,
+                updated_at = excluded.updated_at",
+            params![id, name, notes, cover_item_id, now],
+        )?;
+        for (position, member) in members.iter().enumerate() {
+            transaction.execute(
+                "INSERT INTO library_media_stack_items (stack_id, item_id, position, role)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    id,
+                    member.item_id,
+                    i64::try_from(position).unwrap_or(i64::MAX),
+                    member.role.as_str(),
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        drop(connection);
+        self.list_library_media_stacks()?
+            .into_iter()
+            .find(|stack| stack.id == id)
+            .ok_or_else(|| {
+                AppError::new(
+                    "media_stack_not_found",
+                    "The media stack could not be loaded after saving.",
+                )
+            })
+    }
+
+    pub fn delete_library_media_stack(&self, id: &str) -> Result<(), AppError> {
+        validate_uuid(id, "media stack")?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| AppError::new("database_unavailable", "Media stacks are unavailable."))?;
+        if connection.execute("DELETE FROM library_media_stacks WHERE id = ?1", [id])? == 0 {
+            return Err(AppError::new(
+                "media_stack_not_found",
+                "The media stack was not found.",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn list_library_curation_queue(
+        &self,
+        review_later: bool,
+        limit: usize,
+    ) -> Result<Vec<LibraryItem>, AppError> {
+        let limit = limit.clamp(1, 500);
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "The curation queue is unavailable.")
+        })?;
+        let sql = if review_later {
+            "SELECT media_library.id FROM media_library
+             INNER JOIN library_curation_decisions decisions ON decisions.item_id = media_library.id
+             WHERE media_library.missing = 0 AND decisions.decision = 'reviewLater'
+             ORDER BY decisions.reviewed_at ASC, media_library.id ASC LIMIT ?1"
+        } else {
+            "SELECT media_library.id FROM media_library
+             LEFT JOIN library_curation_decisions decisions ON decisions.item_id = media_library.id
+             WHERE media_library.missing = 0 AND decisions.item_id IS NULL
+             ORDER BY media_library.added_at DESC, media_library.id ASC LIMIT ?1"
+        };
+        let mut statement = connection.prepare(sql)?;
+        let ids = statement
+            .query_map([i64::try_from(limit).unwrap_or(500)], |row| row.get(0))?
+            .collect::<Result<Vec<String>, _>>()?;
+        drop(statement);
+        drop(connection);
+        let items = self.list_library_items_by_ids(ids.clone())?;
+        let by_id = items
+            .into_iter()
+            .map(|item| (item.id.clone(), item))
+            .collect::<HashMap<_, _>>();
+        Ok(ids
+            .into_iter()
+            .filter_map(|id| by_id.get(&id).cloned())
+            .collect())
+    }
+
+    pub fn get_library_curation_state(
+        &self,
+        item_id: &str,
+    ) -> Result<LibraryCurationState, AppError> {
+        validate_uuid(item_id, "library item")?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| AppError::new("database_unavailable", "Curation state is unavailable."))?;
+        let exists: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM media_library WHERE id = ?1)",
+            [item_id],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            return Err(library_item_not_found());
+        }
+        let state = connection
+            .query_row(
+                "SELECT decision, reviewed_at FROM library_curation_decisions WHERE item_id = ?1",
+                [item_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()?;
+        Ok(LibraryCurationState {
+            item_id: item_id.to_owned(),
+            decision: state
+                .as_ref()
+                .and_then(|(decision, _)| parse_curation_decision(decision)),
+            reviewed_at: state.map(|(_, reviewed_at)| timestamp_or_epoch(reviewed_at)),
+        })
+    }
+
+    pub fn list_library_curation_states_for_backup(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<LibraryCurationState>, AppError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| AppError::new("database_unavailable", "Curation state is unavailable."))?;
+        let mut statement = connection.prepare(
+            "SELECT item_id, decision, reviewed_at FROM library_curation_decisions
+             ORDER BY reviewed_at ASC, item_id ASC LIMIT ?1",
+        )?;
+        let rows = statement.query_map([i64::try_from(limit).unwrap_or(i64::MAX)], |row| {
+            let decision = row.get::<_, String>(1)?;
+            Ok(LibraryCurationState {
+                item_id: row.get(0)?,
+                decision: parse_curation_decision(&decision),
+                reviewed_at: Some(timestamp_or_epoch(row.get(2)?)),
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn set_library_curation_decision(
+        &self,
+        item_id: &str,
+        decision: Option<LibraryCurationDecision>,
+    ) -> Result<LibraryCurationState, AppError> {
+        validate_uuid(item_id, "library item")?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| AppError::new("database_unavailable", "Curation state is unavailable."))?;
+        let available: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM media_library WHERE id = ?1 AND missing = 0)",
+            [item_id],
+            |row| row.get(0),
+        )?;
+        if !available {
+            return Err(AppError::new(
+                "library_curation_item_unavailable",
+                "Only available library items can be reviewed.",
+            ));
+        }
+        if let Some(decision) = decision {
+            connection.execute(
+                "INSERT INTO library_curation_decisions (item_id, decision, reviewed_at)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(item_id) DO UPDATE SET
+                    decision = excluded.decision,
+                    reviewed_at = excluded.reviewed_at",
+                params![item_id, decision.as_str(), Utc::now().timestamp_millis()],
+            )?;
+        } else {
+            connection.execute(
+                "DELETE FROM library_curation_decisions WHERE item_id = ?1",
+                [item_id],
+            )?;
+        }
+        drop(connection);
+        self.get_library_curation_state(item_id)
+    }
+
     pub fn add_library_playlist_item(
         &self,
         playlist_id: &str,
@@ -5224,6 +5587,50 @@ fn validate_compare_session_notes(value: &str) -> Result<String, AppError> {
     Ok(value.to_owned())
 }
 
+fn validate_media_stack_name(value: &str) -> Result<String, AppError> {
+    let value = value.trim();
+    if value.is_empty() || value.chars().count() > 80 || value.chars().any(char::is_control) {
+        return Err(AppError::new(
+            "invalid_media_stack_name",
+            "Media stack names must contain between 1 and 80 visible characters.",
+        ));
+    }
+    Ok(value.to_owned())
+}
+
+fn validate_media_stack_notes(value: &str) -> Result<String, AppError> {
+    let value = value.trim();
+    if value.chars().count() > 2_000
+        || value
+            .chars()
+            .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+    {
+        return Err(AppError::new(
+            "invalid_media_stack_notes",
+            "Media stack notes must contain no more than 2,000 characters.",
+        ));
+    }
+    Ok(value.to_owned())
+}
+
+fn parse_media_stack_role(value: &str) -> LibraryMediaStackRole {
+    match value {
+        "original" => LibraryMediaStackRole::Original,
+        "alternate" => LibraryMediaStackRole::Alternate,
+        "edit" => LibraryMediaStackRole::Edit,
+        "generated" => LibraryMediaStackRole::Generated,
+        _ => LibraryMediaStackRole::Other,
+    }
+}
+
+fn parse_curation_decision(value: &str) -> Option<LibraryCurationDecision> {
+    match value {
+        "keep" => Some(LibraryCurationDecision::Keep),
+        "reviewLater" => Some(LibraryCurationDecision::ReviewLater),
+        _ => None,
+    }
+}
+
 fn validate_moment_note(value: &str) -> Result<String, AppError> {
     let value = value.trim();
     if value.chars().count() > 2_000
@@ -5736,6 +6143,48 @@ mod tests {
     use std::time::Instant;
     use tempfile::tempdir;
 
+    fn media_stack_test_item(directory: &Path, title: &str, kind: LibraryMediaKind) -> LibraryItem {
+        let now = Utc::now();
+        let extension = if kind == LibraryMediaKind::Image {
+            "jpg"
+        } else {
+            "mp4"
+        };
+        LibraryItem {
+            id: Uuid::new_v4().to_string(),
+            path: directory
+                .join(format!("{}-{title}.{extension}", Uuid::new_v4()))
+                .to_string_lossy()
+                .into_owned(),
+            source_id: None,
+            relative_path: None,
+            media_kind: Some(kind),
+            title: title.to_owned(),
+            source_url: None,
+            thumbnail: None,
+            duration_seconds: (kind == LibraryMediaKind::Video).then_some(30.0),
+            site: None,
+            tags: Vec::new(),
+            metadata: serde_json::json!({}),
+            file_size_bytes: Some(100),
+            modified_at_ms: Some(1),
+            width: Some(1920),
+            height: Some(1080),
+            fps: (kind == LibraryMediaKind::Video).then_some(30.0),
+            video_codec: (kind == LibraryMediaKind::Video).then(|| "h264".to_owned()),
+            audio_codec: None,
+            container: Some(extension.to_owned()),
+            dynamic_range: None,
+            metadata_state: LibraryMetadataState::Ready,
+            metadata_error: None,
+            favorite: false,
+            rating: None,
+            missing: false,
+            added_at: now,
+            updated_at: now,
+        }
+    }
+
     #[test]
     fn migrates_and_round_trips_completed_history() {
         let directory = tempdir().expect("temporary directory");
@@ -6167,7 +6616,7 @@ mod tests {
                 row.get(0)
             })
             .expect("recovered migration version");
-        assert_eq!(latest_version, 21);
+        assert_eq!(latest_version, 23);
         let has_playback: bool = connection
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'library_playback')",
@@ -6201,6 +6650,14 @@ mod tests {
             )
             .expect("comparison session table state");
         assert!(has_compare_sessions);
+        let has_media_stacks: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'library_media_stacks')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("media stack table state");
+        assert!(has_media_stacks);
         let has_rich_metadata: bool = connection
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM sqlite_master
@@ -7370,6 +7827,122 @@ mod tests {
             .list_library_compare_sessions()
             .expect("sessions")
             .is_empty());
+    }
+
+    #[test]
+    fn persists_validated_media_stacks_and_cleans_incomplete_stacks() {
+        let directory = tempdir().expect("temporary directory");
+        let database =
+            Database::open(&directory.path().join("media-stacks.sqlite3")).expect("database");
+        let first = media_stack_test_item(directory.path(), "Original", LibraryMediaKind::Image);
+        let second = media_stack_test_item(directory.path(), "Edit", LibraryMediaKind::Image);
+        let third = media_stack_test_item(directory.path(), "Alternate", LibraryMediaKind::Image);
+        for item in [&first, &second, &third] {
+            database.upsert_library_item(item).expect("library item");
+        }
+
+        let saved = database
+            .save_library_media_stack(SaveLibraryMediaStackRequest {
+                id: None,
+                name: "Poster versions".to_owned(),
+                notes: "Print revisions".to_owned(),
+                cover_item_id: Some(second.id.clone()),
+                members: vec![
+                    LibraryMediaStackMember {
+                        item_id: first.id.clone(),
+                        position: 0,
+                        role: LibraryMediaStackRole::Original,
+                    },
+                    LibraryMediaStackMember {
+                        item_id: second.id.clone(),
+                        position: 1,
+                        role: LibraryMediaStackRole::Edit,
+                    },
+                ],
+            })
+            .expect("save media stack");
+        assert_eq!(saved.cover_item_id.as_deref(), Some(second.id.as_str()));
+        assert_eq!(saved.members.len(), 2);
+
+        let conflict = database
+            .save_library_media_stack(SaveLibraryMediaStackRequest {
+                id: None,
+                name: "Conflicting stack".to_owned(),
+                notes: String::new(),
+                cover_item_id: None,
+                members: vec![
+                    LibraryMediaStackMember {
+                        item_id: second.id.clone(),
+                        position: 0,
+                        role: LibraryMediaStackRole::Original,
+                    },
+                    LibraryMediaStackMember {
+                        item_id: third.id.clone(),
+                        position: 1,
+                        role: LibraryMediaStackRole::Alternate,
+                    },
+                ],
+            })
+            .expect_err("single stack membership");
+        assert_eq!(conflict.code, "media_stack_item_in_use");
+
+        database
+            .remove_library_item(&first.id)
+            .expect("remove original");
+        assert!(database
+            .list_library_media_stacks()
+            .expect("media stacks")
+            .is_empty());
+    }
+
+    #[test]
+    fn persists_curation_decisions_and_builds_deterministic_queues() {
+        let directory = tempdir().expect("temporary directory");
+        let database =
+            Database::open(&directory.path().join("curation.sqlite3")).expect("database");
+        let first = media_stack_test_item(directory.path(), "First", LibraryMediaKind::Video);
+        let second = media_stack_test_item(directory.path(), "Second", LibraryMediaKind::Video);
+        database.upsert_library_item(&first).expect("first item");
+        database.upsert_library_item(&second).expect("second item");
+
+        assert_eq!(
+            database
+                .list_library_curation_queue(false, 100)
+                .expect("unreviewed")
+                .len(),
+            2
+        );
+        database
+            .set_library_curation_decision(&first.id, Some(LibraryCurationDecision::Keep))
+            .expect("keep decision");
+        database
+            .set_library_curation_decision(&second.id, Some(LibraryCurationDecision::ReviewLater))
+            .expect("review later decision");
+        assert!(database
+            .list_library_curation_queue(false, 100)
+            .expect("unreviewed")
+            .is_empty());
+        assert_eq!(
+            database
+                .list_library_curation_queue(true, 100)
+                .expect("review later")
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![second.id.as_str()]
+        );
+        database
+            .set_library_curation_decision(&second.id, None)
+            .expect("clear decision");
+        assert_eq!(
+            database
+                .list_library_curation_queue(false, 100)
+                .expect("unreviewed")
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![second.id.as_str()]
+        );
     }
 
     #[test]

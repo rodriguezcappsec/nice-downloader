@@ -7,6 +7,8 @@ export type ViewId =
   | "transformations"
   | "library"
   | "compare"
+  | "imageCompare"
+  | "curation"
   | "presets"
   | "settings";
 
@@ -718,6 +720,40 @@ export interface SaveLibraryCompareSessionRequest {
   items: LibraryCompareSessionItem[];
   activeAudioItemId?: string | null;
   multipleAudio: boolean;
+}
+
+export type LibraryMediaStackRole = "original" | "alternate" | "edit" | "generated" | "other";
+
+export interface LibraryMediaStackMember {
+  itemId: string;
+  position: number;
+  role: LibraryMediaStackRole;
+}
+
+export interface LibraryMediaStack {
+  id: string;
+  name: string;
+  notes: string;
+  coverItemId?: string | null;
+  members: LibraryMediaStackMember[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SaveLibraryMediaStackRequest {
+  id?: string | null;
+  name: string;
+  notes: string;
+  coverItemId?: string | null;
+  members: LibraryMediaStackMember[];
+}
+
+export type LibraryCurationDecision = "keep" | "reviewLater";
+
+export interface LibraryCurationState {
+  itemId: string;
+  decision?: LibraryCurationDecision | null;
+  reviewedAt?: string | null;
 }
 
 export interface ExportLibraryMomentsRequest {

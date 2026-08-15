@@ -20,6 +20,7 @@ import {
   Heart,
   ListPlus,
   LayoutGrid,
+  Layers,
   List,
   Image as ImageIcon,
   Library,
@@ -70,6 +71,8 @@ import type {
   LibraryFacets,
   LibraryFolderFacet,
   LibraryMediaKind,
+  LibraryMediaStack,
+  LibraryMediaStackRole,
   LibraryPlaybackEntry,
   LibraryPlaybackPreflight,
   LibraryPlaybackSession,
@@ -106,6 +109,7 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
   const currentView = useAppStore((state) => state.view);
   const setView = useAppStore((state) => state.setView);
   const setCompareItems = useAppStore((state) => state.setCompareItems);
+  const setImageCompareItems = useAppStore((state) => state.setImageCompareItems);
   const [queryResult, setQueryResult] = useState<LibraryQueryResult>(EMPTY_LIBRARY_RESULT);
   const [recentResult, setRecentResult] = useState<LibraryQueryResult>({ ...EMPTY_LIBRARY_RESULT, pageSize: 12 });
   const [videoResult, setVideoResult] = useState<LibraryQueryResult>({ ...EMPTY_LIBRARY_RESULT, pageSize: 12 });
@@ -128,6 +132,11 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
   const [confirmDeleteSmartViewId, setConfirmDeleteSmartViewId] = useState<string | null>(null);
   const [searchStatus, setSearchStatus] = useState<LibrarySearchStatus | null>(null);
   const [playlists, setPlaylists] = useState<LibraryPlaylist[]>([]);
+  const [mediaStacks, setMediaStacks] = useState<LibraryMediaStack[]>([]);
+  const [activeMediaStack, setActiveMediaStack] = useState<LibraryMediaStack | null>(null);
+  const [activeMediaStackItems, setActiveMediaStackItems] = useState<LibraryItem[]>([]);
+  const [mediaStackLoading, setMediaStackLoading] = useState(false);
+  const [stackDraftItems, setStackDraftItems] = useState<LibraryItem[] | null>(null);
   const [activePlaylist, setActivePlaylist] = useState<LibraryPlaylist | null>(null);
   const [activePlaylistItems, setActivePlaylistItems] = useState<LibraryItem[]>([]);
   const [playlistLoading, setPlaylistLoading] = useState(false);
@@ -191,6 +200,7 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
   const bulkMoveReturnFocus = useRef<HTMLElement | null>(null);
   const sourceFormReturnFocus = useRef<HTMLElement | null>(null);
   const playlistLoadRevision = useRef(0);
+  const mediaStackLoadRevision = useRef(0);
 
   function activeElement(): HTMLElement | null {
     return document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -349,11 +359,12 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
   async function load() {
     const smartViewsRequest = ++smartViewsRequestRevision.current;
     try {
-      const [nextSources, nextJobs, nextCollections, nextPlaylists, nextChanges, nextDuplicateJob, nextDuplicateGroups, nextFileOperations, nextSmartViews, nextSearchStatus] = await Promise.all([
+      const [nextSources, nextJobs, nextCollections, nextPlaylists, nextMediaStacks, nextChanges, nextDuplicateJob, nextDuplicateGroups, nextFileOperations, nextSmartViews, nextSearchStatus] = await Promise.all([
         api.listLibrarySources(),
         api.listLibraryScanJobs(),
         api.listLibraryCollections(),
         api.listLibraryPlaylists(),
+        api.listLibraryMediaStacks(),
         api.listLibraryChanges(),
         api.getLibraryDuplicateAnalysis(),
         api.listLibraryDuplicateGroups(),
@@ -365,6 +376,7 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
       setScanJobs(nextJobs);
       setCollections(nextCollections);
       setPlaylists(nextPlaylists);
+      setMediaStacks(nextMediaStacks);
       setChanges(nextChanges);
       setDuplicateJob(nextDuplicateJob);
       setDuplicateGroups(nextDuplicateGroups);
@@ -396,12 +408,29 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
   }, []);
 
   useEffect(() => {
+    let disposed = false;
     const startSelection = (event: Event) => {
       const requestedIds = (event as CustomEvent<{ itemIds?: string[] }>).detail?.itemIds || [];
       setSelectedIds(new Set(Array.from(new Set(requestedIds)).slice(0, 4)));
       setSelectionMode(true);
       setActivePlaylist(null);
       setActivePlaylistItems([]);
+    };
+    const startBulkMoveFromWorkspace = (event: Event) => {
+      const requestedIds = (event as CustomEvent<{ itemIds?: string[] }>).detail?.itemIds || [];
+      if (requestedIds.length === 0) return;
+      setSelectedIds(new Set(Array.from(new Set(requestedIds)).slice(0, 500)));
+      setSelectionMode(true);
+      setBulkMoveOpen(true);
+      setActivePlaylist(null);
+      setActiveMediaStack(null);
+    };
+    const openLibraryItemFromWorkspace = (event: Event) => {
+      const itemId = (event as CustomEvent<{ itemId?: string }>).detail?.itemId;
+      if (!itemId) return;
+      void api.getLibraryItemsByIds([itemId]).then(([item]) => {
+        if (!disposed && item) openDetails(item);
+      }).catch((error) => { if (!disposed) setError(normalizeError(error)); });
     };
     const stopSinglePlayback = () => {
       setWatchItem(null);
@@ -413,12 +442,21 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
       setDetailsExtraItems([]);
     };
     window.addEventListener("nice-downloader:start-compare-selection", startSelection);
+    window.addEventListener("nice-downloader:start-image-compare-selection", startSelection);
     window.addEventListener("nice-downloader:compare-start", stopSinglePlayback);
+    window.addEventListener("nice-downloader:image-compare-start", stopSinglePlayback);
+    window.addEventListener("nice-downloader:start-bulk-move", startBulkMoveFromWorkspace);
+    window.addEventListener("nice-downloader:open-library-item", openLibraryItemFromWorkspace);
     return () => {
+      disposed = true;
       window.removeEventListener("nice-downloader:start-compare-selection", startSelection);
+      window.removeEventListener("nice-downloader:start-image-compare-selection", startSelection);
       window.removeEventListener("nice-downloader:compare-start", stopSinglePlayback);
+      window.removeEventListener("nice-downloader:image-compare-start", stopSinglePlayback);
+      window.removeEventListener("nice-downloader:start-bulk-move", startBulkMoveFromWorkspace);
+      window.removeEventListener("nice-downloader:open-library-item", openLibraryItemFromWorkspace);
     };
-  }, []);
+  }, [setError]);
 
   async function refreshArtworkCacheStatus() {
     try {
@@ -713,10 +751,10 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
     }
   }, [availabilityFilter, facetsContext, folderFilter, folderOptions, sourceFilter]);
 
-  const navigationItems = useMemo(() => isFiltered || selectionMode
+  const navigationItems = useMemo(() => activeMediaStack ? activeMediaStackItems : isFiltered || selectionMode
     ? Array.from(new Map([...items, ...detailsExtraItems].map((item) => [item.id, item])).values())
     : Array.from(new Map([...continueWatching.map((entry) => entry.item), ...watchLater, ...recentlyWatched.map((entry) => entry.item), ...recentResult.items, ...videos, ...images, ...detailsExtraItems].map((item) => [item.id, item])).values()),
-    [continueWatching, detailsExtraItems, images, isFiltered, items, recentResult.items, recentlyWatched, selectionMode, videos, watchLater]);
+    [activeMediaStack, activeMediaStackItems, continueWatching, detailsExtraItems, images, isFiltered, items, recentResult.items, recentlyWatched, selectionMode, videos, watchLater]);
   const watchPlaybackQueue = useMemo(() => {
     if (playbackContext && !watchDebouncedSearch) {
       return playbackContext.filter((item) => item.mediaKind === "video" && !item.missing);
@@ -915,6 +953,45 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
     }
   }
 
+  async function openImageCompareWorkspace() {
+    const itemIds = Array.from(selectedIds);
+    if (itemIds.length < 2 || itemIds.length > 4 || busy) return;
+    setBusy(true);
+    try {
+      const selected = await api.getLibraryItemsByIds(itemIds);
+      const selectedById = new Map(selected.map((item) => [item.id, item]));
+      const ordered = itemIds.map((id) => selectedById.get(id)).filter((item): item is LibraryItem => Boolean(item));
+      if (ordered.length !== itemIds.length) {
+        setNotice({ message: "One or more selected records no longer exist. Refresh the Library and choose the images again.", view: "library" });
+        scheduleLibraryRefresh(0);
+        return;
+      }
+      if (ordered.some((item) => item.mediaKind !== "image")) {
+        setNotice({ message: "Image comparison accepts images only. Remove videos from the selection and try again.", view: "library" });
+        return;
+      }
+      if (ordered.some((item) => item.missing)) {
+        setNotice({ message: "Unavailable images cannot be compared. Restore or remove the missing records first.", view: "library" });
+        return;
+      }
+      setImageCompareItems(itemIds);
+      setWatchItem(null);
+      setPlaybackContext(null);
+      setViewImage(null);
+      imageReturnFocus.current = null;
+      setSelectedItem(null);
+      setDetailsExtraItems([]);
+      closeSelectionMode();
+      window.dispatchEvent(new Event("nice-downloader:image-compare-start"));
+      setView("imageCompare");
+      window.setTimeout(() => document.getElementById("image-compare-heading")?.focus(), 0);
+    } catch (error) {
+      setError(normalizeError(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function resetFilters() {
     setMediaFilter("all"); setSourceFilter("all"); setFolderFilter("all"); setFolderScope("tree"); setResolutionFilter("all"); setContainerFilter("all");
     setDurationFilter("all"); setDateFilter("all"); setPublishedFilter("all"); setAvailabilityFilter("available"); setTagFilters([]); setCreatorFilters([]);
@@ -961,7 +1038,7 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
       applySmartView(stored);
       setSmartViewName("");
       setSmartViewFormOpen(false);
-      setNotice({ message: `Saved “${stored.name}” as a dynamic Library view.`, view: "library" });
+      setNotice({ message: `Saved “${stored.name}” as an automatic collection.`, view: "library" });
     } catch (error) {
       setError(normalizeError(error));
     } finally {
@@ -982,7 +1059,7 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
       setSmartViews((current) => current.filter((view) => view.id !== id));
       if (activeSmartViewId === id) setActiveSmartViewId(null);
       setConfirmDeleteSmartViewId(null);
-      setNotice({ message: "Saved Library view removed. Media files were not changed.", view: "library" });
+      setNotice({ message: "Automatic collection removed. Media files were not changed.", view: "library" });
     } catch (error) {
       setError(normalizeError(error));
     } finally {
@@ -1048,6 +1125,61 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
     setActivePlaylist(null);
     setActivePlaylistItems([]);
     restoreFocus(null, "library-search");
+  }
+
+  async function openMediaStack(stack: LibraryMediaStack) {
+    const revision = ++mediaStackLoadRevision.current;
+    setActivePlaylist(null);
+    setActiveMediaStack(stack);
+    setActiveMediaStackItems([]);
+    setMediaStackLoading(true);
+    try {
+      const loaded = await api.getLibraryItemsByIds(stack.members.map((member) => member.itemId));
+      if (revision !== mediaStackLoadRevision.current) return;
+      const byId = new Map(loaded.map((item) => [item.id, item]));
+      setActiveMediaStackItems(stack.members.map((member) => byId.get(member.itemId)).filter((item): item is LibraryItem => Boolean(item)));
+      window.requestAnimationFrame(() => document.getElementById("library-media-stack-title")?.focus());
+    } catch (error) {
+      if (revision !== mediaStackLoadRevision.current) return;
+      setActiveMediaStack(null);
+      setError(normalizeError(error));
+    } finally {
+      if (revision === mediaStackLoadRevision.current) setMediaStackLoading(false);
+    }
+  }
+
+  function closeMediaStack() {
+    mediaStackLoadRevision.current += 1;
+    setMediaStackLoading(false);
+    setActiveMediaStack(null);
+    setActiveMediaStackItems([]);
+    restoreFocus(null, "library-search");
+  }
+
+  async function openStackCreator() {
+    const ids = Array.from(selectedIds);
+    if (busy || ids.length < 2 || ids.length > 100) return;
+    setBusy(true);
+    try {
+      const loaded = await api.getLibraryItemsByIds(ids);
+      const byId = new Map(loaded.map((item) => [item.id, item]));
+      const ordered = ids.map((id) => byId.get(id)).filter((item): item is LibraryItem => Boolean(item));
+      const kind = ordered[0]?.mediaKind;
+      if (ordered.length !== ids.length || ordered.some((item) => item.missing || !item.mediaKind)) {
+        setNotice({ message: "Media stacks require available library items. Refresh the library and adjust the selection.", view: "library" });
+        scheduleLibraryRefresh(0);
+        return;
+      }
+      if (!kind || ordered.some((item) => item.mediaKind !== kind)) {
+        setNotice({ message: "A media stack cannot mix videos and images.", view: "library" });
+        return;
+      }
+      setStackDraftItems(ordered);
+    } catch (error) {
+      setError(normalizeError(error));
+    } finally {
+      setBusy(false);
+    }
   }
 
   function updatePlaylist(updated: LibraryPlaylist) {
@@ -1151,7 +1283,7 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
     if (!path) return;
     try {
       await api.exportLibrary(path);
-      setNotice({ message: "Library backup exported with sources, collections, curation, and media metadata." });
+      setNotice({ message: "Library backup exported with sources, collections, stacks, review decisions, and media metadata." });
     } catch (error) {
       setError(normalizeError(error));
     }
@@ -1201,7 +1333,7 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
   const imageIndex = viewImage ? imageNavigationItems.findIndex((item) => item.id === viewImage.id) : -1;
   const previousImage = imageIndex > 0 ? imageNavigationItems[imageIndex - 1] : null;
   const nextImage = imageIndex >= 0 && imageIndex + 1 < imageNavigationItems.length ? imageNavigationItems[imageIndex + 1] : null;
-  const watchWorkspace = watchItem && currentView !== "compare" ? <WatchWorkspace
+  const watchWorkspace = watchItem && currentView !== "compare" && currentView !== "imageCompare" ? <WatchWorkspace
     key={watchItem.id}
     item={watchItem}
     sourceName={sourceLabel(watchItem, sourceNames)}
@@ -1292,7 +1424,7 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
             <Button className="mt-4" variant="secondary" onClick={() => void importFiles()}>{busy ? <LoaderCircle className="animate-spin" size={15} /> : <Library size={15} />} Choose files</Button>
           </div>
           <div className="bg-panel/55 p-5">
-            <div className="flex items-start gap-3"><div className="grid size-10 place-items-center bg-elevated text-accent"><Save size={18} /></div><div><h2 className="text-sm font-semibold">Library backup</h2><p className="mt-1 text-xs leading-5 text-muted">Export sources, collections, curation, and inspected metadata. Restore merges records without deleting your current catalog.</p></div></div>
+            <div className="flex items-start gap-3"><div className="grid size-10 place-items-center bg-elevated text-accent"><Save size={18} /></div><div><h2 className="text-sm font-semibold">Library backup</h2><p className="mt-1 text-xs leading-5 text-muted">Export sources, collections, stacks, curation, and inspected metadata. Restore merges records without deleting your current catalog.</p></div></div>
             <div className="mt-5 flex flex-wrap gap-2"><Button variant="secondary" onClick={() => void exportBackup()}><Save size={15} /> Export backup</Button><Button variant="secondary" onClick={() => void restoreBackup()}><ArchiveRestore size={15} /> Restore backup</Button></div>
           </div>
           <div className="bg-panel/55 p-5">
@@ -1313,10 +1445,10 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
         <div className="flex shrink-0 items-center gap-1"><div className="flex rounded-[8px] bg-elevated/70 p-0.5" role="group" aria-label="Library view"><button className={`grid size-8 place-items-center rounded-[6px] transition ${viewMode === "grid" ? "bg-panel text-ink shadow-control" : "text-muted hover:text-ink"}`} onClick={() => changeViewMode("grid")} aria-pressed={viewMode === "grid"} aria-label="Grid view"><LayoutGrid size={15} /></button><button className={`grid size-8 place-items-center rounded-[6px] transition ${viewMode === "list" ? "bg-panel text-ink shadow-control" : "text-muted hover:text-ink"}`} onClick={() => changeViewMode("list")} aria-pressed={viewMode === "list"} aria-label="List view"><List size={15} /></button></div><Button variant={selectionMode ? "secondary" : "ghost"} onClick={() => selectionMode ? closeSelectionMode() : setSelectionMode(true)}>{selectionMode ? <X size={16} /> : <CheckSquare2 size={16} />} {selectionMode ? "Done" : "Select"}</Button><Button variant={changes.length > 0 ? "secondary" : "ghost"} onClick={() => { setManageOpen(true); void api.listLibraryFileOperations().then(setFileOperations).catch((error) => setError(normalizeError(error))); }}><Settings2 size={16} /> Manage{changes.length > 0 ? <span className="number-font rounded bg-accent/15 px-1.5 py-0.5 text-[10px] text-accent">{changes.length}</span> : null}</Button></div>
       </header>
 
-      <section className="mt-3 flex flex-wrap items-center gap-2 border-y border-line/45 py-2.5" aria-label="Saved Library views">
-        <span className="mr-1 inline-flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-muted"><Bookmark size={13} /> Saved views</span>
-        {smartViews.length === 0 ? <span className="text-[11px] text-muted">Save a filter combination for one-click access.</span> : smartViews.map((view) => <span key={view.id} className={`inline-flex items-center overflow-hidden rounded-[7px] border ${activeSmartViewId === view.id ? "border-accent/35 bg-accent/12 text-accent" : "border-line/70 bg-elevated/50 text-muted"}`}><button className="h-7 max-w-[220px] truncate px-2.5 text-[11px] font-medium hover:text-ink" onClick={() => applySmartView(view)} title={`Open ${view.name}`}>{view.name}</button><button className={`grid size-7 place-items-center border-l transition ${confirmDeleteSmartViewId === view.id ? "border-red-400/30 bg-red-400/10 text-red-300" : "border-line/60 hover:bg-panel hover:text-ink"}`} disabled={smartViewBusy} onClick={() => void deleteSmartView(view.id)} aria-label={confirmDeleteSmartViewId === view.id ? `Confirm removing ${view.name}` : `Remove ${view.name}`} title={confirmDeleteSmartViewId === view.id ? "Click again to confirm" : "Remove saved view"}>{confirmDeleteSmartViewId === view.id ? <Trash2 size={12} /> : <X size={12} />}</button></span>)}
-        <span className="ml-auto flex items-center gap-2">{smartViewFormOpen ? <><Input className="h-8 w-[190px] text-xs" value={smartViewName} maxLength={80} autoFocus placeholder="View name" onChange={(event) => setSmartViewName(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void saveCurrentSmartView(); if (event.key === "Escape") { setSmartViewFormOpen(false); setSmartViewName(""); } }} /><Button className="h-8 text-xs" disabled={!smartViewName.trim() || smartViewBusy} onClick={() => void saveCurrentSmartView()}>{smartViewBusy ? <LoaderCircle className="animate-spin" size={13} /> : <Save size={13} />} Save</Button><Button variant="ghost" className="h-8 text-xs" onClick={() => { setSmartViewFormOpen(false); setSmartViewName(""); }}>Cancel</Button></> : <Button variant="ghost" className="h-8 text-xs" onClick={() => setSmartViewFormOpen(true)}><Bookmark size={13} /> Save current view</Button>}<button className={`inline-flex h-8 items-center gap-1.5 rounded-[7px] px-2 text-[10px] transition hover:bg-elevated hover:text-ink ${searchStatus?.consistent === false ? "text-amber-300" : "text-muted"}`} disabled={smartViewBusy} onClick={() => void rebuildSearchIndex()} title="Rebuild the local Library search index"><Database size={12} />{searchStatus?.consistent === false ? "Repair search" : searchStatus ? "Search ready" : "Search index"}</button></span>
+      <section className="mt-3 flex flex-wrap items-center gap-2 border-y border-line/45 py-2.5" aria-label="Automatic collections">
+        <span className="mr-1 inline-flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-muted"><Bookmark size={13} /> Automatic collections</span>
+        {smartViews.length === 0 ? <span className="text-[11px] text-muted">Save the current filters as a collection that updates itself.</span> : smartViews.map((view) => <span key={view.id} className={`inline-flex items-center overflow-hidden rounded-[7px] border ${activeSmartViewId === view.id ? "border-accent/35 bg-accent/12 text-accent" : "border-line/70 bg-elevated/50 text-muted"}`}><button className="h-7 max-w-[220px] truncate px-2.5 text-[11px] font-medium hover:text-ink" onClick={() => applySmartView(view)} title={`Open ${view.name}`}>{view.name}</button><button className={`grid size-7 place-items-center border-l transition ${confirmDeleteSmartViewId === view.id ? "border-red-400/30 bg-red-400/10 text-red-300" : "border-line/60 hover:bg-panel hover:text-ink"}`} disabled={smartViewBusy} onClick={() => void deleteSmartView(view.id)} aria-label={confirmDeleteSmartViewId === view.id ? `Confirm removing ${view.name}` : `Remove ${view.name}`} title={confirmDeleteSmartViewId === view.id ? "Click again to confirm" : "Remove automatic collection"}>{confirmDeleteSmartViewId === view.id ? <Trash2 size={12} /> : <X size={12} />}</button></span>)}
+        <span className="ml-auto flex items-center gap-2">{smartViewFormOpen ? <><Input className="h-8 w-[190px] text-xs" value={smartViewName} maxLength={80} autoFocus placeholder="Collection name" onChange={(event) => setSmartViewName(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void saveCurrentSmartView(); if (event.key === "Escape") { setSmartViewFormOpen(false); setSmartViewName(""); } }} /><Button className="h-8 text-xs" disabled={!smartViewName.trim() || smartViewBusy} onClick={() => void saveCurrentSmartView()}>{smartViewBusy ? <LoaderCircle className="animate-spin" size={13} /> : <Save size={13} />} Save</Button><Button variant="ghost" className="h-8 text-xs" onClick={() => { setSmartViewFormOpen(false); setSmartViewName(""); }}>Cancel</Button></> : <Button variant="ghost" className="h-8 text-xs" onClick={() => setSmartViewFormOpen(true)}><Bookmark size={13} /> Save automatic collection</Button>}<button className={`inline-flex h-8 items-center gap-1.5 rounded-[7px] px-2 text-[10px] transition hover:bg-elevated hover:text-ink ${searchStatus?.consistent === false ? "text-amber-300" : "text-muted"}`} disabled={smartViewBusy} onClick={() => void rebuildSearchIndex()} title="Rebuild the local Library search index"><Database size={12} />{searchStatus?.consistent === false ? "Repair search" : searchStatus ? "Search ready" : "Search index"}</button></span>
       </section>
 
       {searchStatus && !searchStatus.consistent ? <div className="mt-3 flex items-center gap-3 border-l-2 border-amber-400/60 bg-amber-400/5 px-3 py-2 text-xs text-amber-100" role="alert"><span>Search index has {searchStatus.indexedItems.toLocaleString()} of {searchStatus.catalogItems.toLocaleString()} Library items.</span><Button variant="secondary" className="ml-auto h-8 text-xs" disabled={smartViewBusy} onClick={() => void rebuildSearchIndex()}>{smartViewBusy ? <LoaderCircle className="animate-spin" size={13} /> : <RotateCcw size={13} />} Rebuild search</Button></div> : null}
@@ -1348,7 +1480,9 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
 
       {tagFilters.length + creatorFilters.length + seriesFilters.length + siteFilters.length > 0 ? <div className="mt-1 flex flex-wrap items-center gap-2" aria-label="Active Library filters"><span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted">Matching any within each group</span>{tagFilters.map((value) => <ActiveFilterChip key={`tag:${value}`} label={`#${value}`} onRemove={() => setTagFilters((current) => current.filter((item) => item !== value))} />)}{creatorFilters.map((value) => <ActiveFilterChip key={`creator:${value}`} label={`Creator: ${value}`} onRemove={() => setCreatorFilters((current) => current.filter((item) => item !== value))} />)}{seriesFilters.map((value) => <ActiveFilterChip key={`series:${value}`} label={`Series: ${value}`} onRemove={() => setSeriesFilters((current) => current.filter((item) => item !== value))} />)}{siteFilters.map((value) => <ActiveFilterChip key={`site:${value}`} label={`Site: ${value}`} onRemove={() => setSiteFilters((current) => current.filter((item) => item !== value))} />)}<button className="text-[11px] font-medium text-muted hover:text-ink" onClick={() => { setTagFilters([]); setCreatorFilters([]); setSeriesFilters([]); setSiteFilters([]); }}>Clear groups</button></div> : null}
 
-      {activePlaylist ? (
+      {activeMediaStack ? (
+        <MediaStackWorkspace stack={activeMediaStack} items={activeMediaStackItems} loading={mediaStackLoading} onBack={closeMediaStack} onSelect={openDetails} onOpen={(item) => item.mediaKind === "video" ? startWatching(item, activeMediaStackItems.filter((candidate) => candidate.mediaKind === "video" && !candidate.missing)) : startViewingImage(item)} />
+      ) : activePlaylist ? (
         <PlaylistWorkspace
           playlist={activePlaylist}
         items={activePlaylistItems}
@@ -1369,6 +1503,7 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
         <>{discoveryContext && !selectionMode ? <DiscoveryHeader kind={discoveryContext.kind} value={discoveryContext.value} totalItems={queryResult.totalItems} representative={queryResult.items[0]} onClear={() => discoveryContext.kind === "creator" ? setCreatorFilters([]) : setSeriesFilters([])} /> : null}<div id="library-results" className={`scroll-mt-24 transition-opacity ${queryLoading ? "opacity-55" : "opacity-100"}`} aria-busy={queryLoading}><MediaSection title={selectionMode ? "Select media" : resultTitle} subtitle={queryLoading ? "Updating results…" : queryResult.totalItems === 0 ? "No matching items" : selectionMode ? `${selectedIds.size} selected · showing ${resultStart + 1}–${resultEnd} of ${queryResult.totalItems}` : `Showing ${resultStart + 1}–${resultEnd} of ${queryResult.totalItems} matching item${queryResult.totalItems === 1 ? "" : "s"}`} items={items} sourceNames={sourceNames} onSelect={openDetails} selectionMode={selectionMode} selectedIds={selectedIds} onToggleSelection={toggleSelection} viewMode={viewMode} /></div><LibraryPagination currentPage={currentResultPage} pageCount={resultPageCount} totalItems={queryResult.totalItems} onPageChange={changeResultPage} /></>
       ) : (
         <>
+          <MediaStackShelf stacks={mediaStacks} onOpen={(stack) => void openMediaStack(stack)} onChanged={setMediaStacks} />
           <PlaylistShelf playlists={playlists} onOpen={(playlist) => void openPlaylist(playlist)} onChanged={setPlaylists} />
           {featured ? <FeaturedMedia item={featured} sourceName={sourceLabel(featured, sourceNames)} onSelect={() => openDetails(featured)} onWatch={() => featured.mediaKind === "video" ? startWatching(featured) : startViewingImage(featured)} /> : null}
           {continueWatching.length > 0 ? <MediaSection title="Continue watching" subtitle="Pick up where you left off" items={continueWatching.map((entry) => entry.item)} progress={continueProgress} sourceNames={sourceNames} onSelect={startWatching} viewMode={viewMode} /> : null}
@@ -1380,8 +1515,9 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
         </>
       )}
 
-{selectionMode ? <BulkActionBar selectedIds={selectedIds} collections={collections} busy={busy} onCompare={openCompareWorkspace} onMove={openBulkMove} onApply={applyBulkAction} onClose={closeSelectionMode} /> : null}
+{selectionMode ? <BulkActionBar selectedIds={selectedIds} collections={collections} busy={busy} onCompare={openCompareWorkspace} onCompareImages={openImageCompareWorkspace} onCreateStack={openStackCreator} onMove={openBulkMove} onApply={applyBulkAction} onClose={closeSelectionMode} /> : null}
       {bulkMoveOpen ? <BulkMoveDialog selectedIds={selectedIds} onClose={closeBulkMove} onComplete={(result) => { applyBulkMoveResult(result); closeBulkMove(); }} /> : null}
+      {stackDraftItems ? <MediaStackDialog items={stackDraftItems} onClose={() => setStackDraftItems(null)} onSaved={(stack) => { setMediaStacks((current) => upsertById(current, stack)); setStackDraftItems(null); closeSelectionMode(); setNotice({ message: `Created media stack “${stack.name}”.`, view: "library" }); void openMediaStack(stack); }} /> : null}
 </div>{imageWorkspace}{active && selectedItem ? <div className="relative z-[80]"><MediaDetails item={selectedItem} sourceName={sourceLabel(selectedItem, sourceNames)} onClose={closeDetails} onWatch={openSelectedMedia} onChanged={updateItem} onMetadataChanged={() => scheduleLibraryRefresh(0)} onBrowseCreator={(creator) => { closeDetails(false); resetFilters(); setCreatorFilters([creator]); setResultPage(1); }} onBrowseSeries={(series) => { closeDetails(false); resetFilters(); setSeriesFilters([series]); setResultPage(1); }} onBrowseSite={(site) => { closeDetails(false); resetFilters(); setSiteFilters([site]); setResultPage(1); }} onSelectRelated={openRelatedDetails} onRemoved={() => removeItem(selectedItem.id)} onOperation={applyFileOperationResult} /></div> : null}{watchWorkspace}</>
   );
 }
@@ -1494,6 +1630,99 @@ function EmptyLibrary({ onAdd }: { onAdd: () => void }) {
 
 function FeaturedMedia({ item, sourceName, onSelect, onWatch }: { item: LibraryItem; sourceName: string; onSelect: () => void; onWatch: () => void }) {
   return <section className="relative mt-6 grid min-h-[330px] overflow-hidden bg-panel lg:grid-cols-[1.4fr_1fr]"><div className="absolute inset-0 opacity-20"><MediaArtwork item={item} eager /></div><div className="absolute inset-0 bg-gradient-to-r from-canvas via-canvas/95 to-canvas/25" /><div className="relative z-[1] flex flex-col justify-end px-7 py-9 lg:px-10"><p className="text-[11px] font-semibold text-accent">Recently added</p><h2 className="mt-3 max-w-2xl text-[34px] font-semibold leading-[1.08] tracking-[-0.045em] text-balance">{item.title}</h2><p className="mt-3 text-sm text-muted">{sourceName}{item.durationSeconds != null ? ` · ${formatDuration(item.durationSeconds)}` : ""} · {new Date(item.addedAt).toLocaleDateString()}</p><div className="mt-6 flex gap-2"><Button onClick={onWatch}><Play size={16} fill="currentColor" /> {item.mediaKind === "image" ? "View image" : "Watch"}</Button><Button variant="secondary" onClick={onSelect}>Details</Button></div></div><button className="group relative z-[1] m-6 hidden overflow-hidden rounded-[12px] bg-elevated shadow-[0_25px_70px_rgb(0_0_0/0.35)] lg:block" onClick={onWatch} aria-label={`Open ${item.title}`}><MediaArtwork item={item} eager /><span className="absolute inset-0 grid place-items-center bg-black/0 transition group-hover:bg-black/25"><span className="grid size-14 scale-90 place-items-center rounded-full bg-white/90 text-black opacity-0 shadow-xl transition group-hover:scale-100 group-hover:opacity-100"><Play size={22} fill="currentColor" /></span></span></button></section>;
+}
+
+function MediaStackShelf({ stacks, onOpen, onChanged }: { stacks: LibraryMediaStack[]; onOpen: (stack: LibraryMediaStack) => void; onChanged: (stacks: LibraryMediaStack[]) => void }) {
+  const setError = useAppStore((state) => state.setError);
+  const setNotice = useAppStore((state) => state.setNotice);
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  if (stacks.length === 0) return null;
+
+  async function removeStack(id: string) {
+    if (confirmDelete !== id) {
+      setConfirmDelete(id);
+      return;
+    }
+    setBusy(true);
+    try {
+      await api.deleteLibraryMediaStack(id);
+      onChanged(stacks.filter((stack) => stack.id !== id));
+      setConfirmDelete(null);
+      setNotice({ message: "Removed the media stack. Its files were not changed.", view: "library" });
+    } catch (error) {
+      setError(normalizeError(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return <section className="mt-7 border-b border-line/60 pb-8" aria-labelledby="library-media-stacks-title"><div className="mb-4"><p className="text-[10px] font-medium uppercase tracking-[0.14em] text-accent">Visual organization</p><h2 id="library-media-stacks-title" className="mt-1 text-xl font-semibold tracking-[-0.03em]">Media stacks</h2><p className="mt-1 text-xs text-muted">Keep originals, edits, alternates, and generated versions together without moving files.</p></div><div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">{stacks.map((stack) => <article key={stack.id} className="group flex min-h-28 items-center gap-4 rounded-[10px] border border-line/60 bg-panel/60 p-4 transition hover:border-accent/30 hover:bg-panel"><button className="relative grid size-14 shrink-0 place-items-center rounded-[9px] bg-accent/10 text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70" onClick={() => onOpen(stack)} aria-label={`Open ${stack.name}`}><Layers size={22} /><span className="number-font absolute -bottom-1 -right-1 min-w-5 rounded bg-ink px-1 py-0.5 text-[9px] text-canvas">{stack.members.length}</span></button><button className="min-w-0 flex-1 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70" onClick={() => onOpen(stack)}><strong className="block truncate text-sm font-semibold">{stack.name}</strong><span className="mt-1 line-clamp-2 text-[10px] leading-4 text-muted">{stack.notes || `${stack.members.length} related versions`}</span><span className="number-font mt-2 block text-[10px] font-medium text-accent">{stack.members.length} item{stack.members.length === 1 ? "" : "s"}</span></button>{confirmDelete === stack.id ? <button className="text-[10px] text-muted hover:text-ink" onClick={() => setConfirmDelete(null)}>Keep</button> : null}<Button variant={confirmDelete === stack.id ? "danger" : "ghost"} className="h-8 px-2 text-xs opacity-0 group-hover:opacity-100 focus:opacity-100" disabled={busy} onClick={() => void removeStack(stack.id)}><Trash2 size={13} /> {confirmDelete === stack.id ? "Confirm" : "Remove"}</Button></article>)}</div></section>;
+}
+
+function MediaStackWorkspace({ stack, items, loading, onBack, onSelect, onOpen }: { stack: LibraryMediaStack; items: LibraryItem[]; loading: boolean; onBack: () => void; onSelect: (item: LibraryItem) => void; onOpen: (item: LibraryItem) => void }) {
+  const memberById = new Map(stack.members.map((member) => [member.itemId, member]));
+  return <section className="mt-5" aria-labelledby="library-media-stack-title"><header className="mb-6 flex flex-wrap items-center gap-4 border-b border-line/60 pb-5"><Button variant="ghost" className="px-2" onClick={onBack}><ChevronRight className="rotate-180" size={15} /> Library</Button><div className="grid size-11 place-items-center rounded-[10px] bg-accent/10 text-accent"><Layers size={20} /></div><div className="min-w-0 flex-1"><p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-accent">Media stack</p><h2 id="library-media-stack-title" tabIndex={-1} className="truncate text-2xl font-semibold tracking-[-0.035em] outline-none">{stack.name}</h2><p className="mt-1 text-xs text-muted">{stack.notes || "Related versions kept together"}</p></div><span className="number-font text-xs text-muted">{stack.members.length} items</span></header>{loading ? <div className="grid min-h-64 place-items-center text-sm text-muted"><span className="flex items-center gap-2"><LoaderCircle className="animate-spin text-accent" size={16} /> Loading stack…</span></div> : <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4">{items.map((item) => { const member = memberById.get(item.id); return <article key={item.id} className="group overflow-hidden rounded-[10px] border border-line/60 bg-panel/60"><button className="relative aspect-video w-full overflow-hidden bg-elevated text-left" disabled={item.missing} onClick={() => onOpen(item)}><MediaArtwork item={item} eager /><span className="absolute left-2 top-2 rounded bg-black/70 px-2 py-1 text-[9px] font-semibold uppercase tracking-[0.1em] text-white">{mediaStackRoleLabel(member?.role || "other")}</span>{stack.coverItemId === item.id ? <span className="absolute right-2 top-2 rounded bg-accent px-2 py-1 text-[9px] font-semibold text-[#081426]">Cover</span> : null}</button><div className="flex items-start gap-3 p-3"><div className="min-w-0 flex-1"><h3 className="truncate text-xs font-semibold">{item.title}</h3><p className="mt-1 text-[10px] text-muted">{item.width && item.height ? `${item.width} × ${item.height}` : item.durationSeconds != null ? formatDuration(item.durationSeconds) : item.container?.toLocaleUpperCase() || "Media"}{item.missing ? " · Missing" : ""}</p></div><Button variant="ghost" className="h-8 px-2 text-xs" onClick={() => onSelect(item)}>Details</Button></div></article>; })}</div>}</section>;
+}
+
+function MediaStackDialog({ items, onClose, onSaved }: { items: LibraryItem[]; onClose: () => void; onSaved: (stack: LibraryMediaStack) => void }) {
+  const setError = useAppStore((state) => state.setError);
+  const [name, setName] = useState("");
+  const [notes, setNotes] = useState("");
+  const [coverItemId, setCoverItemId] = useState(items[0]?.id || "");
+  const [originalItemId, setOriginalItemId] = useState(items[0]?.id || "");
+  const [roles, setRoles] = useState<Record<string, LibraryMediaStackRole>>(() => Object.fromEntries(items.map((item, index) => [item.id, index === 0 ? "original" : "alternate"])));
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !busy) {
+        event.preventDefault();
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    window.requestAnimationFrame(() => document.getElementById("media-stack-name")?.focus());
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [busy, onClose]);
+
+  async function saveStack() {
+    if (!name.trim() || !originalItemId || busy) return;
+    setBusy(true);
+    try {
+      const stack = await api.saveLibraryMediaStack({
+        name: name.trim(),
+        notes: notes.trim(),
+        coverItemId,
+        members: items.map((item, position) => ({
+          itemId: item.id,
+          position,
+          role: item.id === originalItemId ? "original" : roles[item.id] === "original" ? "alternate" : roles[item.id] || "other",
+        })),
+      });
+      onSaved(stack);
+    } catch (error) {
+      setError(normalizeError(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function changeRole(itemId: string, role: LibraryMediaStackRole) {
+    if (role === "original") {
+      setOriginalItemId(itemId);
+      setRoles((current) => ({ ...current, [itemId]: "original", [originalItemId]: originalItemId === itemId ? "original" : "alternate" }));
+    } else {
+      setRoles((current) => ({ ...current, [itemId]: role }));
+    }
+  }
+
+  return <div className="fixed inset-0 z-[100] grid place-items-center bg-black/70 p-5 backdrop-blur-sm" onMouseDown={() => { if (!busy) onClose(); }}><section className="panel-shadow flex max-h-[min(820px,calc(100vh-40px))] w-full max-w-3xl flex-col overflow-hidden rounded-[14px] border border-line bg-panel" role="dialog" aria-modal="true" aria-labelledby="media-stack-dialog-title" onMouseDown={(event) => event.stopPropagation()}><header className="flex items-start gap-4 border-b border-line/70 px-5 py-5"><div className="grid size-11 shrink-0 place-items-center rounded-[10px] bg-accent/10 text-accent"><Layers size={20} /></div><div className="min-w-0 flex-1"><p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-accent">Non-destructive organization</p><h2 id="media-stack-dialog-title" className="mt-1 text-xl font-semibold tracking-[-0.03em]">Create media stack</h2><p className="mt-1 text-xs text-muted">Label related versions. Files remain in their current folders.</p></div><button className="grid size-8 place-items-center text-muted hover:bg-elevated hover:text-ink" disabled={busy} onClick={onClose} aria-label="Close"><X size={16} /></button></header><div className="min-h-0 flex-1 overflow-y-auto px-5 py-5"><div className="grid gap-4 sm:grid-cols-2"><Field label="Stack name"><Input id="media-stack-name" value={name} maxLength={80} onChange={(event) => setName(event.target.value)} placeholder="Example: Poster revisions" /></Field><Field label="Cover item"><Select value={coverItemId} onChange={(event) => setCoverItemId(event.target.value)}>{items.map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}</Select></Field></div><Field label="Notes"><Textarea className="mt-4" value={notes} maxLength={2000} onChange={(event) => setNotes(event.target.value)} placeholder="What connects these versions?" /></Field><div className="mt-5 space-y-2"><p className="text-xs font-semibold">Version roles</p>{items.map((item) => <div key={item.id} className="grid items-center gap-3 border border-line/60 bg-elevated/35 p-3 sm:grid-cols-[minmax(0,1fr)_160px]"><div className="min-w-0"><p className="truncate text-xs font-medium">{item.title}</p><p className="mt-0.5 truncate text-[10px] text-muted">{item.path}</p></div><Select className="h-9 text-xs" value={item.id === originalItemId ? "original" : roles[item.id] === "original" ? "alternate" : roles[item.id] || "other"} onChange={(event) => changeRole(item.id, event.target.value as LibraryMediaStackRole)}><option value="original">Original</option><option value="alternate">Alternate</option><option value="edit">Edit</option><option value="generated">Generated</option><option value="other">Other</option></Select></div>)}</div></div><footer className="flex items-center justify-end gap-2 border-t border-line/70 bg-elevated/25 px-5 py-4"><Button variant="ghost" disabled={busy} onClick={onClose}>Cancel</Button><Button disabled={busy || !name.trim()} onClick={() => void saveStack()}>{busy ? <LoaderCircle className="animate-spin" size={15} /> : <Layers size={15} />} Create stack</Button></footer></section></div>;
+}
+
+function mediaStackRoleLabel(role: LibraryMediaStackRole): string {
+  return { original: "Original", alternate: "Alternate", edit: "Edit", generated: "Generated", other: "Other" }[role];
 }
 
 function PlaylistShelf({ playlists, onOpen, onChanged }: { playlists: LibraryPlaylist[]; onOpen: (playlist: LibraryPlaylist) => void; onChanged: (playlists: LibraryPlaylist[]) => void }) {
@@ -2603,11 +2832,12 @@ function sourceLabel(item: LibraryItem, sourceNames: Map<string, string>): strin
   return item.sourceId ? sourceNames.get(item.sourceId) || item.site || "Local media" : item.site || "Local media";
 }
 
-function BulkActionBar({ selectedIds, collections, busy, onCompare, onMove, onApply, onClose }: { selectedIds: Set<string>; collections: LibraryCollection[]; busy: boolean; onCompare: () => Promise<void>; onMove: () => void; onApply: (action: LibraryBulkAction, message: string) => Promise<void>; onClose: () => void }) {
+function BulkActionBar({ selectedIds, collections, busy, onCompare, onCompareImages, onCreateStack, onMove, onApply, onClose }: { selectedIds: Set<string>; collections: LibraryCollection[]; busy: boolean; onCompare: () => Promise<void>; onCompareImages: () => Promise<void>; onCreateStack: () => Promise<void>; onMove: () => void; onApply: (action: LibraryBulkAction, message: string) => Promise<void>; onClose: () => void }) {
   const [tag, setTag] = useState("");
   const disabled = busy || selectedIds.size === 0;
   const compareDisabled = busy || selectedIds.size < 2 || selectedIds.size > 4;
-  return <aside className="panel-shadow fixed bottom-6 left-1/2 z-40 flex w-[min(1180px,calc(100vw-320px))] -translate-x-1/2 flex-wrap items-center gap-2 border border-line/80 bg-panel/95 p-3 backdrop-blur-xl" aria-label="Bulk library actions"><div className="mr-2 min-w-24"><p className="number-font text-sm font-semibold">{selectedIds.size} selected</p><button className="mt-0.5 text-[10px] font-medium text-muted hover:text-ink" onClick={onClose}>Clear selection</button></div><Button className="h-9 px-3 text-xs" disabled={compareDisabled} onClick={() => void onCompare()} title={compareDisabled ? "Select between 2 and 4 videos to compare" : "Open selected videos in the comparison grid"}><LayoutGrid size={14} /> Compare</Button><Button className="h-9 px-3 text-xs" disabled={disabled} onClick={onMove}><FolderInput size={14} /> Move</Button><Button variant="secondary" className="h-9 px-3 text-xs" disabled={disabled} onClick={() => void onApply({ type: "setFavorite", favorite: true }, `Marked ${selectedIds.size} item${selectedIds.size === 1 ? "" : "s"} as favorites.`)}><Heart size={14} /> Favorite</Button><Button variant="secondary" className="h-9 px-3 text-xs" disabled={disabled} onClick={() => void onApply({ type: "setFavorite", favorite: false }, `Removed ${selectedIds.size} item${selectedIds.size === 1 ? "" : "s"} from favorites.`)}><Heart size={14} fill="none" /> Unfavorite</Button><label><span className="sr-only">Set rating</span><Select className="h-9 w-32 text-xs" disabled={disabled} defaultValue="" onChange={(event) => { const value = event.target.value; if (value !== "") void onApply({ type: "setRating", rating: value === "clear" ? null : Number(value) }, value === "clear" ? "Cleared selected ratings." : `Rated selected media ${value} stars.`); event.currentTarget.value = ""; }}><option value="" disabled>Set rating</option>{[5, 4, 3, 2, 1].map((rating) => <option key={rating} value={rating}>{rating} star{rating === 1 ? "" : "s"}</option>)}<option value="clear">Clear rating</option></Select></label><label><span className="sr-only">Add to collection</span><Select className="h-9 w-44 text-xs" disabled={disabled || collections.length === 0} defaultValue="" onChange={(event) => { if (event.target.value) void onApply({ type: "addToCollection", collectionId: event.target.value }, "Added selected media to the collection."); event.currentTarget.value = ""; }}><option value="" disabled>{collections.length ? "Add to collection" : "No collections"}</option>{collections.map((collection) => <option key={collection.id} value={collection.id}>{collection.name}</option>)}</Select></label><label><span className="sr-only">Remove from collection</span><Select className="h-9 w-48 text-xs" disabled={disabled || collections.length === 0} defaultValue="" onChange={(event) => { if (event.target.value) void onApply({ type: "removeFromCollection", collectionId: event.target.value }, "Removed selected media from the collection."); event.currentTarget.value = ""; }}><option value="" disabled>{collections.length ? "Remove from collection" : "No collections"}</option>{collections.map((collection) => <option key={collection.id} value={collection.id}>{collection.name}</option>)}</Select></label><div className="flex min-w-48 flex-1"><Input className="h-9 rounded-r-none text-xs" value={tag} onChange={(event) => setTag(event.target.value)} placeholder="Add a tag" /><Button variant="secondary" className="h-9 rounded-l-none px-3 text-xs" disabled={disabled || !tag.trim()} onClick={() => { const value = tag.trim(); if (!value) return; void onApply({ type: "addTags", tags: [value] }, `Added #${value} to selected media.`); setTag(""); }}><Tags size={14} /> Add</Button></div></aside>;
+  const stackDisabled = busy || selectedIds.size < 2 || selectedIds.size > 100;
+  return <aside className="panel-shadow fixed bottom-6 left-1/2 z-40 flex w-[min(1280px,calc(100vw-300px))] -translate-x-1/2 flex-wrap items-center gap-2 border border-line/80 bg-panel/95 p-3 backdrop-blur-xl" aria-label="Bulk library actions"><div className="mr-2 min-w-24"><p className="number-font text-sm font-semibold">{selectedIds.size} selected</p><button className="mt-0.5 text-[10px] font-medium text-muted hover:text-ink" onClick={onClose}>Clear selection</button></div><Button className="h-9 px-3 text-xs" disabled={compareDisabled} onClick={() => void onCompare()} title={compareDisabled ? "Select between 2 and 4 videos to compare" : "Open selected videos in the comparison grid"}><LayoutGrid size={14} /> Videos</Button><Button variant="secondary" className="h-9 px-3 text-xs" disabled={compareDisabled} onClick={() => void onCompareImages()} title={compareDisabled ? "Select between 2 and 4 images to compare" : "Open selected images in the comparison studio"}><ImageIcon size={14} /> Images</Button><Button variant="secondary" className="h-9 px-3 text-xs" disabled={stackDisabled} onClick={() => void onCreateStack()} title={stackDisabled ? "Select between 2 and 100 items of one media type" : "Group versions without moving files"}><Layers size={14} /> Stack</Button><Button className="h-9 px-3 text-xs" disabled={disabled} onClick={onMove}><FolderInput size={14} /> Move</Button><Button variant="secondary" className="h-9 px-3 text-xs" disabled={disabled} onClick={() => void onApply({ type: "setFavorite", favorite: true }, `Marked ${selectedIds.size} item${selectedIds.size === 1 ? "" : "s"} as favorites.`)}><Heart size={14} /> Favorite</Button><Button variant="secondary" className="h-9 px-3 text-xs" disabled={disabled} onClick={() => void onApply({ type: "setFavorite", favorite: false }, `Removed ${selectedIds.size} item${selectedIds.size === 1 ? "" : "s"} from favorites.`)}><Heart size={14} fill="none" /> Unfavorite</Button><label><span className="sr-only">Set rating</span><Select className="h-9 w-32 text-xs" disabled={disabled} defaultValue="" onChange={(event) => { const value = event.target.value; if (value !== "") void onApply({ type: "setRating", rating: value === "clear" ? null : Number(value) }, value === "clear" ? "Cleared selected ratings." : `Rated selected media ${value} stars.`); event.currentTarget.value = ""; }}><option value="" disabled>Set rating</option>{[5, 4, 3, 2, 1].map((rating) => <option key={rating} value={rating}>{rating} star{rating === 1 ? "" : "s"}</option>)}<option value="clear">Clear rating</option></Select></label><label><span className="sr-only">Add to collection</span><Select className="h-9 w-44 text-xs" disabled={disabled || collections.length === 0} defaultValue="" onChange={(event) => { if (event.target.value) void onApply({ type: "addToCollection", collectionId: event.target.value }, "Added selected media to the collection."); event.currentTarget.value = ""; }}><option value="" disabled>{collections.length ? "Add to collection" : "No collections"}</option>{collections.map((collection) => <option key={collection.id} value={collection.id}>{collection.name}</option>)}</Select></label><label><span className="sr-only">Remove from collection</span><Select className="h-9 w-48 text-xs" disabled={disabled || collections.length === 0} defaultValue="" onChange={(event) => { if (event.target.value) void onApply({ type: "removeFromCollection", collectionId: event.target.value }, "Removed selected media from the collection."); event.currentTarget.value = ""; }}><option value="" disabled>{collections.length ? "Remove from collection" : "No collections"}</option>{collections.map((collection) => <option key={collection.id} value={collection.id}>{collection.name}</option>)}</Select></label><div className="flex min-w-48 flex-1"><Input className="h-9 rounded-r-none text-xs" value={tag} onChange={(event) => setTag(event.target.value)} placeholder="Add a tag" /><Button variant="secondary" className="h-9 rounded-l-none px-3 text-xs" disabled={disabled || !tag.trim()} onClick={() => { const value = tag.trim(); if (!value) return; void onApply({ type: "addTags", tags: [value] }, `Added #${value} to selected media.`); setTag(""); }}><Tags size={14} /> Add</Button></div></aside>;
 }
 
 function BulkMoveDialog({ selectedIds, onClose, onComplete }: { selectedIds: Set<string>; onClose: () => void; onComplete: (result: LibraryBulkMoveResult) => void }) {

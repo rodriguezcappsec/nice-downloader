@@ -18,6 +18,7 @@ import type {
 interface AppStore {
   view: ViewId;
   compareItemIds: string[];
+  imageCompareItemIds: string[];
   engines: EngineInfo[];
   enginePreferences: EnginePreferences;
   jobs: Record<string, DownloadJob>;
@@ -37,6 +38,9 @@ interface AppStore {
   setCompareItems: (itemIds: string[]) => void;
   removeCompareItem: (itemId: string) => void;
   clearCompareItems: () => void;
+  setImageCompareItems: (itemIds: string[]) => void;
+  removeImageCompareItem: (itemId: string) => void;
+  clearImageCompareItems: () => void;
   setError: (error: AppError | null) => void;
   setNotice: (notice: AppStore["notice"]) => void;
   setEnginePreferences: (preferences: EnginePreferences) => void;
@@ -82,8 +86,9 @@ function newerJob(
 }
 
 export const useAppStore = create<AppStore>((set, get) => ({
-  view: savedView && ["new", "downloads", "queue", "history", "subscriptions", "transformations", "library", "presets", "settings"].includes(savedView) ? savedView : "library",
+  view: savedView && ["new", "downloads", "queue", "history", "subscriptions", "transformations", "library", "compare", "imageCompare", "curation", "presets", "settings"].includes(savedView) ? savedView : "library",
   compareItemIds: [],
+  imageCompareItemIds: [],
   engines: [],
   enginePreferences: {
     browserCookieSource: "none",
@@ -119,6 +124,9 @@ export const useAppStore = create<AppStore>((set, get) => ({
   setCompareItems: (itemIds) => set({ compareItemIds: Array.from(new Set(itemIds)).slice(0, 4) }),
   removeCompareItem: (itemId) => set((state) => ({ compareItemIds: state.compareItemIds.filter((id) => id !== itemId) })),
   clearCompareItems: () => set({ compareItemIds: [] }),
+  setImageCompareItems: (itemIds) => set({ imageCompareItemIds: Array.from(new Set(itemIds)).slice(0, 4) }),
+  removeImageCompareItem: (itemId) => set((state) => ({ imageCompareItemIds: state.imageCompareItemIds.filter((id) => id !== itemId) })),
+  clearImageCompareItems: () => set({ imageCompareItemIds: [] }),
   setError: (error) => set({ error }),
   setNotice: (notice) => set({ notice }),
   setEnginePreferences: (enginePreferences) => set({ enginePreferences }),

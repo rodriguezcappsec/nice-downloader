@@ -1067,6 +1067,82 @@ pub struct SaveLibraryCompareSessionRequest {
     pub multiple_audio: bool,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum LibraryMediaStackRole {
+    Original,
+    Alternate,
+    Edit,
+    Generated,
+    Other,
+}
+
+impl LibraryMediaStackRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Original => "original",
+            Self::Alternate => "alternate",
+            Self::Edit => "edit",
+            Self::Generated => "generated",
+            Self::Other => "other",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryMediaStackMember {
+    pub item_id: String,
+    pub position: usize,
+    pub role: LibraryMediaStackRole,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryMediaStack {
+    pub id: String,
+    pub name: String,
+    pub notes: String,
+    pub cover_item_id: Option<String>,
+    pub members: Vec<LibraryMediaStackMember>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveLibraryMediaStackRequest {
+    pub id: Option<String>,
+    pub name: String,
+    pub notes: String,
+    pub cover_item_id: Option<String>,
+    pub members: Vec<LibraryMediaStackMember>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum LibraryCurationDecision {
+    Keep,
+    ReviewLater,
+}
+
+impl LibraryCurationDecision {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Keep => "keep",
+            Self::ReviewLater => "reviewLater",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryCurationState {
+    pub item_id: String,
+    pub decision: Option<LibraryCurationDecision>,
+    pub reviewed_at: Option<DateTime<Utc>>,
+}
+
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum LibraryMomentExportFormat {
