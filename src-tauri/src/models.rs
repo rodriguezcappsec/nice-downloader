@@ -503,6 +503,11 @@ pub enum TransformationOperation {
         audio_codec: TransformAudioCodec,
     },
     SplitChapters,
+    Montage {
+        segment_count: usize,
+        total_duration_seconds: f64,
+        fade_seconds: f64,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -676,6 +681,8 @@ pub struct LibraryQueryRequest {
     pub series: Vec<String>,
     #[serde(default)]
     pub sites: Vec<String>,
+    #[serde(default)]
+    pub theme: Option<String>,
     pub rating: Option<String>,
     pub collection_id: Option<String>,
     pub favorite_only: bool,
@@ -706,6 +713,8 @@ pub struct LibrarySmartViewQuery {
     pub series: Vec<String>,
     #[serde(default)]
     pub sites: Vec<String>,
+    #[serde(default)]
+    pub theme: Option<String>,
     pub rating: Option<String>,
     pub collection_id: Option<String>,
     pub favorite_only: bool,
@@ -738,6 +747,38 @@ pub struct LibrarySearchStatus {
     pub consistent: bool,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum LibraryHealthIssueKind {
+    Missing,
+    Changed,
+    MetadataPending,
+    MetadataFailed,
+    CompatibilityRisk,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryHealthIssue {
+    pub item_id: String,
+    pub title: String,
+    pub media_kind: Option<LibraryMediaKind>,
+    pub kinds: Vec<LibraryHealthIssueKind>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryHealthSummary {
+    pub total_items: usize,
+    pub available_items: usize,
+    pub missing_items: usize,
+    pub changed_items: usize,
+    pub metadata_pending_items: usize,
+    pub metadata_failed_items: usize,
+    pub compatibility_risk_items: usize,
+    pub issues: Vec<LibraryHealthIssue>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LibraryQueryResult {
@@ -764,6 +805,14 @@ pub struct LibraryFolderFacet {
     pub tree_count: usize,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryThemeFacet {
+    pub key: String,
+    pub label: String,
+    pub item_count: usize,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LibraryFacets {
@@ -775,7 +824,118 @@ pub struct LibraryFacets {
     pub creators: Vec<String>,
     pub series: Vec<String>,
     pub sites: Vec<String>,
+    pub themes: Vec<LibraryThemeFacet>,
     pub folders: Vec<LibraryFolderFacet>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum LibraryThemeAnalysisMode {
+    Fast,
+    #[default]
+    Deep,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryThemeSettings {
+    pub enabled: bool,
+    pub model: String,
+    pub mode: LibraryThemeAnalysisMode,
+}
+
+impl Default for LibraryThemeSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            model: "qwen2.5vl:7b".to_owned(),
+            mode: LibraryThemeAnalysisMode::Deep,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum LibraryThemeAnalysisScope {
+    All,
+    Folder,
+    Items,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StartLibraryThemeAnalysisRequest {
+    pub scope: LibraryThemeAnalysisScope,
+    pub max_videos: u32,
+    pub source_id: Option<String>,
+    pub folder_path: Option<String>,
+    pub folder_scope: LibraryFolderScope,
+    #[serde(default)]
+    pub item_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryThemeProviderStatus {
+    pub available: bool,
+    pub installed_models: Vec<String>,
+    pub selected_model_available: bool,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryThemeAssignment {
+    pub key: String,
+    pub label: String,
+    pub confidence: f64,
+    pub evidence: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryThemeAnalysis {
+    pub item_id: String,
+    pub title: String,
+    pub model: String,
+    pub mode: LibraryThemeAnalysisMode,
+    pub summary: String,
+    pub overall_confidence: f64,
+    pub themes: Vec<LibraryThemeAssignment>,
+    pub analyzed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryThemeIndexStatus {
+    pub eligible_items: usize,
+    pub indexed_items: usize,
+    pub stale_items: usize,
+    pub theme_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum LibraryThemeJobState {
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryThemeJob {
+    pub id: String,
+    pub state: LibraryThemeJobState,
+    pub checked_items: usize,
+    pub total_items: usize,
+    pub indexed_items: usize,
+    pub failed_items: usize,
+    pub current_title: Option<String>,
+    pub error: Option<String>,
+    pub started_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -899,6 +1059,26 @@ pub struct LibraryPlaybackPreflight {
     pub requires_confirmation: bool,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum LibraryPlaybackPreparationPhase {
+    Queued,
+    Copying,
+    Encoding,
+    Finalizing,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryPlaybackPreparationProgress {
+    pub item_id: String,
+    pub phase: LibraryPlaybackPreparationPhase,
+    pub progress_percent: Option<f64>,
+    pub processed_seconds: Option<f64>,
+    pub duration_seconds: Option<f64>,
+    pub reencode_required: bool,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LibraryPlaybackCacheStatus {
@@ -906,6 +1086,24 @@ pub struct LibraryPlaybackCacheStatus {
     pub total_bytes: u64,
     pub max_files: usize,
     pub max_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativePlaybackSession {
+    pub item_id: String,
+    pub title: String,
+    pub resumed_at_seconds: f64,
+    pub duration_seconds: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativePlaybackStatus {
+    pub available: bool,
+    pub version: Option<String>,
+    pub active: Option<NativePlaybackSession>,
+    pub detail: String,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -932,6 +1130,89 @@ pub struct LibraryProbeResult {
     pub dynamic_range: Option<String>,
     pub state: LibraryMetadataState,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LibraryTranscriptCue {
+    pub subtitle_name: String,
+    pub language: Option<String>,
+    pub start_seconds: f64,
+    pub end_seconds: f64,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryTranscriptMatch {
+    pub item_id: String,
+    pub start_seconds: f64,
+    pub end_seconds: f64,
+    pub text: String,
+    pub language: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryTranscriptIndexStatus {
+    pub indexed_items: usize,
+    pub cue_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum LibraryVisualSimilarityState {
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryVisualSimilarityJob {
+    pub id: String,
+    pub state: LibraryVisualSimilarityState,
+    pub checked_items: usize,
+    pub total_items: usize,
+    pub indexed_items: usize,
+    pub failed_items: usize,
+    pub current_title: Option<String>,
+    pub error: Option<String>,
+    pub started_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryVisualSimilarityStatus {
+    pub eligible_items: usize,
+    pub indexed_items: usize,
+    pub stale_items: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryVisualSimilarityMatch {
+    pub item: LibraryItem,
+    pub similarity_percent: f64,
+    pub hamming_distance: u32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartLocalShareRequest {
+    pub item_ids: Vec<String>,
+    pub expires_minutes: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalShareSession {
+    pub id: String,
+    pub url: String,
+    pub item_count: usize,
+    pub expires_at: DateTime<Utc>,
+    pub reachable_on_lan: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1005,6 +1286,48 @@ pub struct SaveLibraryMomentRequest {
     pub start_seconds: f64,
     pub end_seconds: Option<f64>,
     pub color: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryMontageSegment {
+    pub item_id: String,
+    pub label: String,
+    pub start_seconds: f64,
+    pub end_seconds: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryMontage {
+    pub id: String,
+    pub name: String,
+    pub notes: String,
+    pub fade_seconds: f64,
+    pub segments: Vec<LibraryMontageSegment>,
+    pub expected_segment_count: usize,
+    pub incomplete: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveLibraryMontageRequest {
+    pub id: Option<String>,
+    pub name: String,
+    pub notes: String,
+    pub fade_seconds: f64,
+    pub segments: Vec<LibraryMontageSegment>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartLibraryMontageExportRequest {
+    pub montage_id: String,
+    pub output_path: String,
+    #[serde(default)]
+    pub overwrite: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]

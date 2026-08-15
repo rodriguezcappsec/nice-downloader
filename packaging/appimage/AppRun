@@ -1,0 +1,21 @@
+#!/bin/sh
+set -eu
+
+if [ -z "${APPDIR:-}" ]; then
+  APPDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+  export APPDIR
+fi
+
+plugin_directory="$APPDIR/usr/lib/gstreamer-1.0"
+plugin_scanner="$plugin_directory/gst-plugin-scanner"
+
+# linuxdeploy's generated AppRun points GStreamer at the AppDir, but it does
+# not copy runtime plugins or redirect the scanner. Keep WebKitGTK, its
+# GStreamer core, plugins, and scanner from the same build to avoid mixing
+# incompatible host and bundled versions.
+export GST_PLUGIN_SYSTEM_PATH="$plugin_directory"
+export GST_PLUGIN_SYSTEM_PATH_1_0="$plugin_directory"
+export GST_PLUGIN_SCANNER="$plugin_scanner"
+export GST_PLUGIN_SCANNER_1_0="$plugin_scanner"
+
+exec "$APPDIR/AppRun.linuxdeploy" "$@"

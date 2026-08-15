@@ -1,7 +1,8 @@
 mod operations;
 use crate::models::{
-    LibraryCurationState, LibraryMediaStack, LibraryMediaStackRole, LibraryMoment, LibraryPlaylist,
-    SaveLibraryMediaStackRequest, SaveLibraryMomentRequest, SaveLibraryPlaylistRequest,
+    LibraryCurationState, LibraryMediaStack, LibraryMediaStackRole, LibraryMoment, LibraryMontage,
+    LibraryPlaylist, SaveLibraryMediaStackRequest, SaveLibraryMomentRequest,
+    SaveLibraryMontageRequest, SaveLibraryPlaylistRequest,
 };
 
 use crate::{
@@ -14,9 +15,10 @@ use crate::{
         LibraryDuplicateGroup, LibraryDuplicateTrashResult, LibraryFileIdentity, LibraryItem,
         LibraryMediaKind, LibraryMetadataFields, LibraryMetadataState, LibraryProbeResult,
         LibraryRichMetadata, LibraryScanJob, LibraryScanResult, LibraryScanState, LibrarySource,
-        LibrarySourceStatus, SaveLibraryCollectionRequest, SaveLibraryRichMetadataRequest,
-        SaveLibrarySourceRequest,
+        LibrarySourceStatus, LibraryTranscriptIndexStatus, SaveLibraryCollectionRequest,
+        SaveLibraryRichMetadataRequest, SaveLibrarySourceRequest,
     },
+    transcripts,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use chrono::Utc;
@@ -50,7 +52,7 @@ const MAX_CONCURRENT_METADATA_PROBES: usize = 3;
 const WATCH_DEBOUNCE: Duration = Duration::from_secs(2);
 const WATCH_SCAN_RETRY: Duration = Duration::from_secs(1);
 const SOURCE_HEALTH_INTERVAL: Duration = Duration::from_secs(10);
-const LIBRARY_BACKUP_VERSION: u32 = 5;
+const LIBRARY_BACKUP_VERSION: u32 = 6;
 const LIBRARY_CATALOG_SCHEMA_VERSION: u32 = 1;
 const LIBRARY_METADATA_SCHEMA_VERSION: u32 = 1;
 const MAX_LIBRARY_BACKUP_BYTES: u64 = 128 * 1024 * 1024;
@@ -61,6 +63,8 @@ const MAX_LIBRARY_BACKUP_PLAYLISTS: usize = 2_000;
 const MAX_LIBRARY_BACKUP_STACKS: usize = 2_000;
 const MAX_LIBRARY_BACKUP_MEMBERSHIPS: usize = 500_000;
 const MAX_LIBRARY_BACKUP_MOMENTS: usize = 500_000;
+const MAX_LIBRARY_BACKUP_MONTAGES: usize = 200;
+const MAX_LIBRARY_BACKUP_MONTAGE_SEGMENTS: usize = 10_000;
 const MAX_ARTWORK_CACHE_FILES: usize = 20_000;
 const MAX_ARTWORK_CACHE_BYTES: u64 = 1024 * 1024 * 1024;
 const SCAN_EVENT: &str = "library-scan-updated";
@@ -162,6 +166,26 @@ impl LibraryManager {
             CancellationToken::new(),
         );
         Ok(items)
+    }
+
+    pub fn rebuild_transcript_index(&self) -> Result<LibraryTranscriptIndexStatus, AppError> {
+        const BATCH_SIZE: usize = 500;
+        let mut after_id = None;
+        loop {
+            let targets = self
+                .database
+                .list_library_transcript_targets_after(after_id.as_deref(), BATCH_SIZE)?;
+            if targets.is_empty() {
+                break;
+            }
+            for (item_id, path) in &targets {
+                let cues = transcripts::read_transcript_cues(Path::new(path));
+                self.database
+                    .replace_library_transcript_cues(item_id, &cues)?;
+            }
+            after_id = targets.last().map(|(item_id, _)| item_id.clone());
+        }
+        self.database.library_transcript_index_status()
     }
 
     pub fn save_source(
@@ -1355,6 +1379,7 @@ impl LibraryManager {
                         LibraryChangeKind::Renamed,
                         Some(&previous_path),
                     );
+                    self.refresh_transcript_index(&stored)?;
                     return Ok(stored);
                 }
             }
@@ -1379,7 +1404,20 @@ impl LibraryManager {
         if let Some(change) = change {
             self.record_change(app, &stored, change, None);
         }
+        self.refresh_transcript_index(&stored)?;
         Ok(stored)
+    }
+
+    fn refresh_transcript_index(&self, item: &LibraryItem) -> Result<(), AppError> {
+        if !matches!(
+            item.media_kind,
+            Some(LibraryMediaKind::Video | LibraryMediaKind::Both)
+        ) {
+            return Ok(());
+        }
+        let cues = transcripts::read_transcript_cues(Path::new(&item.path));
+        self.database
+            .replace_library_transcript_cues(&item.id, &cues)
     }
 
     fn record_change(
@@ -2501,6 +2539,8 @@ struct LibraryBackup {
     #[serde(default)]
     moments: Vec<LibraryMoment>,
     #[serde(default)]
+    montages: Vec<LibraryMontage>,
+    #[serde(default)]
     rich_metadata: Vec<LibraryRichMetadata>,
 }
 
@@ -2519,6 +2559,7 @@ pub fn export_backup(database: &Database, path: &str) -> Result<(), AppError> {
         curation_decisions: database
             .list_library_curation_states_for_backup(MAX_LIBRARY_BACKUP_ITEMS + 1)?,
         moments: database.list_library_moments_for_backup(MAX_LIBRARY_BACKUP_MOMENTS + 1)?,
+        montages: database.list_library_montages()?,
         rich_metadata: database
             .list_library_rich_metadata_for_backup(MAX_LIBRARY_BACKUP_ITEMS + 1)?,
     };
@@ -2597,17 +2638,28 @@ pub fn restore_backup(database: &Database, path: &str) -> Result<Vec<LibraryItem
         .collect::<Result<Vec<_>, AppError>>()?;
     let video_backup_ids = prepared_items
         .iter()
-        .filter(|(_, item)| item.media_kind == Some(LibraryMediaKind::Video))
+        .filter(|(_, item)| {
+            matches!(
+                item.media_kind,
+                Some(LibraryMediaKind::Video | LibraryMediaKind::Both)
+            )
+        })
         .map(|(backup_id, _)| backup_id.clone())
         .collect::<HashSet<_>>();
     let video_backup_durations = prepared_items
         .iter()
-        .filter(|(_, item)| item.media_kind == Some(LibraryMediaKind::Video))
+        .filter(|(_, item)| {
+            matches!(
+                item.media_kind,
+                Some(LibraryMediaKind::Video | LibraryMediaKind::Both)
+            )
+        })
         .map(|(backup_id, item)| (backup_id.clone(), item.duration_seconds))
         .collect::<HashMap<_, _>>();
     let prepared_playlists =
         prepare_backup_playlists(database, backup.playlists, &video_backup_ids)?;
     let prepared_moments = prepare_backup_moments(backup.moments, &video_backup_durations)?;
+    let prepared_montages = prepare_backup_montages(backup.montages, &video_backup_durations)?;
     let mut rich_metadata_ids = HashSet::new();
     let mut prepared_rich_metadata = Vec::with_capacity(backup.rich_metadata.len());
     for metadata in &backup.rich_metadata {
@@ -2762,6 +2814,25 @@ pub fn restore_backup(database: &Database, path: &str) -> Result<Vec<LibraryItem
             })?;
         }
     }
+    for mut montage in prepared_montages {
+        let expected_segment_count = montage.expected_segment_count;
+        for segment in &mut montage.segments {
+            segment.item_id = item_id_map
+                .get(&segment.item_id)
+                .cloned()
+                .ok_or_else(|| invalid_backup("A montage segment could not be restored."))?;
+        }
+        database.restore_library_montage(
+            SaveLibraryMontageRequest {
+                id: Some(montage.id),
+                name: montage.name,
+                notes: montage.notes,
+                fade_seconds: montage.fade_seconds,
+                segments: montage.segments,
+            },
+            expected_segment_count,
+        )?;
+    }
     Ok(restored_items)
 }
 
@@ -2782,6 +2853,11 @@ fn validate_backup_shape(backup: &LibraryBackup) -> Result<(), AppError> {
         )
         .chain(backup.media_stacks.iter().map(|stack| stack.members.len()))
         .try_fold(0usize, usize::checked_add);
+    let montage_segment_count = backup
+        .montages
+        .iter()
+        .map(|montage| montage.segments.len())
+        .try_fold(0usize, usize::checked_add);
     if !supported_version
         || backup.items.len() > MAX_LIBRARY_BACKUP_ITEMS
         || backup.sources.len() > MAX_LIBRARY_BACKUP_SOURCES
@@ -2789,6 +2865,8 @@ fn validate_backup_shape(backup: &LibraryBackup) -> Result<(), AppError> {
         || backup.playlists.len() > MAX_LIBRARY_BACKUP_PLAYLISTS
         || backup.media_stacks.len() > MAX_LIBRARY_BACKUP_STACKS
         || backup.moments.len() > MAX_LIBRARY_BACKUP_MOMENTS
+        || backup.montages.len() > MAX_LIBRARY_BACKUP_MONTAGES
+        || montage_segment_count.is_none_or(|count| count > MAX_LIBRARY_BACKUP_MONTAGE_SEGMENTS)
         || backup.rich_metadata.len() > MAX_LIBRARY_BACKUP_ITEMS
         || backup.curation_decisions.len() > MAX_LIBRARY_BACKUP_ITEMS
         || membership_count.is_none_or(|count| count > MAX_LIBRARY_BACKUP_MEMBERSHIPS)
@@ -3203,6 +3281,71 @@ fn prepare_backup_moments(
     Ok(prepared)
 }
 
+fn prepare_backup_montages(
+    montages: Vec<LibraryMontage>,
+    video_durations: &HashMap<String, Option<f64>>,
+) -> Result<Vec<LibraryMontage>, AppError> {
+    let mut ids = HashSet::new();
+    let mut prepared = Vec::with_capacity(montages.len());
+    for mut montage in montages {
+        if Uuid::parse_str(&montage.id).is_err() || !ids.insert(montage.id.clone()) {
+            return Err(invalid_backup(
+                "Montage identifiers must be valid and unique.",
+            ));
+        }
+        let name = montage.name.trim();
+        let notes = montage.notes.trim();
+        if name.is_empty()
+            || name.chars().count() > 100
+            || name.chars().any(char::is_control)
+            || notes.chars().count() > 2_000
+            || notes
+                .chars()
+                .any(|character| character.is_control() && !matches!(character, '\n' | '\t'))
+            || !montage.fade_seconds.is_finite()
+            || !(0.0..=5.0).contains(&montage.fade_seconds)
+            || (montage.segments.is_empty() && !montage.incomplete)
+            || montage.segments.len() > 50
+            || montage.expected_segment_count < montage.segments.len()
+            || montage.expected_segment_count > 50
+            || montage.incomplete != (montage.expected_segment_count != montage.segments.len())
+        {
+            return Err(invalid_backup("A montage contains invalid project data."));
+        }
+        let mut total_duration = 0.0;
+        for segment in &mut montage.segments {
+            let Some(duration) = video_durations.get(&segment.item_id) else {
+                return Err(invalid_backup(
+                    "Montage segments must reference backed-up videos.",
+                ));
+            };
+            let label = segment.label.trim();
+            if label.is_empty()
+                || label.chars().count() > 100
+                || label.chars().any(char::is_control)
+                || !segment.start_seconds.is_finite()
+                || !segment.end_seconds.is_finite()
+                || segment.start_seconds < 0.0
+                || segment.end_seconds - segment.start_seconds < 0.1
+                || duration
+                    .filter(|value| value.is_finite() && *value > 0.0)
+                    .is_some_and(|duration| segment.end_seconds > duration + 1.0)
+            {
+                return Err(invalid_backup("A montage contains an invalid clip range."));
+            }
+            segment.label = label.to_owned();
+            total_duration += segment.end_seconds - segment.start_seconds;
+        }
+        if total_duration > 21_600.0 {
+            return Err(invalid_backup("A montage exceeds the six-hour limit."));
+        }
+        montage.name = name.to_owned();
+        montage.notes = notes.to_owned();
+        prepared.push(montage);
+    }
+    Ok(prepared)
+}
+
 fn normalize_backup_source_path(value: &str) -> Result<PathBuf, AppError> {
     let path = PathBuf::from(value);
     if !path.is_absolute() || path.parent().is_none() || value.chars().count() > 32_768 {
@@ -3516,6 +3659,20 @@ mod tests {
             })
             .expect("moment");
         source_database
+            .save_library_montage(SaveLibraryMontageRequest {
+                id: None,
+                name: "Highlights".to_owned(),
+                notes: "Backup montage".to_owned(),
+                fade_seconds: 0.25,
+                segments: vec![crate::models::LibraryMontageSegment {
+                    item_id: item.id.clone(),
+                    label: "Favorite scene".to_owned(),
+                    start_seconds: 2.0,
+                    end_seconds: 5.0,
+                }],
+            })
+            .expect("montage");
+        source_database
             .set_library_curation_decision(
                 &item.id,
                 Some(crate::models::LibraryCurationDecision::Keep),
@@ -3567,6 +3724,10 @@ mod tests {
         assert_eq!(restored_moments.len(), 1);
         assert_eq!(restored_moments[0].label, "Favorite scene");
         assert_eq!(restored_moments[0].start_seconds, 2.0);
+        let restored_montages = restored_database.list_library_montages().expect("montages");
+        assert_eq!(restored_montages.len(), 1);
+        assert_eq!(restored_montages[0].name, "Highlights");
+        assert_eq!(restored_montages[0].segments[0].item_id, restored[0].id);
         assert_eq!(restored_moments[0].end_seconds, Some(5.0));
         assert_eq!(
             restored_database
@@ -3661,6 +3822,7 @@ mod tests {
             media_stacks: Vec::new(),
             curation_decisions: Vec::new(),
             moments: Vec::new(),
+            montages: Vec::new(),
             rich_metadata: Vec::new(),
         };
         std::fs::write(

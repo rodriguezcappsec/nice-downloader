@@ -104,7 +104,7 @@ Status: exact-content vertical slice implemented on `feat/media-organizer`.
 - Let the user choose an individual copy through a two-step Move to Trash action. Rust re-derives the group and re-hashes both the selected file and a retained copy immediately before cleanup.
 - Remove the catalog record only after the operating system confirms the Trash move. Never expose permanent deletion or allow cleanup when no verified retained copy is available.
 
-Optional perceptual similarity remains future work. It must be clearly labeled approximate and must never be mixed with exact SHA-256 evidence.
+Perceptual similarity is implemented separately in Milestone 23. It is clearly labeled approximate and is never mixed with exact SHA-256 evidence.
 
 ## Milestone 6 - Safe organization tools
 
@@ -151,12 +151,15 @@ Status: implemented on `feat/media-organizer`.
 - The player provides native accessible controls, speed selection, fullscreen, previous/next navigation, and Space/K, J/L, arrow, M, F, and Escape shortcuts.
 - Matching WebVTT sidecars (`video.vtt` or `video.en.vtt`) are exposed as subtitle tracks through the same token and catalog boundary.
 - Open in system player remains visible in media details and the watch surface. It is the supported fallback when the platform WebView cannot decode a container or codec.
+- When system `mpv` is available, compatibility-consent and WebView failure surfaces offer native mpv playback before any copy. Rust resolves only the catalog UUID, launches one isolated mpv session with fixed arguments, and synchronizes resume progress through private IPC. Wayland uses a separate native window; no source or compatibility file is created.
+- Video cards, the featured-video surface, and media details show the detected video codec before playback together with a conservative WebKit compatibility label. The details panel combines the catalog's ffprobe metadata, WebKit's runtime `canPlayType` result, and Rust's existing playback-copy preflight; labels remain predictive rather than promising that every valid file will decode.
 - Reopening or manually retrying a video receives a fresh loopback session URL. This prevents WebKitGTK from reusing stale media-resource failures while preserving the same token and catalog-ID security boundary; retrying an existing compatibility copy does not duplicate it.
 - When WebKitGTK rejects the valid lossless timing copy, the error surface offers an explicit H.264/AAC fallback instead of repeating the same request. Its preflight clearly states that video will be re-encoded, shows a conservative size/free-space estimate, and always requires consent unless that exact fingerprinted fallback is already cached. The source remains unchanged.
 - Playback opens as an integrated Library watch workspace rather than a floating dialog. The main player and metadata occupy the primary column while a sticky, independently scrollable video rail supports debounced search, paginated browsing, and in-place video switching. An eight-second readiness timeout prevents a stalled WebKit media pipeline from trapping the UI.
 - Returning to the Library home or navigating to another workspace collapses the same live video element into an in-app bottom-right mini player. Playback, buffering, audio, native control state, and progress continue without reopening the media session. Accessible controls restore the full Watch workspace, open the original in the system player, or close and persist progress.
 - On Linux, Nice Downloader checks an available `gst-inspect-1.0` for WebKitGTK's `autoaudiosink` before mounting the player. Missing GStreamer audio-output plugins produce an actionable distribution-specific message and leave system-player playback available.
 - AV1-in-MP4 tracks with fractional time-base metadata that WebKitGTK/GStreamer can play ahead of audio are detected with structured ffprobe output. FFmpeg creates a fingerprinted, bounded Matroska stream-copy so GStreamer receives a concrete frame rate instead of the QuickTime demuxer's `0/1`; the UI identifies compatibility mode and the original remains untouched.
+- Compatibility-copy dialogs report queued/copying/encoding/finalizing phases with FFmpeg progress and a real Cancel action. Closing the player cancels its preparation, two unrelated copies may progress concurrently, and private `.part` files are never treated as completed cache entries.
 - Preparation is split into a read-only preflight and an explicit execution command. For uncached copies the preflight returns the reason, estimated bytes, available space, saved Ask/Automatic/Never preference, and whether confirmation is mandatory. Ordinary copies may follow the Automatic preference, but copies of 2 GiB or larger always require one-time approval. The accessible confirmation dialog traps focus, restores it when dismissed, and keeps system-player fallback visible.
 - Settings reports compatibility-cache file count and bytes, exposes an explicit clear action, and documents the four-file/8 GiB oldest-first limit. Clearing removes only app-private derivatives, never cataloged originals.
 
@@ -322,11 +325,90 @@ Acceptance: process an unreviewed queue without a mouse, defer an item and recov
 
 ## Milestone 21 - Transcript discovery
 
-Index trusted local subtitle text with bounded FTS, search across videos, and seek to result timestamps. Speech-to-text remains opt-in.
+Status: implemented.
 
-## Milestone 22 - Lean-back playback
+- Migration `0024_library_transcripts.sql` adds a local FTS5 cue index keyed by catalog item. Deleting a catalog item cascades its indexed cues.
+- Source scans index matching same-stem WebVTT tracks (`video.vtt` and `video.en.vtt`). A manual refresh processes every available catalog video in bounded 500-item database pages, including libraries larger than the normal 5,000-item legacy list view.
+- Rust accepts only regular, non-symlink UTF-8 WebVTT files, at most 20 tracks and 4 MiB per track, 50,000 cues per video, and 2,000 normalized characters per cue. Query text and result counts are also bounded before parameterized FTS execution.
+- Library text search includes a separate “Spoken in your videos” result group. Each match shows the video, cue text, language when known, and timestamp; selecting it opens the normal authorized player and seeks the existing HTML video or native mpv fallback to that cue.
+- The WebView receives catalog IDs, normalized cue text, and finite timestamps only. Filesystem discovery and parsing remain Rust-owned, and subtitle serving continues to revalidate the catalog parent and filename boundary.
+- Speech-to-text generation remains deferred and must be an explicit opt-in feature because it would introduce model downloads, compute cost, and new derived-data retention choices.
 
-Add large-control keyboard/gamepad navigation while preserving accessibility, pagination, playlist order, and local privacy boundaries.
+Acceptance: place a same-stem WebVTT beside a catalog video, refresh the subtitle index, search a spoken phrase, jump to its exact timestamp in embedded playback or mpv fallback, replace or remove cues without stale matches, and delete the catalog item without orphaned index rows.
+
+## Milestone 22 - Video montage builder
+
+Status: implemented.
+
+- Migration `0025_library_montages.sql` stores named montage projects separately from source videos. Each project snapshots an ordered list of catalog item IDs, labels, and finite start/end ranges, so deleting a saved moment does not silently rewrite an edit.
+- Montage projects accept 1–50 available video segments, at most six hours total, with bounded names, notes, and 0–5 second per-clip fade intent. Known catalog durations are checked on save and again on export.
+- The Montage workspace searches available Library videos, adds saved clip-range moments or exact manual ranges, edits and reorders the timeline, and shows total runtime without exposing source paths.
+- Rust resolves every current catalog path immediately before export. The generic Transform command rejects client-created montage operations, so React cannot inject input paths or FFmpeg filter graphs.
+- Export uses the persistent Transformation task lifecycle: queued/running/completed state, progress events, cancellation, interrupted-startup reconciliation, private staged output, and no implicit overwrite.
+- FFmpeg normalizes segments to a 1280x720, 30 fps H.264/AAC MP4. Silent videos receive a generated silence track so mixed audio/silent timelines concatenate reliably. Optional fades apply independently to each segment.
+- Library backup version 6 includes validated montage projects and remaps every segment catalog ID during non-destructive restore. Deleting a source catalog record cascades only its segment; the incomplete project remains visible for repair or deletion.
+
+Acceptance: create a project from moments and exact ranges across multiple videos, reorder and edit it, relaunch with the timeline intact, export and cancel through Transformations, handle a silent source, remove a source without dangling IDs, and round-trip the project through Library backup/restore.
+
+## Milestone 23 - Visual similarity explorer
+
+Status: implemented.
+
+- Migration `0026_library_visual_similarity.sql` stores a 64-bit difference hash plus the source size/mtime fingerprint for each indexed video or image. Stale fingerprints are excluded automatically and catalog deletion cascades derived signatures.
+- A cancellable Rust manager walks stable catalog-ID batches, asks FFmpeg for one bounded 9×8 grayscale representative frame, and computes a deterministic dHash. Video sampling seeks to roughly ten percent of the known duration.
+- Similarity queries compare at most 250,000 current signatures and return a percentage derived from 64-bit Hamming distance. The UI calls these matches approximate and keeps them visually and semantically separate from exact SHA-256 duplicate evidence.
+- The signature table is a rebuildable index/cache. It is intentionally excluded from Library backup and restore; source files, catalog records, and user curation remain authoritative.
+
+Acceptance: build, cancel, and resume the index; find ranked matches from an available reference item; change or delete a source and observe stale or cascading signatures disappear; distinguish approximate similarity from exact duplicates at every entry point.
+
+## Milestone 24 - Temporary local sharing
+
+Status: implemented.
+
+- A Rust-owned ephemeral HTTP server binds a random port for one active session, authorizes 1–50 selected catalog IDs behind a high-entropy capability token, and expires after 5–120 minutes or when the app exits.
+- Every request re-resolves the selected catalog record and revalidates a regular, non-symlink media file. The server accepts no client filesystem path, exposes no SQLite metadata or source paths, and serves only a closed media-extension set with GET, HEAD, and one bounded byte range.
+- The generated listing escapes media titles and sends a strict CSP, `no-referrer`, `nosniff`, and `no-store`. Session state and tokens are memory-only and are not logged or backed up.
+- The UI reports when only a loopback address could be found and warns that a firewall may gate LAN reachability. Capability links limit discovery; recipients can still retain any bytes their browser receives.
+
+Acceptance: select and share media from another LAN device, seek through a video using byte ranges, reject an unselected or changed catalog item, stop or expire the session, and confirm that relaunching the app restores no share authority.
+
+## Milestone 25 - Lean-back playback
+
+Status: implemented.
+
+- The existing Watch player changes presentation in place, preserving the authorized playback session, `<video>` element, current time, buffering, subtitle choice, playback rate, autoplay intent, and non-looping playlist boundaries.
+- Lean-back mode uses a fixed high-contrast viewing surface with large Previous, Play/Pause, Next, and Exit controls. Editing, metadata, queue, and creative tools are hidden until exit.
+- Existing keyboard controls remain active. Edge-triggered standard-gamepad mappings use A or Start for play/pause, B to exit, D-pad left/right for previous/next, and LB/RB for ten-second seeking without repeating every animation frame.
+- Entry captures focus, exit restores it when possible, Escape exits the mode, and background scrolling is locked only while the mode is active. The preference is session-only and adds no persisted media state.
+
+Acceptance: enter and exit without restarting playback, operate every large control with keyboard and a standard gamepad, preserve playlist order and end boundaries, and return focus to the entry control.
+
+## Milestone 26 - Daily-use Library polish
+
+Status: implemented.
+
+- A bounded versioned local workspace snapshot restores Library search, filters, sorting, result page, grid/list presentation, scroll position, and the last details selection. Values are validated before use, stale source/collection/container filters self-heal, and restoration never stores media bytes, playback tokens, or filesystem authority.
+- The existing `Ctrl+K` palette now debounces typed SQLite Library search and returns at most eight available media records alongside workspace commands. Catalog-ID actions open details, add videos to Play Next, seed visual similarity, or preselect temporary sharing without exposing process or path primitives.
+- Play Next is a session-only Zustand queue of at most 100 unique catalog IDs. Library lookup revalidates availability and media kind, prunes stale entries, lets users reorder/remove/clear from Watch, and gives explicit queued intent priority over ordinary autoplay without creating a permanent playlist.
+- Active LAN shares render a QR code locally through a lazy-loaded encoder. It contains exactly the existing expiring capability URL; no URL, title, token, or media metadata is sent to an external QR service.
+- Media Health uses a read-only aggregate SQLite query and at most 100 bounded issue samples. It surfaces missing/changed files, pending or failed inspection, conservative embedded-playback risk, source connectivity, search/similarity index gaps, and playback/artwork cache usage with direct recovery actions. Compatibility risk is advisory rather than an unsupported-codec verdict.
+
+Acceptance: relaunch into the previous bounded Library workspace, find media and run each `Ctrl+K` quick action, queue/reorder/consume videos without saving a playlist, scan a live share QR code from another LAN device, and use Media Health to open or repair every surfaced issue class.
+
+## Milestone 27 - Local AI theme discovery
+
+Status: implemented.
+
+- Theme discovery is disabled by default and talks only to Ollama's fixed `127.0.0.1:11434` endpoint. Qwen2.5-VL 7B is the default model name, while another already-installed vision-capable Ollama model can be selected. The app never accepts an arbitrary inference URL.
+- Deep analysis combines bounded metadata and existing subtitle transcript text with a six-frame chronological JPEG contact sheet generated by FFmpeg from the actual video. Fast mode omits frames and is labeled metadata-only; deep mode is the default so classification is not title-only.
+- A cancellable sequential manager validates every model response as bounded structured JSON. It keeps creator-independent canonical themes, confidence, and source-specific evidence while discarding weak assignments. Media text is explicitly treated as untrusted prompt content.
+- Migration `0027_library_themes.sql` stores rebuildable analyses and normalized theme assignments keyed by catalog UUID plus the observed source fingerprint, model, and mode. Changed-file assignments are excluded from facets and queries until refreshed; derived themes are not part of Library backup.
+- The Theme discovery workspace reports Ollama/model readiness, supports opt-in model/depth settings, shows progress and failures, presents evidence, and opens analyzed records. Discovered themes become a Library facet and a restorable selected-theme filter across creators and sources.
+- Each discovery run has a Rust-enforced 1-500 video cap and can target the next stable stale group, one imported source root/subfolder (direct or nested), or explicit bounded catalog IDs retained across UI searches. Job totals include only matching stale analysis-ready videos; no absolute target path crosses into React.
+
+Acceptance: with Ollama and a downloaded vision model available, deep-analyze two differently titled videos from different creators that depict the same activity, inspect visual/transcript/metadata evidence, choose their shared theme, and see both videos in the bounded Library result. Stop Ollama or change a source fingerprint and confirm the job fails safely or excludes stale themes without exposing a path or remote-provider primitive.
+
+See `docs/LOCAL_AI_THEMES.md` for setup, privacy, and indexing behavior.
 
 ## Explicitly deferred
 

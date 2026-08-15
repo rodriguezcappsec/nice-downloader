@@ -2,9 +2,11 @@
 
 ## Active: local media organizer
 
-Implementation is tracked in `docs/MEDIA_ORGANIZER.md`. Milestones 1–6 are implemented on `feat/media-organizer`: external folders, hierarchical folder filters with direct-only depth control, cancellable scans, structured metadata, curation, watching, removable-volume recovery, change review, exact SHA-256 duplicate cleanup, previewable Move/Copy/Rename operations, and preflighted bulk moves into a chosen subfolder. Milestone 7 includes SQLite-backed Library filtering and pagination, bounded Home shelves and facets, accessibility foundations, versioned recovery, and bounded artwork caching. Milestone 8 adds secure embedded HTML5 playback, byte-range streaming, resume state, Continue Watching, WebVTT sidecars, explicit system-player fallback, and informed consent plus cache management for real compatibility copies. Milestone 9 adds bounded assistive-technology announcements, dialog focus trapping and restoration, transactional migration-recovery proof, and repeatable 10,000–250,000-item profiling; removable exFAT measurements are recorded while manual Orca and network-filesystem verification remain outstanding. Milestone 10 adds typed, deterministic SQLite-backed sorting across paginated Library results. Milestone 11 adds secure full-resolution image viewing, zoom/pan/rotation, keyboard navigation, slideshows, and system-viewer fallback while preserving active mini-player video. Perceptual similarity remains deferred.
+Implementation is tracked in `docs/MEDIA_ORGANIZER.md`. Milestones 1–6 are implemented on `feat/media-organizer`: external folders, hierarchical folder filters with direct-only depth control, cancellable scans, structured metadata, curation, watching, removable-volume recovery, change review, exact SHA-256 duplicate cleanup, previewable Move/Copy/Rename operations, and preflighted bulk moves into a chosen subfolder. Milestone 7 includes SQLite-backed Library filtering and pagination, bounded Home shelves and facets, accessibility foundations, versioned recovery, and bounded artwork caching. Milestone 8 adds secure embedded HTML5 playback, byte-range streaming, resume state, Continue Watching, WebVTT sidecars, explicit system-player fallback, and informed consent plus cache management for real compatibility copies. Milestone 9 adds bounded assistive-technology announcements, dialog focus trapping and restoration, transactional migration-recovery proof, and repeatable 10,000–250,000-item profiling; removable exFAT measurements are recorded while manual Orca and network-filesystem verification remain outstanding. Milestone 10 adds typed, deterministic SQLite-backed sorting across paginated Library results. Milestone 11 adds secure full-resolution image viewing, zoom/pan/rotation, keyboard navigation, slideshows, and system-viewer fallback while preserving active mini-player video.
 
 Milestone 12 adds persistent Watch Later, local playback history, watched/reset controls, and bounded non-looping Autoplay to complete the first YouTube-like repeat-viewing workflow. Milestone 13 adds persistent ordered video playlists, Library and Watch workspace management, non-looping ordered playback, cascade-safe membership, and backup/restore support.
+
+The creative roadmap now includes persisted, backup-safe video montage projects with Rust-owned multi-source FFmpeg export, a rebuildable approximate visual-similarity index, temporary capability-link LAN sharing, and session-only lean-back playback.
 
 ## Milestone 14: rich metadata and creator browsing
 
@@ -35,8 +37,18 @@ Status: implemented on `feat/library-creative-workspaces`.
 18: saved comparison sessions and review-note export — implemented on `feat/library-creative-workspaces`.
 19: synchronized image comparison and explicit media-version stacks — implemented on `feat/library-visual-curation`.
 20: keyboard-first rapid curation and dynamic rule collections — implemented on `feat/library-visual-curation`.
-21: local subtitle/transcript FTS with timestamp seeking.
-22: accessible lean-back playback foundations.
+21: local subtitle/transcript FTS with timestamp seeking — implemented.
+22: persisted video montage builder with cancellable Rust-owned FFmpeg export — implemented.
+
+23: approximate visual similarity explorer with fingerprint-aware dHash indexing — implemented.
+
+24: temporary read-only LAN sharing for explicitly selected catalog media — implemented.
+
+25: accessible lean-back playback with large keyboard and gamepad controls — implemented.
+
+26: restored Library workspaces, universal media commands, session-only Play Next, local share QR codes, and a bounded media-health dashboard — implemented.
+
+27: optional local VLM theme discovery with deep frame sampling, evidence, cross-creator Library theme filtering, and bounded all/folder/item targeting — implemented.
 
 ## Maturity roadmap delivered
 

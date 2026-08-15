@@ -7,13 +7,16 @@ import type {
   LibraryMediaStack,
   ExportLibraryMomentsRequest,
   LibraryMoment,
+  LibraryMontage,
   LibraryPlaylist,
   LibraryStoryboard,
   SaveLibraryCompareSessionRequest,
   SaveLibraryMediaStackRequest,
   SaveLibraryMomentRequest,
+  SaveLibraryMontageRequest,
   SaveLibraryPlaylistRequest,
   StartLibraryClipExportRequest,
+  StartLibraryMontageExportRequest,
 } from "../types";
 import type {
   BatchAnalysisResponse,
@@ -41,6 +44,13 @@ import type {
   TransformationTask,
   LibraryItem,
   LibraryRichMetadata,
+  LibraryHealthSummary,
+  LibraryThemeAnalysis,
+  LibraryThemeIndexStatus,
+  LibraryThemeJob,
+  LibraryThemeProviderStatus,
+  LibraryThemeSettings,
+  StartLibraryThemeAnalysisRequest,
   LibrarySearchStatus,
   LibrarySmartView,
   LibraryFacetRequest,
@@ -50,9 +60,18 @@ import type {
   LibraryImageSession,
   LibraryPlaybackEntry,
   LibraryPlaybackPreflight,
+  LibraryPlaybackPreparationProgress,
   LibraryPlaybackCacheStatus,
   LibraryPlaybackSession,
   LibraryPlaybackState,
+  LibraryTranscriptIndexStatus,
+  LibraryTranscriptMatch,
+  LibraryVisualSimilarityJob,
+  LibraryVisualSimilarityMatch,
+  LibraryVisualSimilarityStatus,
+  LocalShareSession,
+  NativePlaybackSession,
+  NativePlaybackStatus,
   LibraryWatchState,
   SaveLibraryPlaybackRequest,
   LibraryCacheResult,
@@ -158,10 +177,45 @@ export const api = {
   listLibraryItems: () => invoke<LibraryItem[]>("list_library_items"),
   queryLibraryItems: (request: LibraryQueryRequest) =>
     invoke<LibraryQueryResult>("query_library_items", { request }),
+  getLibraryHealthSummary: () => invoke<LibraryHealthSummary>("get_library_health_summary"),
   getLibraryFacets: (request: LibraryFacetRequest) =>
     invoke<LibraryFacets>("get_library_facets", { request }),
   getLibraryItemsByIds: (ids: string[]) =>
     invoke<LibraryItem[]>("get_library_items_by_ids", { ids }),
+  searchLibraryTranscripts: (search: string, limit = 12) =>
+    invoke<LibraryTranscriptMatch[]>("search_library_transcripts", { search, limit }),
+  getLibraryTranscriptIndexStatus: () =>
+    invoke<LibraryTranscriptIndexStatus>("get_library_transcript_index_status"),
+  rebuildLibraryTranscriptIndex: () =>
+    invoke<LibraryTranscriptIndexStatus>("rebuild_library_transcript_index"),
+  getLibraryVisualSimilarityStatus: () =>
+    invoke<LibraryVisualSimilarityStatus>("get_library_visual_similarity_status"),
+  getLibraryVisualSimilarityJob: () =>
+    invoke<LibraryVisualSimilarityJob | null>("get_library_visual_similarity_job"),
+  startLibraryVisualSimilarityIndex: () =>
+    invoke<LibraryVisualSimilarityJob>("start_library_visual_similarity_index"),
+  cancelLibraryVisualSimilarityIndex: (jobId: string) =>
+    invoke<void>("cancel_library_visual_similarity_index", { jobId }),
+  findVisuallySimilarLibraryItems: (itemId: string, limit = 24, minimumSimilarityPercent = 75) =>
+    invoke<LibraryVisualSimilarityMatch[]>("find_visually_similar_library_items", { itemId, limit, minimumSimilarityPercent }),
+  getLibraryThemeSettings: () => invoke<LibraryThemeSettings>("get_library_theme_settings"),
+  saveLibraryThemeSettings: (settings: LibraryThemeSettings) =>
+    invoke<LibraryThemeSettings>("save_library_theme_settings", { settings }),
+  getLibraryThemeProviderStatus: () =>
+    invoke<LibraryThemeProviderStatus>("get_library_theme_provider_status"),
+  getLibraryThemeIndexStatus: () =>
+    invoke<LibraryThemeIndexStatus>("get_library_theme_index_status"),
+  listLibraryThemeAnalyses: (limit = 50) =>
+    invoke<LibraryThemeAnalysis[]>("list_library_theme_analyses", { limit }),
+  getLibraryThemeJob: () => invoke<LibraryThemeJob | null>("get_library_theme_job"),
+  startLibraryThemeAnalysis: (request: StartLibraryThemeAnalysisRequest) =>
+    invoke<LibraryThemeJob>("start_library_theme_analysis", { request }),
+  cancelLibraryThemeAnalysis: (jobId: string) =>
+    invoke<void>("cancel_library_theme_analysis", { jobId }),
+  getLocalShareStatus: () => invoke<LocalShareSession | null>("get_local_share_status"),
+  startLocalShare: (itemIds: string[], expiresMinutes: number) =>
+    invoke<LocalShareSession>("start_local_share", { request: { itemIds, expiresMinutes } }),
+  stopLocalShare: (id: string) => invoke<void>("stop_local_share", { id }),
   prepareLibraryImageView: (id: string) =>
     invoke<LibraryImageSession>("prepare_library_image_view", { id }),
   inspectLibraryPlayback: (id: string) =>
@@ -172,6 +226,10 @@ export const api = {
     invoke<LibraryPlaybackSession>("prepare_library_playback", { id, userApproved }),
   prepareLibraryPlaybackFallback: (id: string, userApproved = false) =>
     invoke<LibraryPlaybackSession>("prepare_library_playback_fallback", { id, userApproved }),
+  getLibraryPlaybackPreparation: (id: string) =>
+    invoke<LibraryPlaybackPreparationProgress | null>("get_library_playback_preparation", { id }),
+  cancelLibraryPlaybackPreparation: (id: string) =>
+    invoke<void>("cancel_library_playback_preparation", { id }),
   releaseLibraryPlayback: (id: string) => invoke<void>("release_library_playback", { id }),
   saveLibraryPlaybackProgress: (request: SaveLibraryPlaybackRequest) =>
     invoke<LibraryPlaybackState>("save_library_playback_progress", { request }),
@@ -219,6 +277,12 @@ export const api = {
   saveLibraryMoment: (request: SaveLibraryMomentRequest) =>
     invoke<LibraryMoment>("save_library_moment", { request }),
   deleteLibraryMoment: (id: string) => invoke<void>("delete_library_moment", { id }),
+  listLibraryMontages: () => invoke<LibraryMontage[]>("list_library_montages"),
+  saveLibraryMontage: (request: SaveLibraryMontageRequest) =>
+    invoke<LibraryMontage>("save_library_montage", { request }),
+  deleteLibraryMontage: (id: string) => invoke<void>("delete_library_montage", { id }),
+  startLibraryMontageExport: (request: StartLibraryMontageExportRequest) =>
+    invoke<TransformationTask>("start_library_montage_export", { request }),
   listLibraryCompareSessions: () =>
     invoke<LibraryCompareSession[]>("list_library_compare_sessions"),
   saveLibraryCompareSession: (request: SaveLibraryCompareSessionRequest) =>
@@ -262,6 +326,10 @@ export const api = {
   clearLibraryArtworkCache: () => invoke<LibraryCacheResult>("clear_library_artwork_cache"),
   getLibraryArtworkCacheStatus: () => invoke<LibraryArtworkCacheStatus>("get_library_artwork_cache_status"),
   clearLibraryPlaybackCache: () => invoke<LibraryCacheResult>("clear_library_playback_cache"),
+  getNativePlaybackStatus: () => invoke<NativePlaybackStatus>("get_native_playback_status"),
+  openLibraryNativePlayback: (id: string, startAtSeconds?: number) =>
+    invoke<NativePlaybackSession>("open_library_native_playback", { id, startAtSeconds }),
+  closeLibraryNativePlayback: () => invoke<void>("close_library_native_playback"),
   getLibraryPlaybackCacheStatus: () => invoke<LibraryPlaybackCacheStatus>("get_library_playback_cache_status"),
   openLibraryItem: (id: string) => invoke<void>("open_library_item", { id }),
   reconcileLibrary: () => invoke<LibraryScanResult>("reconcile_library"),
@@ -295,6 +363,10 @@ export const api = {
     listen<QueueSnapshot>("download-queue-updated", (event) => handler(event.payload)),
   onTransformationUpdated: (handler: (task: TransformationTask) => void): Promise<UnlistenFn> =>
     listen<TransformationTask>("transformation-task-updated", (event) => handler(event.payload)),
+  onLibraryVisualSimilarityUpdated: (handler: (job: LibraryVisualSimilarityJob) => void): Promise<UnlistenFn> =>
+    listen<LibraryVisualSimilarityJob>("library-visual-similarity-updated", (event) => handler(event.payload)),
+  onLibraryThemeAnalysisUpdated: (handler: (job: LibraryThemeJob) => void): Promise<UnlistenFn> =>
+    listen<LibraryThemeJob>("library-theme-analysis-updated", (event) => handler(event.payload)),
   onLibraryScanUpdated: (handler: (job: LibraryScanJob) => void): Promise<UnlistenFn> =>
     listen<LibraryScanJob>("library-scan-updated", (event) => handler(event.payload)),
   onLibraryItemIndexed: (handler: (item: LibraryItem) => void): Promise<UnlistenFn> =>

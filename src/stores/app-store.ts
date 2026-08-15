@@ -19,6 +19,7 @@ interface AppStore {
   view: ViewId;
   compareItemIds: string[];
   imageCompareItemIds: string[];
+  playNextItemIds: string[];
   engines: EngineInfo[];
   enginePreferences: EnginePreferences;
   jobs: Record<string, DownloadJob>;
@@ -41,6 +42,11 @@ interface AppStore {
   setImageCompareItems: (itemIds: string[]) => void;
   removeImageCompareItem: (itemId: string) => void;
   clearImageCompareItems: () => void;
+  setPlayNextItems: (itemIds: string[]) => void;
+  enqueuePlayNext: (itemId: string) => void;
+  removePlayNextItem: (itemId: string) => void;
+  movePlayNextItem: (itemId: string, newIndex: number) => void;
+  clearPlayNext: () => void;
   setError: (error: AppError | null) => void;
   setNotice: (notice: AppStore["notice"]) => void;
   setEnginePreferences: (preferences: EnginePreferences) => void;
@@ -86,9 +92,10 @@ function newerJob(
 }
 
 export const useAppStore = create<AppStore>((set, get) => ({
-  view: savedView && ["new", "downloads", "queue", "history", "subscriptions", "transformations", "library", "compare", "imageCompare", "curation", "presets", "settings"].includes(savedView) ? savedView : "library",
+  view: savedView && ["new", "downloads", "queue", "history", "subscriptions", "transformations", "library", "compare", "imageCompare", "curation", "montages", "similarity", "themes", "sharing", "health", "presets", "settings"].includes(savedView) ? savedView : "library",
   compareItemIds: [],
   imageCompareItemIds: [],
+  playNextItemIds: [],
   engines: [],
   enginePreferences: {
     browserCookieSource: "none",
@@ -127,6 +134,22 @@ export const useAppStore = create<AppStore>((set, get) => ({
   setImageCompareItems: (itemIds) => set({ imageCompareItemIds: Array.from(new Set(itemIds)).slice(0, 4) }),
   removeImageCompareItem: (itemId) => set((state) => ({ imageCompareItemIds: state.imageCompareItemIds.filter((id) => id !== itemId) })),
   clearImageCompareItems: () => set({ imageCompareItemIds: [] }),
+  setPlayNextItems: (itemIds) => set({ playNextItemIds: Array.from(new Set(itemIds)).slice(0, 100) }),
+  enqueuePlayNext: (itemId) => set((state) => ({
+    playNextItemIds: state.playNextItemIds.includes(itemId)
+      ? state.playNextItemIds
+      : [...state.playNextItemIds, itemId].slice(0, 100),
+  })),
+  removePlayNextItem: (itemId) => set((state) => ({ playNextItemIds: state.playNextItemIds.filter((id) => id !== itemId) })),
+  movePlayNextItem: (itemId, newIndex) => set((state) => {
+    const currentIndex = state.playNextItemIds.indexOf(itemId);
+    if (currentIndex < 0) return state;
+    const next = [...state.playNextItemIds];
+    const [moved] = next.splice(currentIndex, 1);
+    next.splice(Math.min(Math.max(0, newIndex), next.length), 0, moved);
+    return { playNextItemIds: next };
+  }),
+  clearPlayNext: () => set({ playNextItemIds: [] }),
   setError: (error) => set({ error }),
   setNotice: (notice) => set({ notice }),
   setEnginePreferences: (enginePreferences) => set({ enginePreferences }),

@@ -33,6 +33,13 @@ pub struct TransformationManager {
     cancellations: Arc<Mutex<HashMap<String, CancellationToken>>>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct MontageInput {
+    pub path: String,
+    pub start_seconds: f64,
+    pub end_seconds: f64,
+}
+
 impl TransformationManager {
     pub fn new(database: Database) -> Result<Self, AppError> {
         let mut tasks = HashMap::new();
@@ -103,12 +110,85 @@ impl TransformationManager {
         let manager = self.clone();
         let task_id = task.id.clone();
         tauri::async_runtime::spawn(async move {
-            if let Err(error) = manager.run(app.clone(), &task_id, request, token).await {
+            if let Err(error) = manager
+                .run(app.clone(), &task_id, request, None, token)
+                .await
+            {
                 let _ = manager.finish(
                     &app,
                     &task_id,
                     TransformationState::Failed,
                     "Transformation failed",
+                    Some(error.message),
+                );
+            }
+            if let Ok(mut cancellations) = manager.cancellations.lock() {
+                cancellations.remove(&task_id);
+            }
+        });
+        Ok(task)
+    }
+
+    pub(crate) fn start_montage(
+        &self,
+        app: AppHandle,
+        output_path: String,
+        overwrite: bool,
+        fade_seconds: f64,
+        inputs: Vec<MontageInput>,
+    ) -> Result<TransformationTask, AppError> {
+        let (output_path, inputs) = validate_montage_request(output_path, fade_seconds, inputs)?;
+        let total_duration_seconds = inputs
+            .iter()
+            .map(|input| input.end_seconds - input.start_seconds)
+            .sum::<f64>();
+        let operation = TransformationOperation::Montage {
+            segment_count: inputs.len(),
+            total_duration_seconds,
+            fade_seconds,
+        };
+        let request = StartTransformationRequest {
+            input_path: format!("{} Library clips", inputs.len()),
+            output_path,
+            operation: operation.clone(),
+            overwrite,
+        };
+        let now = Utc::now();
+        let task = TransformationTask {
+            id: Uuid::new_v4().to_string(),
+            input_path: request.input_path.clone(),
+            output_path: request.output_path.clone(),
+            operation,
+            state: TransformationState::Queued,
+            progress_percent: 0.0,
+            current_operation: "Waiting for FFmpeg".to_owned(),
+            error: None,
+            created_at: now,
+            updated_at: now,
+            completed_at: None,
+        };
+        self.database.save_transformation_task(&task)?;
+        self.tasks
+            .lock()
+            .map_err(|_| unavailable())?
+            .insert(task.id.clone(), task.clone());
+        let token = CancellationToken::new();
+        self.cancellations
+            .lock()
+            .map_err(|_| unavailable())?
+            .insert(task.id.clone(), token.clone());
+        let manager = self.clone();
+        let task_id = task.id.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Err(error) = manager
+                .run(app.clone(), &task_id, request, Some(inputs), token)
+                .await
+            {
+                let _ = manager.finish(
+                    &app,
+                    &task_id,
+                    TransformationState::Failed,
+                    "Montage export failed",
                     Some(error.message),
                 );
             }
@@ -141,6 +221,7 @@ impl TransformationManager {
         app: AppHandle,
         id: &str,
         request: StartTransformationRequest,
+        montage_inputs: Option<Vec<MontageInput>>,
         token: CancellationToken,
     ) -> Result<(), AppError> {
         let ffmpeg = managed::resolve("ffmpeg").ok_or_else(|| {
@@ -169,7 +250,13 @@ impl TransformationManager {
         } else {
             command.arg("-n");
         }
-        if let Err(error) = append_operation_arguments(&mut command, &staged_request, &token).await
+        if let Err(error) = append_operation_arguments(
+            &mut command,
+            &staged_request,
+            montage_inputs.as_deref(),
+            &token,
+        )
+        .await
         {
             if token.is_cancelled() {
                 self.finish(&app, id, TransformationState::Cancelled, "Cancelled", None)?;
@@ -575,6 +662,12 @@ fn unavailable() -> AppError {
 fn validate_request(
     mut request: StartTransformationRequest,
 ) -> Result<StartTransformationRequest, AppError> {
+    if matches!(request.operation, TransformationOperation::Montage { .. }) {
+        return Err(AppError::new(
+            "invalid_transformation_operation",
+            "Montage exports must be started from a saved Library montage.",
+        ));
+    }
     let input = PathBuf::from(&request.input_path)
         .canonicalize()
         .map_err(|_| AppError::new("invalid_input_path", "Choose an existing local media file."))?;
@@ -617,18 +710,90 @@ fn validate_request(
     Ok(request)
 }
 
+fn validate_montage_request(
+    output_path: String,
+    fade_seconds: f64,
+    inputs: Vec<MontageInput>,
+) -> Result<(String, Vec<MontageInput>), AppError> {
+    if inputs.is_empty() || inputs.len() > 50 {
+        return Err(AppError::new(
+            "invalid_library_montage_segments",
+            "A montage must contain between 1 and 50 segments.",
+        ));
+    }
+    if !fade_seconds.is_finite() || !(0.0..=5.0).contains(&fade_seconds) {
+        return Err(AppError::new(
+            "invalid_library_montage_fade",
+            "Montage fades must be between zero and five seconds.",
+        ));
+    }
+    let output = PathBuf::from(&output_path);
+    if !output.is_absolute()
+        || output
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_none_or(|value| !value.eq_ignore_ascii_case("mp4"))
+    {
+        return Err(AppError::new(
+            "invalid_output_path",
+            "Choose an absolute MP4 output path for the montage.",
+        ));
+    }
+    let mut resolved = Vec::with_capacity(inputs.len());
+    let mut total_duration = 0.0;
+    for input in inputs {
+        if !input.start_seconds.is_finite()
+            || !input.end_seconds.is_finite()
+            || input.start_seconds < 0.0
+            || input.end_seconds - input.start_seconds < 0.1
+        {
+            return Err(AppError::new(
+                "invalid_library_montage_range",
+                "Every montage segment needs a valid clip range of at least 0.1 seconds.",
+            ));
+        }
+        let path = PathBuf::from(&input.path).canonicalize().map_err(|_| {
+            AppError::new(
+                "library_montage_source_missing",
+                "A montage source is no longer available. Repair or remove that segment.",
+            )
+        })?;
+        if !path.is_file() || path == output {
+            return Err(AppError::new(
+                "invalid_library_montage_source",
+                "Every montage source must be an available file different from the output.",
+            ));
+        }
+        total_duration += input.end_seconds - input.start_seconds;
+        resolved.push(MontageInput {
+            path: path.to_string_lossy().into_owned(),
+            start_seconds: input.start_seconds,
+            end_seconds: input.end_seconds,
+        });
+    }
+    if total_duration > 21_600.0 {
+        return Err(AppError::new(
+            "library_montage_duration_limit",
+            "A montage can contain at most six hours of source video.",
+        ));
+    }
+    Ok((output_path, resolved))
+}
+
 fn operation_label(operation: &TransformationOperation) -> &'static str {
     match operation {
         TransformationOperation::Trim { .. } => "Trimming media",
         TransformationOperation::ExtractAudio { .. } => "Extracting audio",
         TransformationOperation::Transcode { .. } => "Converting media",
         TransformationOperation::SplitChapters => "Splitting chapters",
+        TransformationOperation::Montage { .. } => "Rendering montage",
     }
 }
 
 async fn append_operation_arguments(
     command: &mut Command,
     request: &StartTransformationRequest,
+    montage_inputs: Option<&[MontageInput]>,
     token: &CancellationToken,
 ) -> Result<(), AppError> {
     match &request.operation {
@@ -718,8 +883,118 @@ async fn append_operation_arguments(
                 .arg("1")
                 .arg(output.join("chapter-%03d.mkv"));
         }
+        TransformationOperation::Montage { fade_seconds, .. } => {
+            let inputs = montage_inputs.ok_or_else(|| {
+                AppError::new(
+                    "invalid_transformation_operation",
+                    "Montage source details were not available.",
+                )
+            })?;
+            let mut audio_streams = Vec::with_capacity(inputs.len());
+            for input in inputs {
+                audio_streams.push(probe_has_audio(&input.path, token).await?);
+                command
+                    .arg("-ss")
+                    .arg(input.start_seconds.to_string())
+                    .arg("-t")
+                    .arg((input.end_seconds - input.start_seconds).to_string())
+                    .arg("-i")
+                    .arg(&input.path);
+            }
+
+            let mut filters = Vec::with_capacity(inputs.len() * 2 + 1);
+            let mut concat_inputs = String::new();
+            for (index, input) in inputs.iter().enumerate() {
+                let duration = input.end_seconds - input.start_seconds;
+                let fade = fade_seconds.min(duration / 2.0);
+                let video_fades = if fade > 0.0 {
+                    format!(
+                        ",fade=t=in:st=0:d={fade:.6},fade=t=out:st={:.6}:d={fade:.6}",
+                        duration - fade
+                    )
+                } else {
+                    String::new()
+                };
+                filters.push(format!(
+                    "[{index}:v:0]setpts=PTS-STARTPTS,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=30,format=yuv420p{video_fades}[v{index}]"
+                ));
+
+                let audio_fades = if fade > 0.0 {
+                    format!(
+                        ",afade=t=in:st=0:d={fade:.6},afade=t=out:st={:.6}:d={fade:.6}",
+                        duration - fade
+                    )
+                } else {
+                    String::new()
+                };
+                if audio_streams[index] {
+                    filters.push(format!(
+                        "[{index}:a:0]atrim=duration={duration:.6},asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo{audio_fades}[a{index}]"
+                    ));
+                } else {
+                    filters.push(format!(
+                        "anullsrc=r=48000:cl=stereo,atrim=duration={duration:.6},asetpts=PTS-STARTPTS{audio_fades}[a{index}]"
+                    ));
+                }
+                concat_inputs.push_str(&format!("[v{index}][a{index}]"));
+            }
+            filters.push(format!(
+                "{concat_inputs}concat=n={}:v=1:a=1[vout][aout]",
+                inputs.len()
+            ));
+            command
+                .arg("-filter_complex")
+                .arg(filters.join(";"))
+                .arg("-map")
+                .arg("[vout]")
+                .arg("-map")
+                .arg("[aout]")
+                .arg("-c:v")
+                .arg("libx264")
+                .arg("-preset")
+                .arg("medium")
+                .arg("-crf")
+                .arg("20")
+                .arg("-c:a")
+                .arg("aac")
+                .arg("-b:a")
+                .arg("192k")
+                .arg("-movflags")
+                .arg("+faststart")
+                .arg(&request.output_path);
+        }
     }
     Ok(())
+}
+
+async fn probe_has_audio(input: &str, token: &CancellationToken) -> Result<bool, AppError> {
+    let ffprobe = managed::resolve("ffprobe").ok_or_else(|| {
+        AppError::new(
+            "ffprobe_missing",
+            "Install ffprobe before exporting a montage.",
+        )
+    })?;
+    let mut command = Command::new(ffprobe);
+    crate::utils::process::sanitize_tokio_command(&mut command);
+    command.args([
+        "-v",
+        "error",
+        "-select_streams",
+        "a:0",
+        "-show_entries",
+        "stream=index",
+        "-of",
+        "csv=p=0",
+        input,
+    ]);
+    let output = run_ffprobe(&mut command, token).await?;
+    if !output.status.success() {
+        return Err(AppError::new(
+            "ffprobe_failed",
+            "ffprobe could not inspect a montage source.",
+        ));
+    }
+    Ok(!output.stdout.iter().all(u8::is_ascii_whitespace))
 }
 
 async fn run_ffprobe(
@@ -795,6 +1070,13 @@ async fn operation_duration(
     } = request.operation
     {
         return Ok(Some(end_seconds - start_seconds));
+    }
+    if let TransformationOperation::Montage {
+        total_duration_seconds,
+        ..
+    } = request.operation
+    {
+        return Ok(Some(total_duration_seconds));
     }
     probe_duration(&request.input_path, token).await
 }
@@ -885,6 +1167,50 @@ mod tests {
             overwrite: false,
         };
         assert!(validate_request(request).is_err());
+    }
+
+    #[test]
+    fn rejects_public_montage_operations_and_validates_internal_sources() {
+        let public = StartTransformationRequest {
+            input_path: "/missing".to_owned(),
+            output_path: "/tmp/out.mp4".to_owned(),
+            operation: TransformationOperation::Montage {
+                segment_count: 1,
+                total_duration_seconds: 2.0,
+                fade_seconds: 0.0,
+            },
+            overwrite: false,
+        };
+        let error = validate_request(public).expect_err("public montage rejected");
+        assert_eq!(error.code, "invalid_transformation_operation");
+
+        let directory = tempdir().expect("temporary directory");
+        let input = directory.path().join("source.mp4");
+        std::fs::write(&input, b"fixture").expect("source file");
+        let output = directory.path().join("montage.mp4");
+        let (_, inputs) = validate_montage_request(
+            output.to_string_lossy().into_owned(),
+            0.25,
+            vec![MontageInput {
+                path: input.to_string_lossy().into_owned(),
+                start_seconds: 1.0,
+                end_seconds: 3.0,
+            }],
+        )
+        .expect("valid internal montage");
+        assert_eq!(inputs.len(), 1);
+
+        let invalid = validate_montage_request(
+            directory
+                .path()
+                .join("montage.mkv")
+                .to_string_lossy()
+                .into_owned(),
+            0.0,
+            inputs,
+        )
+        .expect_err("MP4 output required");
+        assert_eq!(invalid.code, "invalid_output_path");
     }
 
     #[test]

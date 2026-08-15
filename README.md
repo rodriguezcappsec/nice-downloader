@@ -164,21 +164,36 @@ automatic, or prevent automatic creation; copies of 2 GiB or larger are always
 confirmed. Compatibility cache usage and clearing are available under
 Settings > Desktop and accessibility.
 
+Nice Downloader also detects an optional system `mpv` installation. Copy-consent
+and embedded-playback error screens offer **Play with native mpv**, which opens
+the original cataloged file through mpv's FFmpeg decoders without creating a
+compatibility copy. Rust resolves the path from the catalog UUID, launches mpv
+without shell interpolation or user configuration, tracks one native session,
+and synchronizes its resume position back to the Library. On Wayland, mpv owns a
+separate native window because foreign-surface embedding is not portable.
+
 If WebKitGTK still rejects the lossless AV1 timing copy, the player offers a
 separate H.264/AAC MP4 fallback. This second-stage copy requires explicit
 confirmation because it re-encodes video, may take several minutes, and may be
 larger. It is never created by the Automatic stream-copy preference.
 
+Release AppImages include a curated GStreamer playback plugin set and its
+matching plugin scanner. This prevents the bundled GStreamer core from hiding
+or mixing with incompatible host plugins. Native development and distribution
+packages continue to use the operating system's GStreamer runtime:
+
 ```bash
 # Arch Linux
-sudo pacman -S --needed gst-plugins-good gst-libav
+sudo pacman -S --needed gst-plugins-good gst-libav mpv
 
 # Debian or Ubuntu
-sudo apt install gstreamer1.0-plugins-good gstreamer1.0-libav
+sudo apt install gstreamer1.0-plugins-good gstreamer1.0-libav mpv
 ```
 
 `gst-plugins-good` supplies the required audio-output element. `gst-libav` is
-recommended for broader codec support but is not required to build the app.
+recommended for broader codec support. Compatibility-copy consent is requested
+only after the runtime check succeeds; missing plugins do not trigger a
+pointless H.264 copy.
 
 ## Quick start
 
@@ -257,7 +272,9 @@ Debian/Ubuntu build host:
 sudo apt update
 sudo apt install build-essential curl wget file libssl-dev \
   libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf \
-  python3 python3-venv unzip gstreamer1.0-plugins-good gstreamer1.0-libav
+  python3 python3-venv unzip gstreamer1.0-plugins-base \
+  gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+  gstreamer1.0-libav gstreamer1.0-pulseaudio
 ```
 
 Arch Linux build host:
@@ -265,7 +282,7 @@ Arch Linux build host:
 ```bash
 sudo pacman -S --needed base-devel curl wget file openssl webkit2gtk-4.1 \
   libappindicator-gtk3 librsvg patchelf python python-pip unzip \
-  gstreamer gst-plugins-good gst-libav
+  gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad gst-libav
 ```
 
 Building an AppImage locally on Arch additionally requires `bubblewrap`; use
@@ -326,9 +343,10 @@ cargo test --manifest-path src-tauri/Cargo.toml --all-targets --no-fail-fast
 Build packages:
 
 ```bash
-# Linux x86-64: stage verified engines, then build AppImage and DEB
+# Linux x86-64: stage verified engines, then build DEB and AppImage
 npm run engines:prepare
-npm run tauri:build -- --bundles appimage,deb
+npm run tauri:build -- --bundles deb
+npm run tauri:build:appimage:arch
 
 # Arch Linux AppImage workaround (also stages engines)
 sudo pacman -S --needed bubblewrap

@@ -9,6 +9,11 @@ export type ViewId =
   | "compare"
   | "imageCompare"
   | "curation"
+  | "montages"
+  | "similarity"
+  | "themes"
+  | "sharing"
+  | "health"
   | "presets"
   | "settings";
 
@@ -385,7 +390,8 @@ export type TransformationOperation =
   | { type: "trim"; startSeconds: number; endSeconds: number }
   | { type: "extractAudio"; codec: "mp3" | "aac" | "opus" }
   | { type: "transcode"; container: string; videoCodec: "copy" | "h264" | "hevc" | "vp9" | "av1"; audioCodec: "copy" | "aac" | "opus" }
-  | { type: "splitChapters" };
+  | { type: "splitChapters" }
+  | { type: "montage"; segmentCount: number; totalDurationSeconds: number; fadeSeconds: number };
 
 export interface StartTransformationRequest {
   inputPath: string;
@@ -462,6 +468,7 @@ export interface LibraryQueryRequest {
   creators: string[];
   series: string[];
   sites: string[];
+  theme?: string | null;
   rating?: string | null;
   collectionId?: string | null;
   favoriteOnly: boolean;
@@ -490,6 +497,26 @@ export interface LibrarySearchStatus {
   consistent: boolean;
 }
 
+export type LibraryHealthIssueKind = "missing" | "changed" | "metadataPending" | "metadataFailed" | "compatibilityRisk";
+
+export interface LibraryHealthIssue {
+  itemId: string;
+  title: string;
+  mediaKind?: LibraryMediaKind | null;
+  kinds: LibraryHealthIssueKind[];
+}
+
+export interface LibraryHealthSummary {
+  totalItems: number;
+  availableItems: number;
+  missingItems: number;
+  changedItems: number;
+  metadataPendingItems: number;
+  metadataFailedItems: number;
+  compatibilityRiskItems: number;
+  issues: LibraryHealthIssue[];
+}
+
 export interface LibraryQueryResult {
   items: LibraryItem[];
   totalItems: number;
@@ -510,6 +537,12 @@ export interface LibraryFolderFacet {
   treeCount: number;
 }
 
+export interface LibraryThemeFacet {
+  key: string;
+  label: string;
+  itemCount: number;
+}
+
 export interface LibraryFacets {
   totalItems: number;
   availableItems: number;
@@ -519,7 +552,73 @@ export interface LibraryFacets {
   creators: string[];
   series: string[];
   sites: string[];
+  themes: LibraryThemeFacet[];
   folders: LibraryFolderFacet[];
+}
+
+export type LibraryThemeAnalysisMode = "fast" | "deep";
+export type LibraryThemeAnalysisScope = "all" | "folder" | "items";
+
+export interface LibraryThemeSettings {
+  enabled: boolean;
+  model: string;
+  mode: LibraryThemeAnalysisMode;
+}
+
+export interface StartLibraryThemeAnalysisRequest {
+  scope: LibraryThemeAnalysisScope;
+  maxVideos: number;
+  sourceId?: string | null;
+  folderPath?: string | null;
+  folderScope: LibraryFolderScope;
+  itemIds: string[];
+}
+
+export interface LibraryThemeProviderStatus {
+  available: boolean;
+  installedModels: string[];
+  selectedModelAvailable: boolean;
+  detail: string;
+}
+
+export interface LibraryThemeAssignment {
+  key: string;
+  label: string;
+  confidence: number;
+  evidence: string[];
+}
+
+export interface LibraryThemeAnalysis {
+  itemId: string;
+  title: string;
+  model: string;
+  mode: LibraryThemeAnalysisMode;
+  summary: string;
+  overallConfidence: number;
+  themes: LibraryThemeAssignment[];
+  analyzedAt: string;
+}
+
+export interface LibraryThemeIndexStatus {
+  eligibleItems: number;
+  indexedItems: number;
+  staleItems: number;
+  themeCount: number;
+}
+
+export type LibraryThemeJobState = "running" | "completed" | "failed" | "cancelled";
+
+export interface LibraryThemeJob {
+  id: string;
+  state: LibraryThemeJobState;
+  checkedItems: number;
+  totalItems: number;
+  indexedItems: number;
+  failedItems: number;
+  currentTitle?: string | null;
+  error?: string | null;
+  startedAt: string;
+  updatedAt: string;
 }
 
 export interface LibraryMetadataFields {
@@ -607,11 +706,87 @@ export interface LibraryPlaybackPreflight {
   requiresConfirmation: boolean;
 }
 
+export interface LibraryTranscriptMatch {
+  itemId: string;
+  startSeconds: number;
+  endSeconds: number;
+  text: string;
+  language?: string | null;
+}
+
+export interface LibraryTranscriptIndexStatus {
+  indexedItems: number;
+  cueCount: number;
+}
+
+export type LibraryVisualSimilarityState = "running" | "completed" | "failed" | "cancelled";
+
+export interface LibraryVisualSimilarityJob {
+  id: string;
+  state: LibraryVisualSimilarityState;
+  checkedItems: number;
+  totalItems: number;
+  indexedItems: number;
+  failedItems: number;
+  currentTitle?: string | null;
+  error?: string | null;
+  startedAt: string;
+  updatedAt: string;
+}
+
+export interface LibraryVisualSimilarityStatus {
+  eligibleItems: number;
+  indexedItems: number;
+  staleItems: number;
+}
+
+export interface LibraryVisualSimilarityMatch {
+  item: LibraryItem;
+  similarityPercent: number;
+  hammingDistance: number;
+}
+
+export interface StartLocalShareRequest {
+  itemIds: string[];
+  expiresMinutes: number;
+}
+
+export interface LocalShareSession {
+  id: string;
+  url: string;
+  itemCount: number;
+  expiresAt: string;
+  reachableOnLan: boolean;
+}
+
+export interface LibraryPlaybackPreparationProgress {
+  itemId: string;
+  phase: "queued" | "copying" | "encoding" | "finalizing";
+  progressPercent?: number | null;
+  processedSeconds?: number | null;
+  durationSeconds?: number | null;
+  reencodeRequired: boolean;
+}
+
 export interface LibraryPlaybackCacheStatus {
   fileCount: number;
   totalBytes: number;
   maxFiles: number;
   maxBytes: number;
+}
+
+export interface NativePlaybackSession {
+  itemId: string;
+  title: string;
+  resumedAtSeconds: number;
+  durationSeconds: number;
+}
+
+export interface NativePlaybackStatus {
+  available: boolean;
+  version?: string | null;
+  active?: NativePlaybackSession | null;
+  detail: string;
 }
 
 export interface LibraryCacheResult {
@@ -673,6 +848,39 @@ export interface SaveLibraryMomentRequest {
   startSeconds: number;
   endSeconds?: number | null;
   color: LibraryMomentColor;
+}
+
+export interface LibraryMontageSegment {
+  itemId: string;
+  label: string;
+  startSeconds: number;
+  endSeconds: number;
+}
+
+export interface LibraryMontage {
+  id: string;
+  name: string;
+  notes: string;
+  fadeSeconds: number;
+  segments: LibraryMontageSegment[];
+  expectedSegmentCount: number;
+  incomplete: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SaveLibraryMontageRequest {
+  id?: string | null;
+  name: string;
+  notes: string;
+  fadeSeconds: number;
+  segments: LibraryMontageSegment[];
+}
+
+export interface StartLibraryMontageExportRequest {
+  montageId: string;
+  outputPath: string;
+  overwrite: boolean;
 }
 
 export interface StartLibraryClipExportRequest {

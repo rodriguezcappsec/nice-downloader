@@ -17,13 +17,16 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button, Input, Select, Textarea } from "../../components/ui";
 import { formatBytes, formatDuration } from "../../lib/format";
+import { canOfferPlaybackFallback, createPlaybackError, EMBEDDED_PLAYBACK_TIMEOUT_MS } from "../../lib/playback";
 import { api, normalizeError } from "../../lib/tauri";
 import { useAppStore } from "../../stores/app-store";
 import type {
+  AppError,
   LibraryCompareSession,
   LibraryCompareSessionItem,
   LibraryItem,
   LibraryPlaybackPreflight,
+  LibraryPlaybackPreparationProgress,
   LibraryPlaybackSession,
   LibrarySource,
 } from "../../types";
@@ -32,6 +35,12 @@ type PendingPlayback = {
   preflight: LibraryPlaybackPreflight;
   fallback: boolean;
 };
+
+function ComparePreparationStatus({ preparation, cancelling }: { preparation: LibraryPlaybackPreparationProgress | null; cancelling: boolean }) {
+  const percent = preparation?.progressPercent != null ? Math.round(preparation.progressPercent) : null;
+  const label = cancelling ? "Cancelling…" : preparation?.phase === "queued" ? "Queued…" : preparation?.phase === "finalizing" ? "Finalizing…" : preparation?.reencodeRequired ? "Encoding…" : "Copying…";
+  return <div className="mt-3 space-y-2" role="status" aria-live="polite"><div className="flex items-center justify-center gap-2 text-[10px] text-accent"><LoaderCircle className="animate-spin" size={12} /> {label}{percent != null ? ` ${percent}%` : ""}</div><div className="mx-auto h-1.5 max-w-xs overflow-hidden rounded-full bg-white/10" role="progressbar" aria-label="Playback copy preparation" aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent ?? undefined}><div className={`h-full bg-accent transition-[width] ${percent == null ? "w-1/3 animate-pulse" : ""}`} style={percent != null ? { width: `${percent}%` } : undefined} /></div></div>;
+}
 
 export function ComparePage() {
   const itemIds = useAppStore((state) => state.compareItemIds);
@@ -332,11 +341,16 @@ function CompareVideoTile({ item, position, sourceName, audible, multipleAudio, 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const mounted = useRef(true);
   const progress = useRef({ position: 0, duration: 0, lastSaved: 0, completed: false });
+  const playbackWatchdog = useRef<number | null>(null);
+  const playbackProgress = useRef<{ position: number; observedAt: number } | null>(null);
   const [session, setSession] = useState<LibraryPlaybackSession | null>(null);
   const [pending, setPending] = useState<PendingPlayback | null>(null);
   const [loading, setLoading] = useState(!item.missing && item.mediaKind === "video");
   const [busy, setBusy] = useState(false);
-  const [playbackError, setPlaybackError] = useState<string | null>(null);
+  const [preparation, setPreparation] = useState<LibraryPlaybackPreparationProgress | null>(null);
+  const [cancelBusy, setCancelBusy] = useState(false);
+  const cancelRequested = useRef(false);
+  const [playbackError, setPlaybackError] = useState<AppError | null>(null);
   const [playbackRate, setPlaybackRate] = useState(initialPlayback?.playbackRate || 1);
 
   useEffect(() => {
@@ -383,7 +397,7 @@ function CompareVideoTile({ item, position, sourceName, audible, multipleAudio, 
       })
       .catch((error) => {
         if (!disposed) {
-          setPlaybackError(normalizeError(error).message);
+          setPlaybackError(normalizeError(error));
           setLoading(false);
         }
       });
@@ -393,11 +407,90 @@ function CompareVideoTile({ item, position, sourceName, audible, multipleAudio, 
   useEffect(() => {
     if (!session || !loading) return;
     const timer = window.setTimeout(() => {
-      setPlaybackError("Embedded playback did not become ready. Try the H.264 compatibility option or your system player.");
+      setPlaybackError(createPlaybackError("embedded_playback_timeout", "Embedded playback did not become ready. Try the H.264 compatibility option or your system player."));
       setLoading(false);
-    }, 8_000);
+    }, EMBEDDED_PLAYBACK_TIMEOUT_MS);
     return () => window.clearTimeout(timer);
   }, [loading, session]);
+
+  function clearPlaybackWatchdog() {
+    if (playbackWatchdog.current == null) return;
+    window.clearTimeout(playbackWatchdog.current);
+    playbackWatchdog.current = null;
+  }
+
+  function notePlaybackProgress(video: HTMLVideoElement) {
+    if (!Number.isFinite(video.currentTime)) return;
+    const previous = playbackProgress.current;
+    if (!previous || Math.abs(video.currentTime - previous.position) >= 0.01) {
+      playbackProgress.current = { position: video.currentTime, observedAt: performance.now() };
+    }
+  }
+
+  function armPlaybackWatchdog() {
+    if (playbackWatchdog.current != null) return;
+    const checkProgress = () => {
+      playbackWatchdog.current = null;
+      const video = videoRef.current;
+      if (!video || video.paused || video.ended) return;
+      notePlaybackProgress(video);
+      const observedAt = playbackProgress.current?.observedAt ?? performance.now();
+      const stalledFor = performance.now() - observedAt;
+      if (stalledFor < EMBEDDED_PLAYBACK_TIMEOUT_MS) {
+        playbackWatchdog.current = window.setTimeout(
+          checkProgress,
+          Math.max(50, EMBEDDED_PLAYBACK_TIMEOUT_MS - stalledFor),
+        );
+        return;
+      }
+      video.pause();
+      onReady(item.id, false);
+      setLoading(false);
+      setPlaybackError(createPlaybackError(
+        "embedded_playback_timeout",
+        "Embedded playback stalled after starting. Try an H.264 copy or open the original in your system player.",
+      ));
+    };
+    playbackWatchdog.current = window.setTimeout(checkProgress, EMBEDDED_PLAYBACK_TIMEOUT_MS);
+  }
+
+  function startPlaybackWatchdog() {
+    clearPlaybackWatchdog();
+    const video = videoRef.current;
+    if (video && Number.isFinite(video.currentTime)) {
+      playbackProgress.current = { position: video.currentTime, observedAt: performance.now() };
+    }
+    armPlaybackWatchdog();
+  }
+
+  function armPlaybackWatchdogWhilePlaying() {
+    const video = videoRef.current;
+    if (video && !video.paused && !video.ended) armPlaybackWatchdog();
+  }
+
+  useEffect(() => () => {
+    clearPlaybackWatchdog();
+    playbackProgress.current = null;
+  }, [item.id, session?.url]);
+
+  useEffect(() => {
+    if (!busy || !pending) {
+      setPreparation(null);
+      return;
+    }
+    let disposed = false;
+    const refresh = () => {
+      void api.getLibraryPlaybackPreparation(item.id)
+        .then((current) => { if (!disposed && current) setPreparation(current); })
+        .catch(() => {});
+    };
+    refresh();
+    const interval = window.setInterval(refresh, 300);
+    return () => {
+      disposed = true;
+      window.clearInterval(interval);
+    };
+  }, [busy, item.id, pending]);
 
   useEffect(() => () => {
     const snapshot = progress.current;
@@ -454,6 +547,8 @@ function CompareVideoTile({ item, position, sourceName, audible, multipleAudio, 
     if (!pending || busy) return;
     setBusy(true);
     setLoading(true);
+    setPreparation(null);
+    cancelRequested.current = false;
     try {
       const prepared = pending.fallback
         ? await api.prepareLibraryPlaybackFallback(item.id, true)
@@ -467,16 +562,32 @@ function CompareVideoTile({ item, position, sourceName, audible, multipleAudio, 
     } catch (error) {
       if (mounted.current) {
         setPending(null);
-        setPlaybackError(normalizeError(error).message);
+        setPlaybackError(normalizeError(error));
         setLoading(false);
       }
     } finally {
+      cancelRequested.current = false;
       if (mounted.current) setBusy(false);
+    }
+  }
+
+  async function cancelPendingPreparation() {
+    if (!busy || cancelBusy || !preparation) return;
+    cancelRequested.current = true;
+    setCancelBusy(true);
+    try {
+      await api.cancelLibraryPlaybackPreparation(item.id);
+    } catch (error) {
+      cancelRequested.current = false;
+      setError(normalizeError(error));
+    } finally {
+      if (mounted.current) setCancelBusy(false);
     }
   }
 
   async function retryWithFallback() {
     if (busy) return;
+    clearPlaybackWatchdog();
     setBusy(true);
     videoRef.current?.pause();
     captureProgress(false);
@@ -502,7 +613,7 @@ function CompareVideoTile({ item, position, sourceName, audible, multipleAudio, 
       }
     } catch (error) {
       if (mounted.current) {
-        setPlaybackError(normalizeError(error).message);
+        setPlaybackError(normalizeError(error));
         setLoading(false);
       }
     } finally {
@@ -531,8 +642,8 @@ function CompareVideoTile({ item, position, sourceName, audible, multipleAudio, 
     <div className="relative flex aspect-video min-h-56 items-center justify-center overflow-hidden bg-black">
       {loading ? <div className="absolute inset-0 z-[2] flex items-center justify-center gap-2 bg-black/80 text-xs text-white/55" role="status"><LoaderCircle className="animate-spin text-accent" size={16} /> Preparing video {position}…</div> : null}
       {unavailable ? <div className="max-w-md px-7 text-center"><Film className="mx-auto text-white/30" size={30} /><h3 className="mt-3 text-sm font-semibold">Video unavailable</h3><p className="mt-2 text-xs leading-5 text-white/50">{item.missing ? "This file is missing from its indexed location." : "Only videos can be used in the comparison grid."}</p><Button variant="secondary" className="mt-4 h-8 text-xs" onClick={onRemove}>Remove tile</Button></div> : null}
-      {pending ? <div className="max-w-lg px-7 py-6 text-center"><Film className="mx-auto text-amber-300/70" size={30} /><h3 className="mt-3 text-sm font-semibold">Compatibility copy required</h3><p className="mt-2 text-xs leading-5 text-white/55">{pending.preflight.reason || "This video needs a private compatibility copy for embedded playback."}</p><p className="mt-2 text-[10px] text-white/40">Estimated copy: {formatBytes(pending.preflight.estimatedCopyBytes)} · original remains unchanged</p><div className="mt-4 flex flex-wrap justify-center gap-2"><Button variant="secondary" className="h-8 text-xs" disabled={busy} onClick={() => { setPending(null); setPlaybackError("Compatibility copy was skipped for this tile."); }}><X size={13} /> Skip</Button><Button className="h-8 text-xs" disabled={busy} onClick={() => void approvePending()}>{busy ? <LoaderCircle className="animate-spin" size={13} /> : <Film size={13} />} Create copy</Button></div></div> : null}
-      {playbackError && !pending ? <div className="max-w-lg px-7 py-6 text-center"><Film className="mx-auto text-white/30" size={30} /><h3 className="mt-3 text-sm font-semibold">Could not play this tile</h3><p className="mt-2 text-xs leading-5 text-white/50">{playbackError}</p><div className="mt-4 flex flex-wrap justify-center gap-2"><Button variant="secondary" className="h-8 text-xs" disabled={busy} onClick={() => void retryWithFallback()}><RotateCcw size={13} /> Try H.264 copy</Button><Button className="h-8 text-xs" onClick={() => void openExternal()}><ExternalLink size={13} /> System player</Button></div></div> : null}
+      {pending ? <div className="max-w-lg px-7 py-6 text-center"><Film className="mx-auto text-amber-300/70" size={30} /><h3 className="mt-3 text-sm font-semibold">Compatibility copy required</h3><p className="mt-2 text-xs leading-5 text-white/55">{pending.preflight.reason || "This video needs a private compatibility copy for embedded playback."}</p><p className="mt-2 text-[10px] text-white/40">Estimated copy: {formatBytes(pending.preflight.estimatedCopyBytes)} · original remains unchanged</p>{busy ? <ComparePreparationStatus preparation={preparation} cancelling={cancelBusy || cancelRequested.current} /> : null}<div className="mt-4 flex flex-wrap justify-center gap-2"><Button variant="secondary" className="h-8 text-xs" disabled={cancelBusy || (busy && !preparation)} onClick={busy ? () => void cancelPendingPreparation() : () => { setPending(null); setPlaybackError(createPlaybackError("embedded_playback_copy_skipped", "Compatibility copy was skipped for this tile.")); }}><X size={13} /> {busy ? cancelBusy ? "Cancelling…" : "Cancel copy" : "Skip"}</Button><Button className="h-8 text-xs" disabled={busy} onClick={() => void approvePending()}>{busy ? <LoaderCircle className="animate-spin" size={13} /> : <Film size={13} />} Create copy</Button></div></div> : null}
+      {playbackError && !pending ? <div className="max-w-lg px-7 py-6 text-center"><Film className="mx-auto text-white/30" size={30} /><h3 className="mt-3 text-sm font-semibold">Could not play this tile</h3><p className="mt-2 text-xs leading-5 text-white/50">{playbackError.message}</p><div className="mt-4 flex flex-wrap justify-center gap-2">{canOfferPlaybackFallback(playbackError) ? <Button variant="secondary" className="h-8 text-xs" disabled={busy} onClick={() => void retryWithFallback()}><RotateCcw size={13} /> Try H.264 copy</Button> : null}<Button className="h-8 text-xs" onClick={() => void openExternal()}><ExternalLink size={13} /> System player</Button></div></div> : null}
       {session && !playbackError && !pending ? <video
         ref={registerVideo}
         aria-label={`Comparison video ${position}: ${item.title}`}
@@ -548,10 +659,14 @@ function CompareVideoTile({ item, position, sourceName, audible, multipleAudio, 
           if (!multipleAudio && !audible && video && !video.muted) onRequestAudio();
         }}
         onLoadedMetadata={onLoadedMetadata}
-        onTimeUpdate={() => captureProgress(false)}
-        onPause={() => captureProgress(false)}
-        onEnded={() => captureProgress(true)}
-        onError={() => { onReady(item.id, false); setLoading(false); setPlaybackError("The WebView could not decode this container or codec."); }}
+        onPlay={startPlaybackWatchdog}
+        onPlaying={clearPlaybackWatchdog}
+        onWaiting={armPlaybackWatchdogWhilePlaying}
+        onStalled={armPlaybackWatchdogWhilePlaying}
+        onTimeUpdate={() => { const video = videoRef.current; if (video) notePlaybackProgress(video); captureProgress(false); }}
+        onPause={() => { clearPlaybackWatchdog(); captureProgress(false); }}
+        onEnded={() => { clearPlaybackWatchdog(); captureProgress(true); }}
+        onError={() => { clearPlaybackWatchdog(); onReady(item.id, false); setLoading(false); setPlaybackError(createPlaybackError("embedded_playback_decode_failed", "The WebView could not decode this container or codec.")); }}
       >{session.subtitles.map((track) => <track key={track.url} kind="subtitles" src={track.url} srcLang={track.language || "und"} label={track.label} />)}</video> : null}
     </div>
     <footer className="flex min-h-11 flex-wrap items-center gap-3 border-t border-white/10 bg-[#0c0f14] px-4 py-2 text-[10px] text-white/40"><span>{item.width && item.height ? `${item.width} × ${item.height}` : "Resolution unknown"}{item.container ? ` · ${item.container.toLocaleUpperCase()}` : ""}</span><label className="ml-auto flex items-center gap-1.5"><span>Speed</span><Select className="h-7 w-20 border-white/10 bg-white/5 text-[10px] text-white" value={playbackRate} disabled={!session} onChange={(event) => { const rate = Number(event.target.value); setPlaybackRate(rate); if (videoRef.current) videoRef.current.playbackRate = rate; }}><option value={0.5}>0.5×</option><option value={0.75}>0.75×</option><option value={1}>1×</option><option value={1.25}>1.25×</option><option value={1.5}>1.5×</option><option value={2}>2×</option></Select></label><Button variant="ghost" className="h-7 px-2 text-[10px] text-white/55 hover:text-white" disabled={unavailable} onClick={() => void openExternal()}><ExternalLink size={12} /> System player</Button></footer>
