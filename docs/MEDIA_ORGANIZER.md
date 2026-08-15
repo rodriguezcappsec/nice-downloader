@@ -297,7 +297,16 @@ Acceptance: save a named comparison, reopen it after clearing the grid or relaun
 
 ## Milestone 19 - Image comparison and media stacks
 
-Add synchronized image zoom/pan, overlay and split views, then group alternate encodes, edits, originals, and generated copies without conflating files.
+Status: implemented on `feat/library-visual-curation`.
+
+- A dedicated two-to-four-image studio uses the existing tokenized Rust image route. Grid, two-image opacity overlay, and split reveal modes share bounded 25%–800% zoom and drag pan without exposing source paths.
+- Library selection validates every requested record before navigation. Missing, deleted, non-image, mixed-media, and decode failures reconcile to understandable recovery actions with system-viewer fallback.
+- Migration `0022_library_media_stacks.sql` persists normalized same-kind stacks with one original, ordered roles (`original`, `alternate`, `edit`, `generated`, `other`), a cover, notes, and at most 100 members.
+- Rust enforces one-stack-per-item, case-insensitive names, catalog availability, same media kind, membership uniqueness, and automatic cleanup when catalog deletion leaves fewer than two members. Removing a stack never changes files.
+- Library Home exposes durable stack shelves and a focused stack workspace. Bulk selection creates stacks and lets users label every version before saving.
+- Version 4 Library backup/restore includes bounded stacks, validates all untrusted references before writes, remaps restored catalog IDs, and preserves existing stack ownership when organizations conflict.
+
+Acceptance: compare two to four images with synchronized navigation, use overlay and split modes for two images, open either original in the system viewer, create and reopen a labeled version stack, relaunch with it intact, remove it without touching files, and round-trip it through Library backup/restore.
 
 ## Milestone 20 - Rapid curation and automatic collections
 

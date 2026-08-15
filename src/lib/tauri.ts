@@ -2,11 +2,13 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   LibraryCompareSession,
+  LibraryMediaStack,
   ExportLibraryMomentsRequest,
   LibraryMoment,
   LibraryPlaylist,
   LibraryStoryboard,
   SaveLibraryCompareSessionRequest,
+  SaveLibraryMediaStackRequest,
   SaveLibraryMomentRequest,
   SaveLibraryPlaylistRequest,
   StartLibraryClipExportRequest,
@@ -221,6 +223,12 @@ export const api = {
     invoke<LibraryCompareSession>("save_library_compare_session", { request }),
   deleteLibraryCompareSession: (id: string) =>
     invoke<void>("delete_library_compare_session", { id }),
+  listLibraryMediaStacks: () =>
+    invoke<LibraryMediaStack[]>("list_library_media_stacks"),
+  saveLibraryMediaStack: (request: SaveLibraryMediaStackRequest) =>
+    invoke<LibraryMediaStack>("save_library_media_stack", { request }),
+  deleteLibraryMediaStack: (id: string) =>
+    invoke<void>("delete_library_media_stack", { id }),
   exportLibraryMoments: (request: ExportLibraryMomentsRequest) =>
     invoke<number>("export_library_moments", { request }),
   generateLibraryStoryboard: (itemId: string, frameCount = 12) =>

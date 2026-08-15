@@ -16,6 +16,7 @@ import { api, normalizeError } from "./lib/tauri";
 import type { DesktopPreferences, OnboardingStatus } from "./types";
 
 const ComparePage = lazy(() => import("./features/library/ComparePage").then((module) => ({ default: module.ComparePage })));
+const ImageComparePage = lazy(() => import("./features/library/ImageComparePage").then((module) => ({ default: module.ImageComparePage })));
 
 export default function App() {
   const view = useAppStore((state) => state.view);
@@ -170,6 +171,7 @@ export default function App() {
       <div className={view === "transformations" ? "" : "hidden"}><TransformationsPage /></div>
       <LibraryPage active={view === "library"} />
       {view === "compare" ? <Suspense fallback={<div className="grid min-h-[60vh] place-items-center text-sm text-muted" role="status">Opening comparison workspace…</div>}><ComparePage /></Suspense> : null}
+      {view === "imageCompare" ? <Suspense fallback={<div className="grid min-h-[60vh] place-items-center text-sm text-muted" role="status">Opening image studio…</div>}><ImageComparePage /></Suspense> : null}
       <div className={view === "presets" ? "" : "hidden"}><PresetsPage /></div>
       <div className={view === "settings" ? "" : "hidden"}><SettingsPage /></div>
       {notice ? (

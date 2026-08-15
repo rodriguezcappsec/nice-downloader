@@ -24,17 +24,17 @@ use crate::{
         LibraryCollection, LibraryCompareSession, LibraryDuplicateAnalysisJob,
         LibraryDuplicateGroup, LibraryDuplicateTrashResult, LibraryFacetRequest, LibraryFacets,
         LibraryFileOperation, LibraryFileOperationPlan, LibraryFileOperationResult,
-        LibraryImageSession, LibraryItem, LibraryMediaKind, LibraryMoment,
+        LibraryImageSession, LibraryItem, LibraryMediaKind, LibraryMediaStack, LibraryMoment,
         LibraryPlaybackCacheStatus, LibraryPlaybackEntry, LibraryPlaybackPreflight,
         LibraryPlaybackSession, LibraryPlaybackState, LibraryQueryRequest, LibraryQueryResult,
         LibraryRichMetadata, LibraryScanJob, LibraryScanResult, LibrarySearchStatus,
         LibrarySmartView, LibrarySource, MediaAnalysis, OnboardingStatus, Preset,
         PreviewLibraryBulkMoveRequest, PreviewLibraryFileOperationRequest, QueueSettings,
         QueueSnapshot, SaveAuthenticationProfileRequest, SaveLibraryCollectionRequest,
-        SaveLibraryCompareSessionRequest, SaveLibraryMomentRequest, SaveLibraryPlaybackRequest,
-        SaveLibraryRichMetadataRequest, SaveLibrarySmartViewRequest, SaveLibrarySourceRequest,
-        SavePresetRequest, SaveSitePresetRuleRequest, SaveSubscriptionRequest,
-        SetLibraryArtworkRequest, SitePresetRule, StartDownloadRequest,
+        SaveLibraryCompareSessionRequest, SaveLibraryMediaStackRequest, SaveLibraryMomentRequest,
+        SaveLibraryPlaybackRequest, SaveLibraryRichMetadataRequest, SaveLibrarySmartViewRequest,
+        SaveLibrarySourceRequest, SavePresetRequest, SaveSitePresetRuleRequest,
+        SaveSubscriptionRequest, SetLibraryArtworkRequest, SitePresetRule, StartDownloadRequest,
         StartLibraryClipExportRequest, StartTransformationRequest, Subscription,
         SubscriptionCheckResult, TransformationOperation, TransformationTask,
         UpdateLibraryItemRequest,
@@ -453,6 +453,29 @@ pub fn delete_library_compare_session(
     id: String,
 ) -> Result<(), AppError> {
     database.delete_library_compare_session(&id)
+}
+
+#[tauri::command]
+pub fn list_library_media_stacks(
+    database: State<'_, Database>,
+) -> Result<Vec<LibraryMediaStack>, AppError> {
+    database.list_library_media_stacks()
+}
+
+#[tauri::command]
+pub fn save_library_media_stack(
+    database: State<'_, Database>,
+    request: SaveLibraryMediaStackRequest,
+) -> Result<LibraryMediaStack, AppError> {
+    database.save_library_media_stack(request)
+}
+
+#[tauri::command]
+pub fn delete_library_media_stack(
+    database: State<'_, Database>,
+    id: String,
+) -> Result<(), AppError> {
+    database.delete_library_media_stack(&id)
 }
 
 #[tauri::command]

@@ -4,6 +4,7 @@ import {
   Download,
   History,
   House,
+  Images,
   Keyboard,
   LayoutGrid,
   ListOrdered,
@@ -31,6 +32,7 @@ interface NavigationItem {
 const mediaNavigation: NavigationItem[] = [
   { id: "library", label: "Media home", icon: House },
   { id: "compare", label: "Compare videos", icon: LayoutGrid },
+  { id: "imageCompare", label: "Compare images", icon: Images },
 ];
 
 const downloadNavigation: NavigationItem[] = [
@@ -58,6 +60,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   const setView = useAppStore((state) => state.setView);
   const jobMap = useAppStore((state) => state.jobs);
   const compareCount = useAppStore((state) => state.compareItemIds.length);
+  const imageCompareCount = useAppStore((state) => state.imageCompareItemIds.length);
   const jobs = Object.values(jobMap);
   const activeCount = jobs.filter((job) =>
     ["Analyzing", "Preparing", "Downloading", "PostProcessing", "Merging", "Verifying"].includes(job.state),
@@ -134,6 +137,7 @@ export function AppShell({ children }: { children: ReactNode }) {
     if (id === "downloads") return activeCount;
     if (id === "queue") return queuedCount;
     if (id === "compare") return compareCount;
+    if (id === "imageCompare") return imageCompareCount;
     return 0;
   }
 

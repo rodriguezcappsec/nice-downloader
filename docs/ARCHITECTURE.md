@@ -186,6 +186,8 @@ The default Library presentation is a browse-first media hub. React may request 
 
 Full-resolution image viewing shares the tokenized loopback boundary through a separate `/image/{catalogId}` route. Rust requires an image catalog record, revalidates a regular non-symlink file on every request, and maps only JPEG, PNG, WebP, GIF, and AVIF extensions to `nosniff` response types. React receives a fresh session URL and never a source path.
 
+Image comparison keeps only an ephemeral ordered set of two to four catalog IDs in Zustand. Every image independently receives a Rust-authorized loopback session; synchronized zoom, pan, overlay opacity, and split position remain presentation state and are never persisted. Persistent version grouping is a separate SQLite concept: `library_media_stacks` owns name, notes, and cover while normalized members own order and a typed role. Rust validates same-kind available records and single-stack membership. Version 4 Library backup/restore remaps stack members through the catalog restore map and never moves or copies source media.
+
 ## Remaining extension points
 
 The gallery-dl route can expand beyond Bunkr. Release builds stage pinned,

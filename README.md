@@ -92,6 +92,10 @@ warning because current builds are not code-signed.
   seeking, cancellable FFmpeg clip exports, and cached storyboard navigation
 - Persistent named comparison sessions restore video order, positions, speeds,
   audio focus, multi-audio intent, and review notes; moment notes export as Markdown or CSV
+- Two-to-four-image comparison studio with synchronized zoom/pan plus two-image
+  overlay and split reveal modes
+- Persistent media-version stacks for originals, edits, alternates, and generated
+  copies, including version 4 backup/restore
 - Integrated full-resolution image viewer with zoom, pan, rotation, keyboard
   browsing, slideshows, and explicit system-viewer fallback
 - Scheduled playlist/channel subscriptions with archive-aware deduplication
