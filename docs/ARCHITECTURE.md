@@ -156,6 +156,8 @@ Embedded playback uses the platform WebView's HTML5 media engine. Rust starts an
 
 An optional Rust-owned native mpv backend sits before compatibility-copy fallbacks. React supplies only a catalog UUID; Rust revalidates video kind, availability, and an absolute regular-file path before spawning a discovered `mpv` executable with a fixed argument array, `--no-config`, a random process-private IPC socket, and the media path after `--`. One native session may run at a time. The backend polls mpv time/duration through IPC and persists bounded resume state through the same SQLite playback record. Linux parent-death signaling and explicit quit handling prevent orphaned playback. Wayland uses mpv's own native window because portable foreign-surface embedding is unavailable; this still avoids remuxing or transcoding and isolates decoder failures from the WebView.
 
+An isolated phase-one libmpv experiment is documented in `docs/experiments/libmpv-gtk.md`. It proves AV1 + AAC frame rendering in an application-owned GTK `GLArea` under native Wayland without an external process. It does not yet change the production player: composing that GL surface over the existing Tauri WebView, preserving input/accessibility, and packaging libmpv remain explicit phase-two gates.
+
 Linux AppImages stage a curated GStreamer plugin set and matching
 `gst-plugin-scanner` before the final `linuxdeploy` dependency pass. A small
 AppRun wrapper pins WebKitGTK to that packaged runtime rather than mixing the
