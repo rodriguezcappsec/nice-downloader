@@ -1,6 +1,6 @@
 # Embedded libmpv GTK experiment
 
-Status: phase-one feasibility passed on Linux Wayland. This is development evidence, not a production playback path.
+Status: phase-one feasibility passed on Linux Wayland. An opt-in phase-two Watch overlay prototype now lives on the experiment branch; it is still development evidence, not the default production playback path.
 
 ## Question
 
@@ -82,3 +82,27 @@ The current Tauri WebView already occupies the main GTK window's default box. Ph
 ## Decision
 
 Proceed to a Linux-only phase-two Tauri overlay prototype. Do not replace the existing embedded or native-player paths yet. The decoder/render feasibility risk is cleared; GTK/WebView composition, lifecycle, packaging size, and licensing are now the gating risks.
+
+## Phase-two Watch overlay prototype
+
+The experiment branch installs a hidden GTK `GLArea` above the existing Tauri WebView and exposes it only after the user chooses **Embedded libmpv** in the Watch player. React sends a catalog UUID plus presentation geometry; Rust resolves and revalidates the source path. No filesystem path crosses the WebView command boundary.
+
+Implemented prototype behavior:
+
+- dynamically loaded libmpv renders in the Watch video rectangle without an external window or playback copy;
+- `ResizeObserver`, scroll, fullscreen, browser viewport, device-pixel-ratio, and visibility changes resynchronize the native surface;
+- the GTK overlay is input-pass-through, preserving WebView focus and keyboard handling;
+- header controls provide play/pause, relative seek, playback rate, mute shortcut, and stop;
+- position, duration, pause state, end-of-file, and failures flow back through bounded status polling;
+- Rust persists resume progress and hides the native surface on stop, EOF, render failure, initialization failure, or component cleanup;
+- opening the existing external mpv path closes embedded libmpv, and opening embedded libmpv closes external mpv;
+- missing libmpv/OpenGL support leaves the WebView, compatibility-copy, external-mpv, and system-player paths available.
+
+Run the full app with `npm run tauri:dev`, open a catalog video in Watch, and choose **Embedded libmpv**. For a video that triggers the compatibility dialog, cancel the copy first and select **Play here with libmpv** from the unchanged-video fallback panel. A successful run keeps video inside the Watch rectangle and shows the experimental controls in its header.
+
+Still gated before making this a default player:
+
+1. AppImage dependency closure and license review for the selected libmpv build.
+2. Automated interaction coverage for modal overlap, accessibility tooling, non-default browser zoom, fractional HiDPI, mini-player movement, and fullscreen transitions.
+3. A persisted user preference and direct compatibility-dialog action, rather than the current explicit experiment entry points.
+4. Linux distribution coverage beyond the validated native Wayland host.

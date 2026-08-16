@@ -939,6 +939,44 @@ export interface NativePlaybackStatus {
   detail: string;
 }
 
+export interface EmbeddedMpvBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  devicePixelRatio: number;
+  visible: boolean;
+}
+
+export interface EmbeddedMpvSession {
+  itemId: string;
+  title: string;
+  resumedAtSeconds: number;
+  positionSeconds: number;
+  durationSeconds: number;
+  paused: boolean;
+}
+
+export interface EmbeddedMpvStatus {
+  available: boolean;
+  active?: EmbeddedMpvSession | null;
+  detail: string;
+  lastError?: string | null;
+}
+
+export type EmbeddedMpvControl =
+  | "play"
+  | "pause"
+  | "seekRelative"
+  | "seekAbsolute"
+  | "setRate"
+  | "setMuted";
+
+export interface EmbeddedMpvControlRequest {
+  action: EmbeddedMpvControl;
+  value?: number | null;
+}
+
 export interface LibraryCacheResult {
   removedFiles: number;
   freedBytes: number;

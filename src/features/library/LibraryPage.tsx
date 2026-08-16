@@ -71,6 +71,9 @@ import { TranscriptIntelligencePanel } from "./TranscriptIntelligencePanel";
 import { readLibraryWorkspace, writeLibraryWorkspace, type LibraryWorkspaceSnapshot } from "./library-workspace";
 import type {
   AppError,
+  EmbeddedMpvBounds,
+  EmbeddedMpvSession,
+  EmbeddedMpvStatus,
   LibraryArtworkCacheStatus,
   LibraryItem,
   LibraryImageSession,
@@ -2880,12 +2883,14 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
   const playbackFingerprint = embeddedPlaybackFingerprint(item);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const playerRef = useRef<HTMLElement | null>(null);
+  const playbackSurfaceRef = useRef<HTMLDivElement | null>(null);
   const consentDialogRef = useRef<HTMLElement | null>(null);
   const consentReturnFocus = useRef<HTMLElement | null>(null);
   const lastSavedPosition = useRef(0);
   const playbackWatchdog = useRef<number | null>(null);
   const playbackProgress = useRef<{ position: number; observedAt: number } | null>(null);
   const playbackVerification = useRef<{ lastPosition: number; accumulatedSeconds: number; recorded: boolean } | null>(null);
+  const embeddedMpvStopRequested = useRef(false);
   const [session, setSession] = useState<LibraryPlaybackSession | null>(null);
   const [preflight, setPreflight] = useState<LibraryPlaybackPreflight | null>(null);
   const [consent, setConsent] = useState<LibraryPlaybackPreflight | null>(null);
@@ -2900,6 +2905,10 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
   const [nativeStatus, setNativeStatus] = useState<NativePlaybackStatus | null>(null);
   const [nativeSession, setNativeSession] = useState<NativePlaybackSession | null>(null);
   const [nativeBusy, setNativeBusy] = useState(false);
+  const [embeddedMpvStatus, setEmbeddedMpvStatus] = useState<EmbeddedMpvStatus | null>(null);
+  const [embeddedMpvSession, setEmbeddedMpvSession] = useState<EmbeddedMpvSession | null>(null);
+  const [embeddedMpvBusy, setEmbeddedMpvBusy] = useState(false);
+  const [embeddedMpvMuted, setEmbeddedMpvMuted] = useState(false);
   const [resumedAt, setResumedAt] = useState<number | null>(null);
   const [playbackRate, setPlaybackRate] = useState(1);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -2926,6 +2935,9 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
     setPlaybackError(null);
     setNativeSession(null);
     setNativeBusy(false);
+    setEmbeddedMpvSession(null);
+    setEmbeddedMpvBusy(false);
+    setEmbeddedMpvMuted(false);
     setIsPlaying(false);
     setCurrentPosition(0);
     setPlaybackDuration(item.durationSeconds || 0);
@@ -2964,6 +2976,109 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
       });
     return () => { disposed = true; };
   }, [item.id]);
+
+  useEffect(() => {
+    let disposed = false;
+    void api.getEmbeddedMpvStatus()
+      .then((status) => {
+        if (disposed) return;
+        setEmbeddedMpvStatus(status);
+        if (status.active?.itemId === item.id) setEmbeddedMpvSession(status.active);
+      })
+      .catch(() => {
+        if (!disposed) setEmbeddedMpvStatus(null);
+      });
+    return () => { disposed = true; };
+  }, [item.id]);
+
+  useEffect(() => {
+    if (!embeddedMpvSession) return;
+    let disposed = false;
+    let previouslyActive = true;
+    const refresh = () => {
+      void api.getEmbeddedMpvStatus()
+        .then((status) => {
+          if (disposed) return;
+          setEmbeddedMpvStatus(status);
+          if (status.active?.itemId === item.id) {
+            setEmbeddedMpvSession(status.active);
+            setCurrentPosition(status.active.positionSeconds);
+            setPlaybackDuration(status.active.durationSeconds);
+            setIsPlaying(!status.active.paused);
+            previouslyActive = true;
+          } else if (previouslyActive) {
+            previouslyActive = false;
+            setEmbeddedMpvSession(null);
+            setIsPlaying(false);
+            if (embeddedMpvStopRequested.current) {
+              embeddedMpvStopRequested.current = false;
+            } else if (status.lastError) {
+              setPlaybackError(createPlaybackError("embedded_mpv_runtime_failed", status.lastError));
+            } else {
+              window.setTimeout(() => onPlaybackEnded?.(), 0);
+            }
+          }
+        })
+        .catch(() => {});
+    };
+    refresh();
+    const interval = window.setInterval(refresh, 250);
+    return () => {
+      disposed = true;
+      window.clearInterval(interval);
+    };
+  }, [embeddedMpvSession?.itemId, item.id, onPlaybackEnded]);
+
+  function readEmbeddedMpvBounds(): EmbeddedMpvBounds | null {
+    const surface = playbackSurfaceRef.current;
+    if (!surface) return null;
+    const rect = surface.getBoundingClientRect();
+    return {
+      x: rect.left,
+      y: rect.top,
+      width: rect.width,
+      height: rect.height,
+      devicePixelRatio: window.devicePixelRatio || 1,
+      visible: document.visibilityState === "visible"
+        && rect.width >= 2
+        && rect.height >= 2
+        && rect.right > 0
+        && rect.bottom > 0
+        && rect.left < window.innerWidth
+        && rect.top < window.innerHeight,
+    };
+  }
+
+  useEffect(() => {
+    if (!embeddedMpvSession) return;
+    let frame = 0;
+    const syncBounds = () => {
+      window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(() => {
+        const bounds = readEmbeddedMpvBounds();
+        if (bounds) void api.updateEmbeddedMpvBounds(bounds).catch(() => {});
+      });
+    };
+    const observer = new ResizeObserver(syncBounds);
+    if (playbackSurfaceRef.current) observer.observe(playbackSurfaceRef.current);
+    window.addEventListener("resize", syncBounds);
+    window.addEventListener("scroll", syncBounds, true);
+    document.addEventListener("fullscreenchange", syncBounds);
+    document.addEventListener("visibilitychange", syncBounds);
+    window.visualViewport?.addEventListener("resize", syncBounds);
+    window.visualViewport?.addEventListener("scroll", syncBounds);
+    syncBounds();
+    return () => {
+      window.cancelAnimationFrame(frame);
+      observer.disconnect();
+      window.removeEventListener("resize", syncBounds);
+      window.removeEventListener("scroll", syncBounds, true);
+      document.removeEventListener("fullscreenchange", syncBounds);
+      document.removeEventListener("visibilitychange", syncBounds);
+      window.visualViewport?.removeEventListener("resize", syncBounds);
+      window.visualViewport?.removeEventListener("scroll", syncBounds);
+    };
+  }, [compact, embeddedMpvSession?.itemId, leanBack]);
 
   useEffect(() => {
     if (!nativeSession) return;
@@ -3114,6 +3229,11 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
     void api.releaseLibraryPlayback(item.id).catch(() => {});
   }, [item.id]);
 
+  useEffect(() => () => {
+    embeddedMpvStopRequested.current = true;
+    void api.closeEmbeddedMpv().catch(() => {});
+  }, [item.id]);
+
   useEffect(() => {
     const resetPlayback = (event: Event) => {
       const resetItemId = (event as CustomEvent<{ itemId: string }>).detail?.itemId;
@@ -3128,17 +3248,30 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
   }, [item.id]);
 
   function closePlayer() {
-    persistProgress(false);
+    if (embeddedMpvSession) {
+      embeddedMpvStopRequested.current = true;
+      void api.closeEmbeddedMpv().catch(() => {});
+    }
+    else persistProgress(false);
     onClose();
   }
 
   function changeVideo(change: (() => void) | undefined) {
     if (!change) return;
-    persistProgress(false);
+    if (embeddedMpvSession) {
+      embeddedMpvStopRequested.current = true;
+      void api.closeEmbeddedMpv().catch(() => {});
+    }
+    else persistProgress(false);
     change();
   }
 
   function togglePlayback() {
+    if (embeddedMpvSession) {
+      const action = embeddedMpvSession.paused ? "play" : "pause";
+      void api.controlEmbeddedMpv({ action }).catch((error) => setError(normalizeError(error)));
+      return;
+    }
     const video = videoRef.current;
     if (!video) return;
     if (video.paused) void video.play().catch(() => {});
@@ -3146,12 +3279,22 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
   }
 
   function seek(seconds: number) {
+    if (embeddedMpvSession) {
+      void api.controlEmbeddedMpv({ action: "seekRelative", value: seconds }).catch((error) => setError(normalizeError(error)));
+      return;
+    }
     const video = videoRef.current;
     if (!video || !Number.isFinite(video.duration)) return;
     video.currentTime = Math.min(video.duration, Math.max(0, video.currentTime + seconds));
   }
 
   function seekTo(seconds: number) {
+    if (embeddedMpvSession) {
+      if (!Number.isFinite(seconds)) return;
+      void api.controlEmbeddedMpv({ action: "seekAbsolute", value: Math.max(0, seconds) }).catch((error) => setError(normalizeError(error)));
+      setCurrentPosition(Math.max(0, seconds));
+      return;
+    }
     const video = videoRef.current;
     if (!video || !Number.isFinite(seconds)) return;
     const duration = Number.isFinite(video.duration) ? video.duration : playbackDuration;
@@ -3175,12 +3318,18 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
       else if (key === " " || key === "k") { event.preventDefault(); togglePlayback(); }
       else if (key === "j" || key === "arrowleft") { event.preventDefault(); seek(-10); }
       else if (key === "l" || key === "arrowright") { event.preventDefault(); seek(10); }
+      else if (key === "m" && embeddedMpvSession) {
+        event.preventDefault();
+        const muted = !embeddedMpvMuted;
+        setEmbeddedMpvMuted(muted);
+        void api.controlEmbeddedMpv({ action: "setMuted", value: muted ? 1 : 0 }).catch(() => {});
+      }
       else if (key === "m" && videoRef.current) { event.preventDefault(); videoRef.current.muted = !videoRef.current.muted; }
       else if (key === "f") { event.preventDefault(); toggleFullscreen(); }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [compact, consent, leanBack, onExitLeanBack]);
+  }, [compact, consent, embeddedMpvMuted, embeddedMpvSession, leanBack, onExitLeanBack]);
 
   useEffect(() => {
     if (!leanBack || consent || typeof navigator.getGamepads !== "function") return;
@@ -3224,7 +3373,9 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
     if (consentBusy) return;
     setConsent(null);
     setLoading(false);
-    setPlaybackError(createPlaybackError("embedded_playback_cancelled", "Embedded playback was not started. The original video is unchanged and can still be opened with your system player."));
+    setPlaybackError(createPlaybackError("embedded_playback_cancelled", embeddedMpvStatus?.available
+      ? "The compatibility copy was not started. The original is unchanged; you can play it here with experimental libmpv or open it in your system player."
+      : "Embedded playback was not started. The original video is unchanged and can still be opened with your system player."));
     restoreConsentFocus();
   }
 
@@ -3317,7 +3468,13 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
   async function openExternal() {
     try {
       videoRef.current?.pause();
-      persistProgress(false);
+      if (embeddedMpvSession) {
+        embeddedMpvStopRequested.current = true;
+        await api.closeEmbeddedMpv();
+        setEmbeddedMpvSession(null);
+      } else {
+        persistProgress(false);
+      }
       await api.openLibraryItem(item.id);
     } catch (error) {
       setError(normalizeError(error));
@@ -3332,7 +3489,9 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
     setNativeBusy(true);
     try {
       const transcriptStart = seekRequest?.itemId === item.id ? seekRequest.seconds : undefined;
+      if (embeddedMpvSession) embeddedMpvStopRequested.current = true;
       const opened = await api.openLibraryNativePlayback(item.id, transcriptStart);
+      setEmbeddedMpvSession(null);
       setNativeSession(opened);
       setConsent(null);
       setPlaybackError(null);
@@ -3343,6 +3502,55 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
       setLoading(false);
     } finally {
       setNativeBusy(false);
+    }
+  }
+
+  async function playWithEmbeddedMpv() {
+    if (embeddedMpvBusy || !embeddedMpvStatus?.available) return;
+    const bounds = readEmbeddedMpvBounds();
+    if (!bounds) {
+      setPlaybackError(createPlaybackError("embedded_mpv_surface_missing", "The experimental native playback surface is not ready."));
+      return;
+    }
+    clearPlaybackWatchdog();
+    videoRef.current?.pause();
+    persistProgress(false);
+    setEmbeddedMpvBusy(true);
+    try {
+      const transcriptStart = seekRequest?.itemId === item.id ? seekRequest.seconds : undefined;
+      const opened = await api.openLibraryEmbeddedMpv(item.id, bounds, transcriptStart);
+      embeddedMpvStopRequested.current = false;
+      await api.releaseLibraryPlayback(item.id).catch(() => {});
+      setSession(null);
+      setNativeSession(null);
+      setEmbeddedMpvSession(opened);
+      setCurrentPosition(opened.positionSeconds);
+      setPlaybackDuration(opened.durationSeconds);
+      setIsPlaying(!opened.paused);
+      setConsent(null);
+      setPlaybackError(null);
+      setLoading(false);
+      restoreConsentFocus();
+    } catch (error) {
+      setPlaybackError(normalizeError(error));
+      setLoading(false);
+    } finally {
+      setEmbeddedMpvBusy(false);
+    }
+  }
+
+  async function closeEmbeddedMpvPlayback() {
+    if (embeddedMpvBusy) return;
+    setEmbeddedMpvBusy(true);
+    embeddedMpvStopRequested.current = true;
+    try {
+      await api.closeEmbeddedMpv();
+      setEmbeddedMpvSession(null);
+      await restartEmbeddedPlaybackAfterNative();
+    } catch (error) {
+      setError(normalizeError(error));
+    } finally {
+      setEmbeddedMpvBusy(false);
     }
   }
 
@@ -3431,6 +3639,12 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
 
   useEffect(() => {
     if (seekRequest?.itemId !== item.id) return;
+    if (embeddedMpvSession) {
+      void api.controlEmbeddedMpv({ action: "seekAbsolute", value: seekRequest.seconds }).catch(() => {});
+      setCurrentPosition(seekRequest.seconds);
+      setResumedAt(seekRequest.seconds);
+      return;
+    }
     const video = videoRef.current;
     if (!video || !Number.isFinite(video.duration)) return;
     const target = Math.min(Math.max(0, video.duration - 0.25), seekRequest.seconds);
@@ -3439,20 +3653,23 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
     setCurrentPosition(target);
     setResumedAt(target);
     void video.play().catch(() => {});
-  }, [item.id, seekRequest?.id]);
+  }, [embeddedMpvSession?.itemId, item.id, seekRequest?.id]);
 
   return <><section ref={playerRef} className={`cinematic-player panel-shadow min-w-0 overflow-hidden border border-white/10 text-white ${compact ? "rounded-[10px] shadow-[0_28px_80px_rgb(0_0_0/0.58)]" : leanBack ? "flex min-h-0 flex-1 flex-col rounded-[16px] shadow-[0_30px_120px_rgb(0_0_0/0.8)]" : "flex max-h-[calc(100dvh-96px)] flex-col rounded-[12px]"}`} aria-label={`${leanBack ? "Lean-back player" : compact ? "Mini player" : "Playing"} ${item.title}`}>
     <header className={`flex items-center border-b border-white/10 bg-black/70 backdrop-blur-xl ${compact ? "min-h-11 gap-2 px-3 py-2" : leanBack ? "min-h-14 gap-4 px-5 py-2" : "min-h-16 gap-4 px-5 py-3"}`}>
       <div className="min-w-0 flex-1"><h1 className={`${compact ? "text-[11px]" : "text-sm"} truncate font-semibold`}>{item.title}</h1>{!compact ? <p className="mt-0.5 truncate text-[11px] text-white/55">{sourceName}{item.container ? ` · ${item.container.toLocaleUpperCase()}` : ""}{item.width && item.height ? ` · ${item.width} × ${item.height}` : ""}</p> : null}</div>
+      {embeddedMpvStatus?.available && !embeddedMpvSession ? <Button variant="ghost" className={`${compact ? "size-8 px-0" : ""} text-accent hover:text-accent`} disabled={embeddedMpvBusy} onClick={() => void playWithEmbeddedMpv()} aria-label="Play with embedded libmpv"><MonitorPlay size={15} />{compact ? null : " Embedded libmpv"}</Button> : null}
+      {embeddedMpvSession ? <div className="flex items-center gap-1" aria-label="Embedded libmpv controls"><button className="grid size-8 place-items-center rounded-[7px] text-white/70 hover:bg-white/10 hover:text-white" onClick={() => seek(-10)} aria-label="Seek back 10 seconds"><RotateCcw size={14} /></button><button className="grid size-8 place-items-center rounded-[7px] bg-accent text-[#081426] hover:brightness-110" onClick={togglePlayback} aria-label={embeddedMpvSession.paused ? "Play" : "Pause"}>{embeddedMpvSession.paused ? <Play size={14} fill="currentColor" /> : <Pause size={14} />}</button><button className="grid size-8 place-items-center rounded-[7px] text-white/70 hover:bg-white/10 hover:text-white" onClick={() => seek(10)} aria-label="Seek forward 10 seconds"><RotateCw size={14} /></button>{!compact ? <Select className="h-8 w-20 border-white/10 bg-white/5 text-xs text-white" value={playbackRate} aria-label="Playback speed" onChange={(event) => { const rate = Number(event.target.value); setPlaybackRate(rate); void api.controlEmbeddedMpv({ action: "setRate", value: rate }).catch((error) => setError(normalizeError(error))); }}><option value={0.5}>0.5×</option><option value={0.75}>0.75×</option><option value={1}>1×</option><option value={1.25}>1.25×</option><option value={1.5}>1.5×</option><option value={2}>2×</option></Select> : null}<button className="grid size-8 place-items-center rounded-[7px] text-white/70 hover:bg-white/10 hover:text-white" disabled={embeddedMpvBusy} onClick={() => void closeEmbeddedMpvPlayback()} aria-label="Stop embedded libmpv"><Square size={13} /></button></div> : null}
       <Button variant="ghost" className={`${compact ? "size-8 px-0" : ""} text-white/75 hover:text-white`} onClick={() => void openExternal()} aria-label="Open in system player"><ExternalLink size={15} />{compact ? null : " Open in system player"}</Button>
       {compact ? <button className="grid size-8 place-items-center rounded-[7px] text-white/70 hover:bg-white/10 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70" onClick={onRestore} aria-label="Return to full watch page"><Maximize size={15} /></button> : <button className="grid size-9 place-items-center rounded-[8px] text-white/70 hover:bg-white/10 hover:text-white" onClick={toggleFullscreen} aria-label="Toggle fullscreen"><Maximize size={17} /></button>}
       {compact ? <button className="grid size-8 place-items-center rounded-[7px] text-white/70 hover:bg-white/10 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70" onClick={closePlayer} aria-label="Close mini player"><X size={16} /></button> : null}
     </header>
-    <div className={`relative flex min-h-0 items-center justify-center overflow-auto bg-black ${compact ? "aspect-video" : leanBack ? "flex-1" : "aspect-video min-h-[240px] max-h-[calc(100dvh-250px)]"}`}>
-      {loading ? <div className="absolute inset-0 z-[1] flex items-center justify-center gap-2 bg-black/80 text-sm text-white/60" role="status"><LoaderCircle className="animate-spin text-accent" size={18} /> Preparing embedded playback…</div> : null}
+    <div ref={playbackSurfaceRef} className={`relative flex min-h-0 items-center justify-center overflow-auto bg-black ${compact ? "aspect-video" : leanBack ? "flex-1" : "aspect-video min-h-[240px] max-h-[calc(100dvh-250px)]"}`}>
+      {loading && !embeddedMpvSession ? <div className="absolute inset-0 z-[1] flex items-center justify-center gap-2 bg-black/80 text-sm text-white/60" role="status"><LoaderCircle className="animate-spin text-accent" size={18} /> Preparing embedded playback…</div> : null}
+      {embeddedMpvSession ? <div className="sr-only" role="status">Playing {item.title} with experimental embedded libmpv.</div> : null}
       {nativeSession ? <div className="max-w-lg border border-accent/25 bg-accent/5 p-6 text-center"><MonitorPlay className="mx-auto text-accent" size={36} /><h2 className="mt-4 text-lg font-semibold">Playing with native mpv</h2><p className="mt-2 text-sm leading-6 text-white/60">mpv is decoding this video in its native window without creating a compatibility copy.</p>{nativeSession.resumedAtSeconds > 0 ? <p className="mt-2 text-xs text-accent">{seekRequest?.itemId === item.id ? "Started from transcript" : "Resumed"} at {formatDuration(nativeSession.resumedAtSeconds)}</p> : null}<div className="mt-5 flex flex-wrap justify-center gap-2"><Button variant="secondary" disabled={nativeBusy} onClick={() => void closeNativePlayback()}>{nativeBusy ? <LoaderCircle className="animate-spin" size={15} /> : <Square size={15} />} Stop native player</Button><Button onClick={() => void openExternal()}><ExternalLink size={15} /> System player</Button></div></div> : null}
-        {playbackError && !nativeSession ? <div className="max-w-lg border border-white/10 bg-white/5 p-6 text-center"><Film className="mx-auto text-white/35" size={34} /><h2 className="mt-4 text-lg font-semibold">This video could not be played here</h2><p className="mt-2 text-sm leading-6 text-white/55">{playbackError.message}</p><div className="mt-5 flex flex-wrap justify-center gap-2">{nativeStatus?.available ? <Button disabled={nativeBusy} onClick={() => void playWithNativeMpv()}>{nativeBusy ? <LoaderCircle className="animate-spin" size={15} /> : <MonitorPlay size={15} />} Play with native mpv</Button> : null}{canOfferPlaybackFallback(playbackError) && !session?.compatibilityTranscoded ? <Button variant="secondary" onClick={() => void retryEmbeddedPlayback()}><RotateCcw size={15} /> Create H.264 playback copy</Button> : null}<Button variant={nativeStatus?.available ? "secondary" : "primary"} onClick={() => void openExternal()}><ExternalLink size={15} /> Open in system player</Button></div></div> : null}
-        {session && !playbackError && !nativeSession ? <video
+        {playbackError && !nativeSession && !embeddedMpvSession ? <div className="max-w-lg border border-white/10 bg-white/5 p-6 text-center"><Film className="mx-auto text-white/35" size={34} /><h2 className="mt-4 text-lg font-semibold">This video could not be played here</h2><p className="mt-2 text-sm leading-6 text-white/55">{playbackError.message}</p><div className="mt-5 flex flex-wrap justify-center gap-2">{embeddedMpvStatus?.available ? <Button disabled={embeddedMpvBusy} onClick={() => void playWithEmbeddedMpv()}>{embeddedMpvBusy ? <LoaderCircle className="animate-spin" size={15} /> : <MonitorPlay size={15} />} Play here with libmpv</Button> : null}{nativeStatus?.available ? <Button variant={embeddedMpvStatus?.available ? "secondary" : "primary"} disabled={nativeBusy} onClick={() => void playWithNativeMpv()}>{nativeBusy ? <LoaderCircle className="animate-spin" size={15} /> : <MonitorPlay size={15} />} Open native mpv window</Button> : null}{canOfferPlaybackFallback(playbackError) && !session?.compatibilityTranscoded ? <Button variant="secondary" onClick={() => void retryEmbeddedPlayback()}><RotateCcw size={15} /> Create H.264 playback copy</Button> : null}<Button variant={nativeStatus?.available || embeddedMpvStatus?.available ? "secondary" : "primary"} onClick={() => void openExternal()}><ExternalLink size={15} /> Open in system player</Button></div></div> : null}
+        {session && !playbackError && !nativeSession && !embeddedMpvSession ? <video
         ref={videoRef}
         className="h-full w-full max-h-full max-w-full bg-black object-contain shadow-[0_30px_100px_rgb(0_0_0/0.65)]"
         crossOrigin="anonymous"

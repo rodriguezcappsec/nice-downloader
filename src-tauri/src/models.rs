@@ -1248,6 +1248,55 @@ pub struct NativePlaybackStatus {
     pub detail: String,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmbeddedMpvBounds {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    pub device_pixel_ratio: f64,
+    pub visible: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmbeddedMpvSession {
+    pub item_id: String,
+    pub title: String,
+    pub resumed_at_seconds: f64,
+    pub position_seconds: f64,
+    pub duration_seconds: f64,
+    pub paused: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmbeddedMpvStatus {
+    pub available: bool,
+    pub active: Option<EmbeddedMpvSession>,
+    pub detail: String,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum EmbeddedMpvControl {
+    Play,
+    Pause,
+    SeekRelative,
+    SeekAbsolute,
+    SetRate,
+    SetMuted,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmbeddedMpvControlRequest {
+    pub action: EmbeddedMpvControl,
+    pub value: Option<f64>,
+}
+
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum LibraryMetadataState {

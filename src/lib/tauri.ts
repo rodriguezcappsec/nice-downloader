@@ -2,6 +2,12 @@ import type { ConfigureLibraryPrivacyRequest, LibraryPrivacyRules, LibraryPrivac
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
+  EmbeddedMpvBounds,
+  EmbeddedMpvControlRequest,
+  EmbeddedMpvSession,
+  EmbeddedMpvStatus,
+} from "../types";
+import type {
   LibraryCompareSession,
   LibraryCurationDecision,
   LibraryCurationState,
@@ -374,6 +380,14 @@ export const api = {
   openLibraryNativePlayback: (id: string, startAtSeconds?: number) =>
     invoke<NativePlaybackSession>("open_library_native_playback", { id, startAtSeconds }),
   closeLibraryNativePlayback: () => invoke<void>("close_library_native_playback"),
+  getEmbeddedMpvStatus: () => invoke<EmbeddedMpvStatus>("get_embedded_mpv_status"),
+  openLibraryEmbeddedMpv: (id: string, bounds: EmbeddedMpvBounds, startAtSeconds?: number) =>
+    invoke<EmbeddedMpvSession>("open_library_embedded_mpv", { id, bounds, startAtSeconds }),
+  updateEmbeddedMpvBounds: (bounds: EmbeddedMpvBounds) =>
+    invoke<void>("update_embedded_mpv_bounds", { bounds }),
+  controlEmbeddedMpv: (request: EmbeddedMpvControlRequest) =>
+    invoke<void>("control_embedded_mpv", { request }),
+  closeEmbeddedMpv: () => invoke<void>("close_embedded_mpv"),
   getLibraryPlaybackCacheStatus: () => invoke<LibraryPlaybackCacheStatus>("get_library_playback_cache_status"),
   openLibraryItem: (id: string) => invoke<void>("open_library_item", { id }),
   reconcileLibrary: () => invoke<LibraryScanResult>("reconcile_library"),
