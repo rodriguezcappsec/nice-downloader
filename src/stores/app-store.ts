@@ -64,6 +64,7 @@ interface AppStore {
   cancelDownload: (jobId: string) => Promise<void>;
   dismissDownloads: (jobIds: string[]) => Promise<string[]>;
   retryDownload: (jobId: string) => Promise<void>;
+  retryFailedGalleryFiles: (jobId: string) => Promise<void>;
   repeatDownload: (jobId: string) => Promise<void>;
   pauseDownload: (jobId: string) => Promise<void>;
   resumeDownload: (jobId: string) => Promise<void>;
@@ -438,6 +439,22 @@ export const useAppStore = create<AppStore>((set, get) => ({
       set((state) => ({
         jobs: { ...state.jobs, [job.id]: newerJob(state.jobs[job.id], job, true) },
         view: "downloads",
+      }));
+      const queue = await api.getQueueSnapshot();
+      if (latestQueueEventRevision === queueRevision) set({ queue });
+    } catch (error) {
+      set({ error: normalizeError(error) });
+    }
+  },
+
+  retryFailedGalleryFiles: async (jobId) => {
+    set({ error: null });
+    try {
+      const queueRevision = latestQueueEventRevision;
+      const job = await api.retryFailedGalleryFiles(jobId);
+      set((state) => ({
+        jobs: { ...state.jobs, [job.id]: newerJob(state.jobs[job.id], job, true) },
+        notice: { message: "Queued only the failed album files.", view: "queue" },
       }));
       const queue = await api.getQueueSnapshot();
       if (latestQueueEventRevision === queueRevision) set({ queue });

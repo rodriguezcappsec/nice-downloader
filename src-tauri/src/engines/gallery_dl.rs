@@ -217,9 +217,14 @@ impl GalleryDlEngine {
             "--Print".to_owned(),
             "prepare:nicedl:gallery:item:{num}|{count}|{size}|{filename}.{extension}".to_owned(),
             "--Print".to_owned(),
-            "after:nicedl:gallery:complete:{num}|{count}|{size}|{_path}".to_owned(),
+            "after:nicedl:gallery:complete:{num}|{count}|{size}|{filename}.{extension}"
+                .to_owned(),
             "--Print".to_owned(),
-            "skip:nicedl:gallery:skip:{num}|{count}|{size}|{_path}".to_owned(),
+            "skip:nicedl:gallery:skip:{num}|{count}|{size}|{filename}.{extension}"
+                .to_owned(),
+            "--Print".to_owned(),
+            "error:nicedl:gallery:error:{num}|{count}|{size}|{filename}.{extension}"
+                .to_owned(),
             "--option".to_owned(),
             r#"output.mode={"start":"nicedl:gallery:output:{}\n","skip":"nicedl:gallery:output:{}\n","success":"nicedl:gallery:output:{}\n","progress":"\nnicedl:gallery:progress:NA|{0}|{1}|NA","progress-total":"\nnicedl:gallery:progress:{3}|{0}|{1}|{2}"}"#.to_owned(),
             "--option".to_owned(),
@@ -889,6 +894,10 @@ mod tests {
             .args
             .iter()
             .any(|arg| arg.starts_with("output.mode={") && arg.contains("progress-total")));
+        assert!(prepared
+            .args
+            .iter()
+            .any(|arg| arg.starts_with("error:nicedl:gallery:error:")));
         assert!(prepared
             .args
             .iter()

@@ -133,7 +133,7 @@ Delivered foundations include Recommended/Compatibility/Quality/Smallest selecti
 Delivered foundation:
 
 - Analyzer/router policy and strict URL classification.
-- gallery-dl analysis, lazy paced album browsing, per-file selection, resumable original-file download, cancellation, progress, and history for Bunkr albums plus `/f`, `/v`, `/i`, and `/d` single-media pages.
+- gallery-dl analysis, lazy paced album browsing, per-file selection and durable status, failed-file-only retry, resumable original-file download, cancellation, progress, and history for Bunkr albums plus `/f`, `/v`, `/i`, and `/d` single-media pages.
 
 Still planned:
 

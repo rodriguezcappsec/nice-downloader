@@ -1412,6 +1412,19 @@ pub async fn repeat_download(
 }
 
 #[tauri::command]
+pub async fn retry_failed_gallery_files(
+    app: AppHandle,
+    queue: State<'_, QueueManager>,
+    database: State<'_, Database>,
+    job_id: String,
+) -> Result<DownloadJob, AppError> {
+    let preferences = database.load_engine_preferences()?;
+    queue
+        .retry_failed_gallery_files(app, &job_id, preferences)
+        .await
+}
+
+#[tauri::command]
 pub fn get_default_destination(app: AppHandle) -> Result<String, AppError> {
     let path = app.path().download_dir().map_err(|error| {
         AppError::internal("could not find the system Downloads directory", error)

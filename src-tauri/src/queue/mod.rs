@@ -7,8 +7,9 @@ use crate::{
     },
     errors::AppError,
     models::{
-        DiskSpaceInfo, DownloadJob, DownloadState, EnginePreferences, OutputConflictPolicy,
-        QueueSettings, QueueSnapshot, StartDownloadRequest,
+        DiskSpaceInfo, DownloadJob, DownloadState, EnginePreferences, GalleryFileProgress,
+        GalleryFileState, GalleryItemSelection, OutputConflictPolicy, QueueSettings, QueueSnapshot,
+        StartDownloadRequest,
     },
     utils::validation::{
         validate_destination, validate_destination_writable, validate_engine_preferences,
@@ -41,6 +42,7 @@ const JOB_REMOVED_EVENT: &str = "download-job-removed";
 const QUEUE_EVENT: &str = "download-queue-updated";
 const MAX_JOB_DIAGNOSTIC_LINES: usize = 80;
 const GALLERY_PROGRESS_UPDATE_INTERVAL: Duration = Duration::from_millis(500);
+const MAX_GALLERY_PROGRESS_FILES: usize = 1_000;
 
 #[derive(Clone)]
 pub struct QueueManager {
@@ -236,6 +238,75 @@ impl QueueManager {
         request.options.output_conflict_policy = crate::models::OutputConflictPolicy::Overwrite;
         self.enqueue_with_lineage(app, request, preferences, 1, Some(job_id.to_owned()), false)
             .await
+    }
+
+    pub async fn retry_failed_gallery_files(
+        &self,
+        app: AppHandle,
+        job_id: &str,
+        preferences: EnginePreferences,
+    ) -> Result<DownloadJob, AppError> {
+        self.cancel_scheduled_retry(job_id).await;
+        if !self.retry_claims.lock().await.insert(job_id.to_owned()) {
+            return Err(AppError::new(
+                "retry_in_progress",
+                "A retry is already being prepared for this download.",
+            ));
+        }
+        let result = async {
+            let previous =
+                self.jobs.read().await.get(job_id).cloned().ok_or_else(|| {
+                    AppError::new("job_not_found", "The download job was not found.")
+                })?;
+            if previous.state != DownloadState::Failed {
+                return Err(AppError::new(
+                    "job_not_retryable",
+                    "Failed gallery files can be retried only after the album job fails.",
+                ));
+            }
+            let mut request = self
+                .requests
+                .read()
+                .await
+                .get(job_id)
+                .cloned()
+                .ok_or_else(|| {
+                    AppError::new(
+                        "retry_unavailable",
+                        "The original gallery download options are no longer available.",
+                    )
+                })?;
+            if request.analysis.extractor != "gallery-dl:bunkr" {
+                return Err(AppError::new(
+                    "gallery_retry_unavailable",
+                    "Per-file retry is available only for Bunkr album downloads.",
+                ));
+            }
+            let failed_files = failed_gallery_selection(&previous.gallery_files);
+            if failed_files.is_empty() {
+                return Err(AppError::new(
+                    "no_failed_gallery_files",
+                    "This album job has no individually identified failed files to retry.",
+                ));
+            }
+            request.analysis.total_size_bytes = failed_files
+                .iter()
+                .try_fold(0_u64, |total, file| total.checked_add(file.size_bytes?));
+            request.options.gallery_selection = Some(failed_files);
+            request.options.output_conflict_policy = OutputConflictPolicy::Skip;
+            self.enqueue_with_lineage(
+                app,
+                request,
+                preferences,
+                previous.attempt_count.saturating_add(1),
+                Some(previous.id),
+                true,
+            )
+            .await
+        }
+        .await;
+        self.retry_claims.lock().await.remove(job_id);
+        result
     }
 
     async fn enqueue_with_lineage(
@@ -1261,7 +1332,7 @@ impl QueueManager {
         };
         if let Some(value) = event.strip_prefix("item:") {
             let mut fields = value.splitn(4, '|');
-            let (Some(index), Some(count), Some(size), Some(filename)) = (
+            let (Some(index), Some(count), size, Some(filename)) = (
                 fields.next().and_then(|value| value.parse::<u32>().ok()),
                 fields.next().and_then(|value| value.parse::<u32>().ok()),
                 fields.next().and_then(|value| value.parse::<u64>().ok()),
@@ -1276,7 +1347,7 @@ impl QueueManager {
             if tracker.item_count == 0 {
                 tracker.item_count = count;
             }
-            tracker.current_size = size;
+            tracker.current_size = size.unwrap_or_default();
             tracker.current_name = filename.chars().take(180).collect();
             tracker.record_boundary(Instant::now());
             self.update_job(app, id, |job| {
@@ -1287,6 +1358,14 @@ impl QueueManager {
                 job.current_operation = format!(
                     "Downloading item {} of {}: {}",
                     tracker.current_ordinal, tracker.item_count, tracker.current_name
+                );
+                set_gallery_file_progress(
+                    job,
+                    tracker.current_index,
+                    &tracker.current_name,
+                    size,
+                    GalleryFileState::Downloading,
+                    0.0,
                 );
                 job.downloaded_bytes = Some(tracker.completed_bytes);
                 job.progress_percent =
@@ -1328,6 +1407,16 @@ impl QueueManager {
                     job.total_bytes,
                     downloaded,
                 );
+                if tracker.current_index > 0 {
+                    set_gallery_file_progress(
+                        job,
+                        tracker.current_index,
+                        &tracker.current_name,
+                        (tracker.current_size > 0).then_some(tracker.current_size),
+                        GalleryFileState::Downloading,
+                        progress.item_percent,
+                    );
+                }
                 job.downloaded_bytes = Some(downloaded);
                 job.speed_bytes_per_second = progress.speed;
                 job.eta_seconds = progress.speed.and_then(|speed| {
@@ -1345,9 +1434,12 @@ impl QueueManager {
                 let index = fields.next().and_then(|value| value.parse::<u32>().ok());
                 let count = fields.next().and_then(|value| value.parse::<u32>().ok());
                 let size = fields.next().and_then(|value| value.parse::<u64>().ok());
-                if let (Some(index), Some(count), Some(size)) = (index, count, size) {
+                let filename = fields.next().unwrap_or("Gallery item");
+                if let (Some(index), Some(count)) = (index, count) {
                     if tracker.last_completed_index != Some(index) {
-                        tracker.completed_bytes = tracker.completed_bytes.saturating_add(size);
+                        tracker.completed_bytes = tracker
+                            .completed_bytes
+                            .saturating_add(size.unwrap_or_default());
                         tracker.last_completed_index = Some(index);
                     }
                     if tracker.current_index != index {
@@ -1366,6 +1458,18 @@ impl QueueManager {
                             "Processed item {} of {}",
                             tracker.current_ordinal, tracker.item_count
                         );
+                        set_gallery_file_progress(
+                            job,
+                            index,
+                            filename,
+                            size,
+                            if prefix == "skip:" {
+                                GalleryFileState::Skipped
+                            } else {
+                                GalleryFileState::Completed
+                            },
+                            100.0,
+                        );
                         job.downloaded_bytes = Some(tracker.completed_bytes);
                         job.progress_percent = gallery_album_percent(
                             tracker,
@@ -1380,6 +1484,44 @@ impl QueueManager {
                 }
                 return true;
             }
+        }
+        if let Some(value) = event.strip_prefix("error:") {
+            let mut fields = value.splitn(4, '|');
+            let index = fields.next().and_then(|value| value.parse::<u32>().ok());
+            let count = fields.next().and_then(|value| value.parse::<u32>().ok());
+            let size = fields.next().and_then(|value| value.parse::<u64>().ok());
+            let filename = fields.next().unwrap_or("Gallery item");
+            if let (Some(index), Some(count)) = (index, count) {
+                if tracker.current_index != index {
+                    tracker.current_ordinal = tracker.current_ordinal.saturating_add(1);
+                    tracker.current_index = index;
+                }
+                if tracker.item_count == 0 {
+                    tracker.item_count = count;
+                }
+                self.update_job(app, id, |job| {
+                    if job.state == DownloadState::Paused {
+                        return;
+                    }
+                    job.state = DownloadState::Downloading;
+                    job.current_operation = format!(
+                        "Failed item {} of {}: {}",
+                        tracker.current_ordinal, tracker.item_count, filename
+                    );
+                    set_gallery_file_progress(
+                        job,
+                        index,
+                        filename,
+                        size,
+                        GalleryFileState::Failed,
+                        0.0,
+                    );
+                    job.speed_bytes_per_second = None;
+                    job.eta_seconds = None;
+                })
+                .await;
+            }
+            return true;
         }
         // Custom output lines can contain paths, but never belong in diagnostics.
         true
@@ -1491,6 +1633,71 @@ struct ParsedProgress {
     total_bytes: Option<u64>,
     speed: Option<f64>,
     eta: Option<u64>,
+}
+
+fn set_gallery_file_progress(
+    job: &mut DownloadJob,
+    index: u32,
+    filename: &str,
+    size_bytes: Option<u64>,
+    state: GalleryFileState,
+    progress_percent: f64,
+) {
+    if index == 0 {
+        return;
+    }
+    let filename = filename
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(180)
+        .collect::<String>();
+    let filename = if filename.trim().is_empty() {
+        format!("Album item {index}")
+    } else {
+        filename
+    };
+    let progress_percent = if progress_percent.is_finite() {
+        progress_percent.clamp(0.0, 100.0)
+    } else {
+        0.0
+    };
+    if let Some(file) = job
+        .gallery_files
+        .iter_mut()
+        .find(|file| file.index == index)
+    {
+        file.filename = filename;
+        file.size_bytes = size_bytes.filter(|size| *size > 0).or(file.size_bytes);
+        file.state = state;
+        file.progress_percent = if state == GalleryFileState::Failed {
+            file.progress_percent.max(progress_percent)
+        } else {
+            progress_percent
+        };
+        return;
+    }
+    if job.gallery_files.len() >= MAX_GALLERY_PROGRESS_FILES {
+        return;
+    }
+    job.gallery_files.push(GalleryFileProgress {
+        index,
+        filename,
+        size_bytes: size_bytes.filter(|size| *size > 0),
+        state,
+        progress_percent,
+    });
+    job.gallery_files.sort_by_key(|file| file.index);
+}
+
+fn failed_gallery_selection(files: &[GalleryFileProgress]) -> Vec<GalleryItemSelection> {
+    files
+        .iter()
+        .filter(|file| file.state == GalleryFileState::Failed)
+        .map(|file| GalleryItemSelection {
+            index: file.index,
+            size_bytes: file.size_bytes,
+        })
+        .collect()
 }
 
 #[derive(Debug, Default)]
@@ -2069,6 +2276,71 @@ mod tests {
         tracker.record_boundary(start + Duration::from_millis(1_100));
         assert!(!tracker.should_publish_progress(start + Duration::from_millis(1_599)));
         assert!(tracker.should_publish_progress(start + Duration::from_millis(1_600)));
+    }
+
+    #[test]
+    fn selects_only_failed_gallery_files_for_retry() {
+        let files = vec![
+            GalleryFileProgress {
+                index: 1,
+                filename: "complete.mp4".to_owned(),
+                size_bytes: Some(10),
+                state: GalleryFileState::Completed,
+                progress_percent: 100.0,
+            },
+            GalleryFileProgress {
+                index: 2,
+                filename: "failed.mp4".to_owned(),
+                size_bytes: Some(20),
+                state: GalleryFileState::Failed,
+                progress_percent: 45.0,
+            },
+            GalleryFileProgress {
+                index: 3,
+                filename: "skipped.mp4".to_owned(),
+                size_bytes: Some(30),
+                state: GalleryFileState::Skipped,
+                progress_percent: 100.0,
+            },
+        ];
+
+        assert_eq!(
+            failed_gallery_selection(&files),
+            [GalleryItemSelection {
+                index: 2,
+                size_bytes: Some(20),
+            }]
+        );
+    }
+
+    #[test]
+    fn records_bounded_gallery_file_lifecycle() {
+        let directory = tempdir().expect("temporary directory");
+        let mut job =
+            DownloadJob::from_request("gallery-job".to_owned(), &sample_request(directory.path()));
+
+        set_gallery_file_progress(
+            &mut job,
+            4,
+            "video\nname.mp4",
+            Some(100),
+            GalleryFileState::Downloading,
+            42.5,
+        );
+        set_gallery_file_progress(
+            &mut job,
+            4,
+            "video\nname.mp4",
+            None,
+            GalleryFileState::Failed,
+            0.0,
+        );
+
+        assert_eq!(job.gallery_files.len(), 1);
+        assert_eq!(job.gallery_files[0].filename, "videoname.mp4");
+        assert_eq!(job.gallery_files[0].size_bytes, Some(100));
+        assert_eq!(job.gallery_files[0].state, GalleryFileState::Failed);
+        assert_eq!(job.gallery_files[0].progress_percent, 42.5);
     }
 
     #[test]

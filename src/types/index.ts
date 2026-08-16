@@ -190,6 +190,16 @@ export interface GalleryItemSelection {
   sizeBytes?: number | null;
 }
 
+export type GalleryFileState = "queued" | "downloading" | "completed" | "skipped" | "failed";
+
+export interface GalleryFileProgress {
+  index: number;
+  filename: string;
+  sizeBytes?: number | null;
+  state: GalleryFileState;
+  progressPercent: number;
+}
+
 export interface BatchAnalysisItem {
   inputUrl: string;
   analysis?: MediaAnalysis | null;
@@ -262,6 +272,7 @@ export interface DownloadJob {
   currentOperation: string;
   error?: string | null;
   diagnostics: string[];
+  galleryFiles: GalleryFileProgress[];
   attemptCount: number;
   retryOfId?: string | null;
   createdAt: string;

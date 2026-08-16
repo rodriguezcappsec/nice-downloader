@@ -186,6 +186,26 @@ pub struct GalleryItemSelection {
     pub size_bytes: Option<u64>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum GalleryFileState {
+    Queued,
+    Downloading,
+    Completed,
+    Skipped,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct GalleryFileProgress {
+    pub index: u32,
+    pub filename: String,
+    pub size_bytes: Option<u64>,
+    pub state: GalleryFileState,
+    pub progress_percent: f64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BatchAnalysisItem {
@@ -1946,6 +1966,8 @@ pub struct DownloadJob {
     pub error: Option<String>,
     #[serde(default)]
     pub diagnostics: Vec<String>,
+    #[serde(default)]
+    pub gallery_files: Vec<GalleryFileProgress>,
     #[serde(default = "default_attempt_count")]
     pub attempt_count: u32,
     pub retry_of_id: Option<String>,
@@ -1971,6 +1993,20 @@ impl DownloadJob {
         let selected_gallery_count = gallery_download
             .then(|| request.options.gallery_selection.as_ref().map(Vec::len))
             .flatten();
+        let gallery_files = request
+            .options
+            .gallery_selection
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(|item| GalleryFileProgress {
+                index: item.index,
+                filename: format!("Album item {}", item.index),
+                size_bytes: item.size_bytes,
+                state: GalleryFileState::Queued,
+                progress_percent: 0.0,
+            })
+            .collect();
         Self {
             id,
             url: request.url.clone(),
@@ -2001,6 +2037,7 @@ impl DownloadJob {
             current_operation: "Waiting for an available download slot".to_owned(),
             error: None,
             diagnostics: Vec::new(),
+            gallery_files,
             attempt_count: 1,
             retry_of_id: None,
             created_at: now,

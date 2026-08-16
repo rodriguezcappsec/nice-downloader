@@ -45,6 +45,7 @@ export function NewDownloadPage() {
   const startDownload = useAppStore((state) => state.startDownload);
   const startDownloads = useAppStore((state) => state.startDownloads);
   const engines = useAppStore((state) => state.engines);
+  const enginePreferences = useAppStore((state) => state.enginePreferences);
   const setView = useAppStore((state) => state.setView);
   const view = useAppStore((state) => state.view);
   const [url, setUrl] = useState("");
@@ -490,6 +491,11 @@ export function NewDownloadPage() {
           <section className="panel-shadow sticky top-5 self-start overflow-hidden rounded-[12px] border border-line/70 bg-panel/90 p-5 backdrop-blur-xl">
             <div className="mb-5 flex items-center justify-between"><h2 className="text-[15px] font-semibold tracking-[-0.02em]">Download options</h2><span className="rounded-[5px] bg-accent/10 px-2 py-1 text-[9px] font-semibold uppercase tracking-[0.12em] text-accent">Local</span></div>
             <div className="grid gap-4">
+              <DownloadCapabilityPreview
+                analysis={analysis}
+                isGalleryAlbum={isGalleryAlbum}
+                accessConfigured={enginePreferences.browserCookieSource !== "none" || Boolean(enginePreferences.proxyUrl)}
+              />
               {isGallery ? (
                 <div className="border border-line bg-elevated p-3 text-sm text-muted">
                   <p>{isGalleryAlbum
@@ -858,6 +864,54 @@ function defaultBatchOptions(
     outputConflictPolicy,
     gallerySelection: null,
   };
+}
+
+function DownloadCapabilityPreview({
+  analysis,
+  isGalleryAlbum,
+  accessConfigured,
+}: {
+  analysis: MediaAnalysis;
+  isGalleryAlbum: boolean;
+  accessConfigured: boolean;
+}) {
+  const gallery = analysis.engine === "galleryDl";
+  const direct = analysis.engine === "directHttp";
+  const rows = gallery ? [
+    ["Engine", "gallery-dl"],
+    ["File handling", "Original files; no conversion"],
+    ["Resume", "Partial transfers are retained"],
+    ["Recovery", isGalleryAlbum ? "Failed album files can be retried separately" : "Single original file"],
+  ] : direct ? [
+    ["Engine", "aria2c or curl fallback"],
+    ["File handling", "Transferred unchanged"],
+    ["Resume", "HTTP range resume when supported"],
+    ["Limitation", "No extraction or conversion"],
+  ] : [
+    ["Engine", "yt-dlp with FFmpeg"],
+    ["File handling", "Selected streams may be merged or converted"],
+    ["Resume", "Engine-managed partial downloads"],
+    ["Limitation", "Availability depends on the site extractor"],
+  ];
+  rows.push([
+    "Access",
+    accessConfigured
+      ? "Configured cookies or proxy will be applied when supported"
+      : "Public access only; protected media may require Settings configuration",
+  ]);
+  return (
+    <div className="rounded-[8px] border border-line/70 bg-canvas/50 p-3">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-ink">Compatibility preview</span>
+        <span className={`text-[10px] font-medium ${accessConfigured ? "text-emerald-400" : "text-muted"}`}>
+          {accessConfigured ? "Site access configured" : "No cookies or proxy configured"}
+        </span>
+      </div>
+      <dl className="grid gap-1.5 text-xs">
+        {rows.map(([label, value]) => <div key={label} className="grid grid-cols-[92px_1fr] gap-2"><dt className="text-muted">{label}</dt><dd className="text-ink">{value}</dd></div>)}
+      </dl>
+    </div>
+  );
 }
 
 const SPONSORBLOCK_CATEGORIES: { id: SponsorBlockCategory; label: string }[] = [
