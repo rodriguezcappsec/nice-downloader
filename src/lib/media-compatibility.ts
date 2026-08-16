@@ -12,8 +12,10 @@ export interface EmbeddedCompatibilityAssessment {
 
 type CompatibilityItem = Pick<
   LibraryItem,
-  "audioCodec" | "container" | "mediaKind" | "metadataState" | "videoCodec"
+  "audioCodec" | "container" | "fileSizeBytes" | "id" | "mediaKind" | "metadataState" | "modifiedAtMs" | "videoCodec"
 >;
+
+export type EmbeddedPlaybackEvidence = "played" | "failed";
 
 const canPlayCache = new Map<string, CanPlayTypeResult>();
 
@@ -60,6 +62,7 @@ const CONTAINER_MIME_TYPES: Record<string, string> = {
 export function assessEmbeddedCompatibility(
   item: CompatibilityItem,
   preflight?: LibraryPlaybackPreflight | null,
+  evidence?: EmbeddedPlaybackEvidence | null,
 ): EmbeddedCompatibilityAssessment {
   const videoCodec = normalizeCodec(item.videoCodec);
   const audioCodec = normalizeCodec(item.audioCodec);
@@ -99,6 +102,26 @@ export function assessEmbeddedCompatibility(
   }
 
   const capability = canPlayType(mimeType);
+  if (evidence === "played") {
+    return {
+      kind: "expected",
+      badge: "Played here",
+      heading: "Verified in the embedded player",
+      codecSummary,
+      detail: "This exact file has already made sustained playback progress in the embedded player during this app session.",
+    };
+  }
+
+  if (evidence === "failed") {
+    return {
+      kind: "native",
+      badge: "Embedded failed",
+      heading: "Embedded playback failed",
+      codecSummary,
+      detail: "This exact file failed or stalled in the embedded player during this app session. Use native mpv or create an H.264 playback copy.",
+    };
+  }
+
   if (!capability) {
     return {
       kind: "native",
@@ -121,11 +144,11 @@ export function assessEmbeddedCompatibility(
 
   if (capability === "probably") {
     return {
-      kind: "expected",
-      badge: "Embedded ready",
-      heading: "Expected to play here",
+      kind: "unknown",
+      badge: "Likely compatible",
+      heading: "Format likely compatible",
       codecSummary,
-      detail: "This WebKit runtime reports support for the detected container and codecs. Unusual file timing can still cause a playback failure.",
+      detail: "WebKit reports generic support for this container and codec combination, but this exact file has not been verified by sustained playback yet.",
     };
   }
 
@@ -136,6 +159,10 @@ export function assessEmbeddedCompatibility(
     codecSummary,
     detail: "WebKit reports possible, but not definite, support for the detected container and codecs. Native mpv remains available if playback fails.",
   };
+}
+
+export function embeddedPlaybackFingerprint(item: CompatibilityItem): string {
+  return `${item.id}:${item.fileSizeBytes ?? "unknown"}:${item.modifiedAtMs ?? "unknown"}`;
 }
 
 export function formatMediaCodec(codec: string | null | undefined): string | null {

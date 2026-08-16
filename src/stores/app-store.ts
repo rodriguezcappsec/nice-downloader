@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { api, normalizeError } from "../lib/tauri";
+import type { EmbeddedPlaybackEvidence } from "../lib/media-compatibility";
 import type {
   AppError,
   BatchAnalysisResponse,
@@ -20,6 +21,7 @@ interface AppStore {
   compareItemIds: string[];
   imageCompareItemIds: string[];
   playNextItemIds: string[];
+  embeddedPlaybackEvidence: Record<string, EmbeddedPlaybackEvidence>;
   engines: EngineInfo[];
   enginePreferences: EnginePreferences;
   jobs: Record<string, DownloadJob>;
@@ -47,6 +49,7 @@ interface AppStore {
   removePlayNextItem: (itemId: string) => void;
   movePlayNextItem: (itemId: string, newIndex: number) => void;
   clearPlayNext: () => void;
+  recordEmbeddedPlaybackEvidence: (fingerprint: string, evidence: EmbeddedPlaybackEvidence) => void;
   setError: (error: AppError | null) => void;
   setNotice: (notice: AppStore["notice"]) => void;
   setEnginePreferences: (preferences: EnginePreferences) => void;
@@ -97,6 +100,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   compareItemIds: [],
   imageCompareItemIds: [],
   playNextItemIds: [],
+  embeddedPlaybackEvidence: {},
   engines: [],
   enginePreferences: {
     browserCookieSource: "none",
@@ -151,6 +155,11 @@ export const useAppStore = create<AppStore>((set, get) => ({
     return { playNextItemIds: next };
   }),
   clearPlayNext: () => set({ playNextItemIds: [] }),
+  recordEmbeddedPlaybackEvidence: (fingerprint, evidence) => set((state) => ({
+    embeddedPlaybackEvidence: state.embeddedPlaybackEvidence[fingerprint] === evidence
+      ? state.embeddedPlaybackEvidence
+      : { ...state.embeddedPlaybackEvidence, [fingerprint]: evidence },
+  })),
   setError: (error) => set({ error }),
   setNotice: (notice) => set({ notice }),
   setEnginePreferences: (enginePreferences) => set({ enginePreferences }),

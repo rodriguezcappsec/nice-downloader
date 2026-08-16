@@ -825,6 +825,8 @@ pub struct LibraryQueryRequest {
     pub collection_id: Option<String>,
     pub favorite_only: bool,
     #[serde(default)]
+    pub private_only: bool,
+    #[serde(default)]
     pub sort: LibrarySort,
 }
 
@@ -856,6 +858,8 @@ pub struct LibrarySmartViewQuery {
     pub rating: Option<String>,
     pub collection_id: Option<String>,
     pub favorite_only: bool,
+    #[serde(default)]
+    pub private_only: bool,
     pub sort: LibrarySort,
 }
 

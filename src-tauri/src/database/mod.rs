@@ -7821,6 +7821,30 @@ fn build_library_query(request: &LibraryQueryRequest) -> Result<(String, Vec<Sql
         clauses.push("favorite = 1".to_owned());
     }
 
+    if request.private_only {
+        clauses.push(
+            "(
+                EXISTS (
+                    SELECT 1 FROM library_sources private_source
+                    WHERE private_source.id = media_library.source_id
+                      AND private_source.private = 1
+                )
+                OR EXISTS (
+                    SELECT 1 FROM library_private_items private_item
+                    WHERE private_item.item_id = media_library.id
+                )
+                OR EXISTS (
+                    SELECT 1 FROM library_private_folders private_folder
+                    WHERE private_folder.source_id = media_library.source_id
+                      AND (private_folder.relative_path = ''
+                        OR REPLACE(COALESCE(media_library.relative_path, ''), '\\', '/') = private_folder.relative_path
+                        OR REPLACE(COALESCE(media_library.relative_path, ''), '\\', '/') LIKE private_folder.relative_path || '/%')
+                )
+            )"
+            .to_owned(),
+        );
+    }
+
     let where_clause = if clauses.is_empty() {
         String::new()
     } else {
@@ -8062,6 +8086,7 @@ fn library_query_from_smart_view(
         rating: query.rating.clone(),
         collection_id: query.collection_id.clone(),
         favorite_only: query.favorite_only,
+        private_only: query.private_only,
         sort: query.sort,
     }
 }
@@ -8090,6 +8115,7 @@ fn empty_library_query_request(page: u32, page_size: u32) -> LibraryQueryRequest
         rating: None,
         collection_id: None,
         favorite_only: false,
+        private_only: false,
         sort: LibrarySort::Recent,
     }
 }
@@ -10788,6 +10814,7 @@ mod tests {
             rating: None,
             collection_id: None,
             favorite_only: false,
+            private_only: false,
             sort: LibrarySort::Recent,
         };
         let smart_view = database
@@ -11030,6 +11057,12 @@ mod tests {
             query.items.iter().map(|item| &item.id).collect::<Vec<_>>(),
             vec![&public_item.id]
         );
+        let mut locked_private_request = library_query_request();
+        locked_private_request.private_only = true;
+        let locked_private_query = database
+            .query_library_items(locked_private_request)
+            .expect("locked private-only query");
+        assert_eq!(locked_private_query.total_items, 0);
         let facets = database
             .library_facets(LibraryFacetRequest {
                 source_id: None,
@@ -11088,6 +11121,23 @@ mod tests {
         assert_eq!(
             database.list_library_items().expect("unlocked items").len(),
             4
+        );
+        let mut unlocked_private_request = library_query_request();
+        unlocked_private_request.private_only = true;
+        let private_ids = database
+            .query_library_items(unlocked_private_request)
+            .expect("unlocked private-only query")
+            .items
+            .into_iter()
+            .map(|item| item.id)
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            private_ids,
+            HashSet::from([
+                explicit_private.id.clone(),
+                folder_private.id.clone(),
+                source_private.id.clone(),
+            ])
         );
 
         database
@@ -12387,6 +12437,7 @@ mod tests {
             rating: None,
             collection_id: None,
             favorite_only: false,
+            private_only: false,
             sort: LibrarySort::Recent,
         }
     }

@@ -555,6 +555,7 @@ export interface LibraryQueryRequest {
   rating?: string | null;
   collectionId?: string | null;
   favoriteOnly: boolean;
+  privateOnly?: boolean;
   sort: LibrarySort;
 }
 
