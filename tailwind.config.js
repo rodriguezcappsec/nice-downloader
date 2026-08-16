@@ -12,11 +12,17 @@ export default {
         ink: "rgb(var(--ink) / <alpha-value>)",
         muted: "rgb(var(--muted) / <alpha-value>)",
         accent: "rgb(var(--accent) / <alpha-value>)",
+        accentInk: "rgb(var(--accent-ink) / <alpha-value>)",
         danger: "rgb(var(--danger) / <alpha-value>)"
       },
       boxShadow: {
-        panel: "0 20px 55px rgb(3 11 24 / 0.22), inset 0 1px 0 rgb(255 255 255 / 0.025)",
-        control: "0 1px 0 rgb(255 255 255 / 0.04), 0 8px 20px rgb(3 11 24 / 0.18)"
+        panel: "0 24px 70px rgb(17 12 5 / 0.22), inset 0 1px 0 rgb(255 248 229 / 0.035)",
+        control: "0 1px 0 rgb(255 248 229 / 0.05), 0 10px 24px rgb(17 12 5 / 0.18)"
+      },
+      borderRadius: {
+        control: "10px",
+        panel: "16px",
+        media: "20px"
       }
     },
   },

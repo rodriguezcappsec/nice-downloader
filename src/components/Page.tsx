@@ -12,16 +12,16 @@ export function Page({
   children: ReactNode;
 }) {
   return (
-    <div className="mx-auto w-full max-w-[1400px] px-8 pb-12 pt-8 xl:px-10">
-      <header className="mb-8 flex min-h-16 items-start justify-between gap-8">
+    <div className="workspace-enter mx-auto w-full max-w-[1440px] px-8 pb-14 pt-10 xl:px-12">
+      <header className="mb-10 flex min-h-20 items-start justify-between gap-10">
         <div className="min-w-0">
-          <div className="mb-2 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-accent/90">
-            <span className="h-px w-5 bg-accent/70" /> Local workspace
+          <div className="mb-3 flex items-center gap-2.5 text-[10px] font-semibold tracking-[0.08em] text-accent/90">
+            <span className="h-px w-7 bg-accent/70" /> Media workspace
           </div>
-          <h1 className="text-[28px] font-semibold leading-[1.08] tracking-[-0.035em] text-ink text-balance">{title}</h1>
-          <p className="mt-2 max-w-[65ch] text-[13px] leading-5 text-muted text-pretty">{description}</p>
+          <h1 className="text-[34px] font-semibold leading-[1.04] tracking-[-0.045em] text-ink text-balance">{title}</h1>
+          <p className="mt-3 max-w-[62ch] text-[13px] leading-5 text-muted text-pretty">{description}</p>
         </div>
-        {actions ? <div className="shrink-0 pt-3">{actions}</div> : null}
+        {actions ? <div className="shrink-0 pt-4">{actions}</div> : null}
       </header>
       {children}
     </div>

@@ -4,39 +4,41 @@
 
 :root {
   color-scheme: light;
-  --canvas: 241 243 247;
-  --panel: 249 250 252;
-  --elevated: 231 235 242;
-  --line: 200 207 218;
-  --ink: 26 31 40;
-  --muted: 98 108 124;
-  --accent: 49 105 201;
-  --danger: 190 58 68;
-  font-family: "Cantarell", "Noto Sans", "IBM Plex Sans", system-ui, sans-serif;
+  --canvas: 239 236 229;
+  --panel: 248 246 241;
+  --elevated: 228 223 213;
+  --line: 196 188 174;
+  --ink: 31 29 25;
+  --muted: 103 96 84;
+  --accent: 184 118 27;
+  --accent-ink: 37 25 8;
+  --danger: 181 57 58;
+  font-family: "Avenir Next", "Segoe UI Variable", "IBM Plex Sans", "Noto Sans", system-ui, sans-serif;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
 }
 
 .dark {
   color-scheme: dark;
-  --canvas: 10 12 16;
-  --panel: 15 18 23;
-  --elevated: 23 28 36;
-  --line: 42 49 61;
-  --ink: 247 249 252;
-  --muted: 184 192 205;
-  --accent: 102 153 235;
-  --danger: 235 91 102;
+  --canvas: 12 12 11;
+  --panel: 19 19 17;
+  --elevated: 30 29 26;
+  --line: 57 54 48;
+  --ink: 245 241 232;
+  --muted: 177 170 157;
+  --accent: 232 174 76;
+  --accent-ink: 33 23 7;
+  --danger: 232 91 91;
 }
 
 .dark.high-contrast {
-  --canvas: 3 5 8;
-  --panel: 8 11 15;
-  --elevated: 21 27 36;
-  --line: 112 126 146;
+  --canvas: 4 4 3;
+  --panel: 10 10 8;
+  --elevated: 26 25 21;
+  --line: 132 124 109;
   --ink: 255 255 255;
-  --muted: 220 226 236;
-  --accent: 130 180 255;
+  --muted: 232 227 217;
+  --accent: 255 196 91;
 }
 
 * { box-sizing: border-box; }
@@ -47,7 +49,8 @@ body {
   min-height: 680px;
   overflow: hidden;
   background:
-    radial-gradient(circle at 76% -12%, rgb(var(--accent) / 0.09), transparent 38rem),
+    radial-gradient(circle at 82% -18%, rgb(var(--accent) / 0.12), transparent 40rem),
+    radial-gradient(circle at 42% 115%, rgb(112 78 38 / 0.06), transparent 34rem),
     rgb(var(--canvas));
   color: rgb(var(--ink));
 }
@@ -57,7 +60,7 @@ body::before {
   z-index: 60;
   pointer-events: none;
   content: "";
-  opacity: 0.025;
+  opacity: 0.035;
   background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.55'/%3E%3C/svg%3E");
 }
 button, input, select, textarea { font: inherit; }
@@ -94,11 +97,74 @@ input[type="checkbox"] { accent-color: rgb(var(--accent)); }
 }
 
 .panel-shadow {
-  box-shadow: 0 20px 55px rgb(3 11 24 / 0.22), inset 0 1px 0 rgb(255 255 255 / 0.025);
+  box-shadow: 0 24px 70px rgb(17 12 5 / 0.22), inset 0 1px 0 rgb(255 248 229 / 0.035);
 }
 
 .surface-inset {
-  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.025), inset 0 0 0 1px rgb(var(--line) / 0.35);
+  box-shadow: inset 0 1px 0 rgb(255 248 229 / 0.035), inset 0 0 0 1px rgb(var(--line) / 0.35);
+}
+
+::selection {
+  background: rgb(var(--accent) / 0.28);
+  color: rgb(var(--ink));
+}
+
+.cinema-sidebar {
+  background:
+    linear-gradient(180deg, rgb(var(--panel) / 0.98), rgb(var(--canvas) / 0.94)),
+    rgb(var(--panel));
+  box-shadow: 18px 0 70px rgb(13 9 4 / 0.18), inset -1px 0 0 rgb(255 244 219 / 0.025);
+}
+
+.cinema-main::before {
+  position: fixed;
+  top: -16rem;
+  right: -12rem;
+  width: 42rem;
+  height: 42rem;
+  border-radius: 999px;
+  background: radial-gradient(circle, rgb(var(--accent) / 0.095), transparent 68%);
+  content: "";
+  pointer-events: none;
+}
+
+.brand-mark {
+  box-shadow:
+    0 16px 34px rgb(var(--accent) / 0.2),
+    inset 0 1px 0 rgb(255 255 255 / 0.38),
+    inset 0 -8px 18px rgb(99 54 0 / 0.14);
+}
+
+.brand-mark::after {
+  position: absolute;
+  inset: 5px;
+  border: 1px solid rgb(255 255 255 / 0.24);
+  border-radius: 8px;
+  content: "";
+}
+
+.workspace-enter {
+  animation: workspace-enter 380ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.ingest-card {
+  background:
+    radial-gradient(circle at 92% 0%, rgb(var(--accent) / 0.12), transparent 22rem),
+    linear-gradient(135deg, rgb(var(--panel) / 0.96), rgb(var(--panel) / 0.76));
+  box-shadow:
+    0 30px 85px rgb(17 12 5 / 0.2),
+    inset 0 1px 0 rgb(255 248 229 / 0.06);
+}
+
+@keyframes workspace-enter {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 ::-webkit-scrollbar { width: 10px; height: 10px; }

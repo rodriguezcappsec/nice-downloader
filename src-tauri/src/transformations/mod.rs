@@ -3,11 +3,14 @@ use crate::{
     engines::managed,
     errors::AppError,
     models::{
-        AudioTransformCodec, StartTransformationRequest, TransformAudioCodec, TransformVideoCodec,
-        TransformationOperation, TransformationState, TransformationTask,
+        AudioTransformCodec, PrivacyBlurRegion, PrivacyDetectionKind, PrivacyDetectionRequest,
+        PrivacyRedactionSuggestion, StartTransformationRequest, TransformAudioCodec,
+        TransformVideoCodec, TransformationOperation, TransformationState, TransformationTask,
     },
 };
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use chrono::Utc;
+use reqwest::Client;
 use serde::Deserialize;
 use std::{
     collections::HashMap,
@@ -327,12 +330,26 @@ impl TransformationManager {
             return Ok(());
         }
         staged.publish()?;
+        let report_error = if matches!(
+            request.operation,
+            TransformationOperation::PrivacyExport { .. }
+        ) {
+            write_privacy_export_report(&request)
+                .err()
+                .map(|error| error.message)
+        } else {
+            None
+        };
         self.finish(
             &app,
             id,
             TransformationState::Completed,
-            "Transformation completed",
-            None,
+            if report_error.is_some() {
+                "Privacy-safe copy completed; report unavailable"
+            } else {
+                "Transformation completed"
+            },
+            report_error,
         )?;
         Ok(())
     }
@@ -375,6 +392,275 @@ impl TransformationManager {
             task.completed_at = Some(Utc::now());
         })
     }
+}
+
+fn write_privacy_export_report(request: &StartTransformationRequest) -> Result<(), AppError> {
+    let TransformationOperation::PrivacyExport {
+        strip_metadata,
+        blur_regions,
+        mute_ranges,
+    } = &request.operation
+    else {
+        return Ok(());
+    };
+    let output_name = Path::new(&request.output_path)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("privacy-safe-export.mp4");
+    let report = serde_json::json!({
+        "version": 1,
+        "outputFile": output_name,
+        "createdAt": Utc::now(),
+        "metadataRemoved": strip_metadata,
+        "blurRegions": blur_regions,
+        "muteRanges": mute_ranges,
+        "note": "This report contains redaction geometry and times only. No source frames or detector imagery are retained."
+    });
+    let report_path = PathBuf::from(format!("{}.privacy-report.json", request.output_path));
+    let encoded = serde_json::to_vec_pretty(&report)
+        .map_err(|error| AppError::internal("could not encode privacy export report", error))?;
+    std::fs::write(&report_path, encoded)
+        .map_err(|error| AppError::internal("could not write privacy export report", error))
+}
+
+#[derive(Debug, Deserialize)]
+struct PrivacyDetectionResponse {
+    #[serde(default)]
+    detections: Vec<RawPrivacyDetection>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawPrivacyDetection {
+    frame_index: usize,
+    kind: String,
+    confidence: f64,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+}
+
+#[derive(Debug, Deserialize)]
+struct OllamaPrivacyResponse {
+    message: OllamaPrivacyMessage,
+}
+
+#[derive(Debug, Deserialize)]
+struct OllamaPrivacyMessage {
+    content: String,
+}
+
+pub async fn suggest_privacy_redactions(
+    request: PrivacyDetectionRequest,
+) -> Result<Vec<PrivacyRedactionSuggestion>, AppError> {
+    if request.model.trim().is_empty()
+        || request.model.chars().count() > 120
+        || request.model.chars().any(char::is_control)
+        || request.kinds.is_empty()
+        || request.kinds.len() > 3
+    {
+        return Err(AppError::new(
+            "invalid_privacy_detector_request",
+            "Choose a local vision model and at least one supported detector.",
+        ));
+    }
+    let input = PathBuf::from(&request.input_path);
+    let metadata = std::fs::symlink_metadata(&input)
+        .map_err(|_| AppError::new("invalid_input_path", "Choose an existing local video file."))?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(AppError::new(
+            "invalid_input_path",
+            "Privacy detection accepts regular, non-symlink video files only.",
+        ));
+    }
+    let input = input
+        .canonicalize()
+        .map_err(|_| AppError::new("invalid_input_path", "Choose an existing local video file."))?;
+    let ffmpeg = managed::resolve("ffmpeg").ok_or_else(|| {
+        AppError::new(
+            "ffmpeg_missing",
+            "Install FFmpeg before sampling privacy redactions.",
+        )
+    })?;
+    let token = CancellationToken::new();
+    let duration = probe_duration(&input.to_string_lossy(), &token)
+        .await?
+        .filter(|value| value.is_finite() && *value > 0.5)
+        .unwrap_or(60.0);
+    let seek = duration * 0.04;
+    let span = (duration * 0.92).max(0.5);
+    let frame_rate = (6.0 / span).clamp(0.001, 6.0);
+    let filter = format!(
+        "fps={frame_rate:.8},scale=320:180:force_original_aspect_ratio=decrease,pad=320:180:(ow-iw)/2:(oh-ih)/2:black,tile=3x2:padding=6:margin=6:color=black"
+    );
+    let mut command = Command::new(ffmpeg);
+    crate::utils::process::sanitize_tokio_command(&mut command);
+    command
+        .args(["-hide_banner", "-loglevel", "error", "-ss"])
+        .arg(format!("{seek:.6}"))
+        .arg("-t")
+        .arg(format!("{span:.6}"))
+        .arg("-i")
+        .arg(&input)
+        .args([
+            "-vf",
+            &filter,
+            "-frames:v",
+            "1",
+            "-q:v",
+            "4",
+            "-f",
+            "image2",
+            "-vcodec",
+            "mjpeg",
+            "pipe:1",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let output = timeout(Duration::from_secs(90), command.output())
+        .await
+        .map_err(|_| {
+            AppError::new(
+                "privacy_sampling_timeout",
+                "FFmpeg took too long to sample this video.",
+            )
+        })?
+        .map_err(|error| AppError::internal("could not sample privacy frames", error))?;
+    if !output.status.success() || output.stdout.is_empty() {
+        return Err(AppError::with_details(
+            "privacy_sampling_failed",
+            "FFmpeg could not sample frames for privacy detection.",
+            String::from_utf8_lossy(&output.stderr)
+                .chars()
+                .take(2_000)
+                .collect::<String>(),
+        ));
+    }
+    let kinds = request
+        .kinds
+        .iter()
+        .map(|kind| match kind {
+            PrivacyDetectionKind::Face => "face",
+            PrivacyDetectionKind::LicensePlate => "licensePlate",
+            PrivacyDetectionKind::Screen => "screen",
+        })
+        .collect::<Vec<_>>();
+    let prompt = format!(
+        "This image is a 3 by 2 contact sheet with frames numbered 0 through 5 left-to-right, top-to-bottom. Detect only these privacy-sensitive objects: {}. Return JSON only as {{\"detections\":[{{\"frameIndex\":0,\"kind\":\"face\",\"confidence\":0.0,\"x\":0.0,\"y\":0.0,\"width\":0.0,\"height\":0.0}}]}}. Coordinates must be normalized 0 to 1 within the individual frame, not the whole contact sheet. Do not identify people, read text, or infer identity. Omit uncertain objects below 0.45 confidence.",
+        kinds.join(", ")
+    );
+    let client = Client::builder()
+        .no_proxy()
+        .connect_timeout(Duration::from_secs(3))
+        .timeout(Duration::from_secs(300))
+        .build()
+        .map_err(|error| AppError::internal("could not prepare local privacy detector", error))?;
+    let payload = serde_json::json!({
+        "model": request.model,
+        "stream": false,
+        "format": "json",
+        "keep_alive": "10m",
+        "options": { "temperature": 0.0 },
+        "messages": [{ "role": "user", "content": prompt, "images": [BASE64.encode(output.stdout)] }]
+    });
+    let response = client
+        .post("http://127.0.0.1:11434/api/chat")
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|_| {
+            AppError::new(
+                "privacy_detector_unavailable",
+                "The local vision model did not respond.",
+            )
+        })?;
+    if !response.status().is_success() {
+        return Err(AppError::new(
+            "privacy_detector_failed",
+            format!(
+                "The local vision model returned HTTP {}.",
+                response.status()
+            ),
+        ));
+    }
+    let response = response
+        .json::<OllamaPrivacyResponse>()
+        .await
+        .map_err(|_| {
+            AppError::new(
+                "privacy_detector_invalid_response",
+                "The local vision model returned unreadable detector data.",
+            )
+        })?;
+    let start = response.message.content.find('{').ok_or_else(|| {
+        AppError::new(
+            "privacy_detector_invalid_response",
+            "The local model returned no detector JSON.",
+        )
+    })?;
+    let end = response.message.content.rfind('}').ok_or_else(|| {
+        AppError::new(
+            "privacy_detector_invalid_response",
+            "The local model returned incomplete detector JSON.",
+        )
+    })?;
+    let decoded: PrivacyDetectionResponse =
+        serde_json::from_str(&response.message.content[start..=end]).map_err(|_| {
+            AppError::new(
+                "privacy_detector_invalid_response",
+                "The local model returned invalid detector JSON.",
+            )
+        })?;
+    let allowed = request.kinds;
+    let mut suggestions = Vec::new();
+    for detection in decoded.detections.into_iter().take(100) {
+        let kind = match detection
+            .kind
+            .to_ascii_lowercase()
+            .replace(['_', '-', ' '], "")
+            .as_str()
+        {
+            "face" => PrivacyDetectionKind::Face,
+            "licenseplate" | "plate" => PrivacyDetectionKind::LicensePlate,
+            "screen" | "monitor" | "display" => PrivacyDetectionKind::Screen,
+            _ => continue,
+        };
+        let coordinates = [detection.x, detection.y, detection.width, detection.height];
+        if detection.frame_index >= 6
+            || !allowed.contains(&kind)
+            || !detection.confidence.is_finite()
+            || detection.confidence < 0.45
+            || coordinates.iter().any(|value| !value.is_finite())
+            || detection.x < 0.0
+            || detection.y < 0.0
+            || detection.width <= 0.0
+            || detection.height <= 0.0
+            || detection.x + detection.width > 1.0
+            || detection.y + detection.height > 1.0
+        {
+            continue;
+        }
+        let frame_time = (seek + span * ((detection.frame_index as f64 + 0.5) / 6.0)).min(duration);
+        let start_seconds = (frame_time - 1.5).max(0.0);
+        let end_seconds = (frame_time + 1.5).min(duration).max(start_seconds + 0.05);
+        suggestions.push(PrivacyRedactionSuggestion {
+            kind,
+            confidence: detection.confidence.clamp(0.0, 1.0),
+            frame_time_seconds: frame_time,
+            region: PrivacyBlurRegion {
+                x: detection.x,
+                y: detection.y,
+                width: detection.width,
+                height: detection.height,
+                start_seconds,
+                end_seconds,
+            },
+        });
+    }
+    suggestions.sort_by(|left, right| left.frame_time_seconds.total_cmp(&right.frame_time_seconds));
+    Ok(suggestions)
 }
 
 struct StagedTransformationOutput {
@@ -706,8 +992,71 @@ fn validate_request(
             ));
         }
     }
+    if let TransformationOperation::PrivacyExport {
+        strip_metadata,
+        blur_regions,
+        mute_ranges,
+    } = &request.operation
+    {
+        if !strip_metadata && blur_regions.is_empty() && mute_ranges.is_empty() {
+            return Err(AppError::new(
+                "empty_privacy_export",
+                "Choose metadata removal, at least one blur region, or an audio mute range.",
+            ));
+        }
+        if blur_regions.len() > 32 || mute_ranges.len() > 64 {
+            return Err(AppError::new(
+                "privacy_export_limit",
+                "Privacy exports support at most 32 blur regions and 64 mute ranges.",
+            ));
+        }
+        for region in blur_regions {
+            let values = [region.x, region.y, region.width, region.height];
+            if values.iter().any(|value| !value.is_finite())
+                || region.x < 0.0
+                || region.y < 0.0
+                || region.width <= 0.0
+                || region.height <= 0.0
+                || region.x + region.width > 1.0
+                || region.y + region.height > 1.0
+                || !valid_privacy_time_range(region.start_seconds, region.end_seconds)
+            {
+                return Err(AppError::new(
+                    "invalid_privacy_blur_region",
+                    "Blur regions must stay inside the video and use a valid time range.",
+                ));
+            }
+        }
+        if mute_ranges
+            .iter()
+            .any(|range| !valid_privacy_time_range(range.start_seconds, range.end_seconds))
+        {
+            return Err(AppError::new(
+                "invalid_privacy_mute_range",
+                "Audio mute ranges must have a non-negative start and a later end.",
+            ));
+        }
+        if output
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_none_or(|value| !value.eq_ignore_ascii_case("mp4"))
+        {
+            return Err(AppError::new(
+                "invalid_privacy_export_output",
+                "Privacy-safe exports must use an MP4 output file.",
+            ));
+        }
+    }
     request.input_path = input.to_string_lossy().into_owned();
     Ok(request)
+}
+
+fn valid_privacy_time_range(start_seconds: f64, end_seconds: f64) -> bool {
+    start_seconds.is_finite()
+        && end_seconds.is_finite()
+        && start_seconds >= 0.0
+        && end_seconds > start_seconds
+        && end_seconds <= 365.0 * 24.0 * 60.0 * 60.0
 }
 
 fn validate_montage_request(
@@ -787,6 +1136,7 @@ fn operation_label(operation: &TransformationOperation) -> &'static str {
         TransformationOperation::Transcode { .. } => "Converting media",
         TransformationOperation::SplitChapters => "Splitting chapters",
         TransformationOperation::Montage { .. } => "Rendering montage",
+        TransformationOperation::PrivacyExport { .. } => "Creating privacy-safe copy",
     }
 }
 
@@ -882,6 +1232,89 @@ async fn append_operation_arguments(
                 .arg("-reset_timestamps")
                 .arg("1")
                 .arg(output.join("chapter-%03d.mkv"));
+        }
+        TransformationOperation::PrivacyExport {
+            strip_metadata,
+            blur_regions,
+            mute_ranges,
+        } => {
+            let has_audio = probe_has_audio(&request.input_path, token).await?;
+            command.arg("-i").arg(&request.input_path);
+            let mut filters = Vec::new();
+            if blur_regions.is_empty() {
+                filters.push("[0:v]format=yuv420p[vout]".to_owned());
+            } else {
+                let split_outputs = (0..blur_regions.len())
+                    .map(|index| format!("[privacycrop{index}]"))
+                    .collect::<String>();
+                filters.push(format!(
+                    "[0:v]split={}[privacybase]{split_outputs}",
+                    blur_regions.len() + 1
+                ));
+                let mut base = "privacybase".to_owned();
+                for (index, region) in blur_regions.iter().enumerate() {
+                    filters.push(format!(
+                        "[privacycrop{index}]crop=iw*{:.8}:ih*{:.8}:iw*{:.8}:ih*{:.8},boxblur=20:2[privacyblur{index}]",
+                        region.width, region.height, region.x, region.y
+                    ));
+                    let output = if index + 1 == blur_regions.len() {
+                        "vout".to_owned()
+                    } else {
+                        format!("privacyvideo{index}")
+                    };
+                    filters.push(format!(
+                        "[{base}][privacyblur{index}]overlay=x=main_w*{:.8}:y=main_h*{:.8}:enable='between(t\\,{:.6}\\,{:.6})'[{output}]",
+                        region.x, region.y, region.start_seconds, region.end_seconds
+                    ));
+                    base = output;
+                }
+            }
+            if has_audio && !mute_ranges.is_empty() {
+                let volumes = mute_ranges
+                    .iter()
+                    .map(|range| {
+                        format!(
+                            "volume=0:enable='between(t\\,{:.6}\\,{:.6})'",
+                            range.start_seconds, range.end_seconds
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                filters.push(format!("[0:a]{volumes}[aout]"));
+            }
+            command
+                .arg("-filter_complex")
+                .arg(filters.join(";"))
+                .arg("-map")
+                .arg("[vout]");
+            if has_audio && !mute_ranges.is_empty() {
+                command.arg("-map").arg("[aout]");
+            } else if has_audio {
+                command.arg("-map").arg("0:a:0?");
+            }
+            if *strip_metadata {
+                command
+                    .arg("-map_metadata")
+                    .arg("-1")
+                    .arg("-map_chapters")
+                    .arg("-1");
+            }
+            command
+                .arg("-c:v")
+                .arg("libx264")
+                .arg("-preset")
+                .arg("medium")
+                .arg("-crf")
+                .arg("20")
+                .arg("-pix_fmt")
+                .arg("yuv420p");
+            if has_audio {
+                command.arg("-c:a").arg("aac").arg("-b:a").arg("192k");
+            }
+            command
+                .arg("-movflags")
+                .arg("+faststart")
+                .arg(&request.output_path);
         }
         TransformationOperation::Montage { fade_seconds, .. } => {
             let inputs = montage_inputs.ok_or_else(|| {
@@ -1300,6 +1733,53 @@ mod tests {
             std::fs::read(staged_directory.join("chapter-001.mkv"))
                 .expect("first chapter restored"),
             b"first"
+        );
+    }
+
+    #[test]
+    fn validates_privacy_exports_and_writes_metadata_free_reports() {
+        let directory = tempdir().expect("temporary directory");
+        let input = directory.path().join("input.mkv");
+        std::fs::write(&input, b"fixture").expect("input");
+        let output = directory.path().join("shared.mp4");
+        let request = StartTransformationRequest {
+            input_path: input.to_string_lossy().into_owned(),
+            output_path: output.to_string_lossy().into_owned(),
+            operation: TransformationOperation::PrivacyExport {
+                strip_metadata: true,
+                blur_regions: vec![crate::models::PrivacyBlurRegion {
+                    x: 0.1,
+                    y: 0.2,
+                    width: 0.3,
+                    height: 0.25,
+                    start_seconds: 2.0,
+                    end_seconds: 8.0,
+                }],
+                mute_ranges: vec![crate::models::PrivacyMuteRange {
+                    start_seconds: 4.0,
+                    end_seconds: 5.0,
+                }],
+            },
+            overwrite: false,
+        };
+        let request = validate_request(request).expect("privacy export request");
+        write_privacy_export_report(&request).expect("privacy export report");
+        let report =
+            std::fs::read_to_string(format!("{}.privacy-report.json", request.output_path))
+                .expect("report file");
+        assert!(report.contains("metadataRemoved"));
+        assert!(report.contains("blurRegions"));
+        assert!(!report.contains(&request.input_path));
+
+        let mut invalid = request;
+        invalid.output_path = directory
+            .path()
+            .join("shared.mkv")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            validate_request(invalid).expect_err("MP4 required").code,
+            "invalid_privacy_export_output"
         );
     }
 }

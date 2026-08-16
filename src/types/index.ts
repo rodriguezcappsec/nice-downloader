@@ -14,6 +14,7 @@ export type ViewId =
   | "themes"
   | "sharing"
   | "health"
+  | "recipes"
   | "presets"
   | "settings";
 
@@ -285,6 +286,47 @@ export interface StartDownloadRequest {
   analysis: MediaAnalysis;
   options: DownloadOptions;
   scheduledFor?: string | null;
+  postDownloadRecipeIds?: string[];
+}
+
+export type PostDownloadRecipeStep =
+  | { type: "importLibrary" }
+  | { type: "addTags"; tags: string[] }
+  | { type: "addToCollection"; collectionId: string }
+  | { type: "transcodeMp4" }
+  | { type: "extractAudio"; codec: "mp3" | "aac" | "opus" }
+  | { type: "privacySafeCopy" }
+  | { type: "transcribe"; modelPath: string; language: string | null }
+  | { type: "semanticIndex"; model: string };
+
+export interface PostDownloadRecipe {
+  id: string;
+  name: string;
+  enabled: boolean;
+  steps: PostDownloadRecipeStep[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SavePostDownloadRecipeRequest {
+  id?: string | null;
+  name: string;
+  enabled: boolean;
+  steps: PostDownloadRecipeStep[];
+}
+
+export interface PostDownloadRecipeRun {
+  id: string;
+  recipeId: string;
+  recipeName: string;
+  downloadId: string;
+  state: "running" | "completed" | "failed";
+  currentStep: number;
+  stepCount: number;
+  error: string | null;
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
 }
 export interface BatchDownloadFailure { url: string; error: AppError; }
 export interface BatchDownloadResult { jobs: DownloadJob[]; failures: BatchDownloadFailure[]; }
@@ -402,7 +444,37 @@ export type TransformationOperation =
   | { type: "extractAudio"; codec: "mp3" | "aac" | "opus" }
   | { type: "transcode"; container: string; videoCodec: "copy" | "h264" | "hevc" | "vp9" | "av1"; audioCodec: "copy" | "aac" | "opus" }
   | { type: "splitChapters" }
-  | { type: "montage"; segmentCount: number; totalDurationSeconds: number; fadeSeconds: number };
+  | { type: "montage"; segmentCount: number; totalDurationSeconds: number; fadeSeconds: number }
+  | { type: "privacyExport"; stripMetadata: boolean; blurRegions: PrivacyBlurRegion[]; muteRanges: PrivacyMuteRange[] };
+
+export interface PrivacyBlurRegion {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  startSeconds: number;
+  endSeconds: number;
+}
+
+export interface PrivacyMuteRange {
+  startSeconds: number;
+  endSeconds: number;
+}
+
+export type PrivacyDetectionKind = "face" | "licensePlate" | "screen";
+
+export interface PrivacyDetectionRequest {
+  inputPath: string;
+  model: string;
+  kinds: PrivacyDetectionKind[];
+}
+
+export interface PrivacyRedactionSuggestion {
+  kind: PrivacyDetectionKind;
+  confidence: number;
+  frameTimeSeconds: number;
+  region: PrivacyBlurRegion;
+}
 
 export interface StartTransformationRequest {
   inputPath: string;
@@ -730,6 +802,56 @@ export interface LibraryTranscriptIndexStatus {
   cueCount: number;
 }
 
+export interface StartLibraryTranscriptionRequest {
+  itemIds: string[];
+  modelPath: string;
+  language: string | null;
+}
+
+export interface StartLibrarySemanticIndexRequest {
+  itemIds: string[];
+  maxVideos: number;
+  model: string;
+}
+
+export type LibraryLocalInferenceJobState = "running" | "completed" | "failed" | "cancelled";
+
+export interface LibraryLocalInferenceJob {
+  id: string;
+  kind: "transcription" | "semanticIndex";
+  state: LibraryLocalInferenceJobState;
+  checkedItems: number;
+  totalItems: number;
+  completedItems: number;
+  failedItems: number;
+  currentTitle: string | null;
+  model: string;
+  error: string | null;
+  startedAt: string;
+  updatedAt: string;
+}
+
+export interface LibraryTranscriptionProviderStatus {
+  available: boolean;
+  executable: string | null;
+  detail: string;
+}
+
+export interface LibrarySemanticIndexStatus {
+  model: string;
+  indexedItems: number;
+  staleItems: number;
+}
+
+export interface LibrarySemanticTranscriptMatch {
+  item: LibraryItem;
+  scorePercent: number;
+  startSeconds: number;
+  endSeconds: number;
+  excerpt: string;
+  language: string | null;
+}
+
 export type LibraryVisualSimilarityState = "running" | "completed" | "failed" | "cancelled";
 
 export interface LibraryVisualSimilarityJob {
@@ -755,6 +877,19 @@ export interface LibraryVisualSimilarityMatch {
   item: LibraryItem;
   similarityPercent: number;
   hammingDistance: number;
+}
+
+export interface LibraryNearDuplicateMatch {
+  left: LibraryItem;
+  right: LibraryItem;
+  visualSimilarityPercent: number;
+  durationDeltaSeconds: number;
+  sizeDeltaBytes: number | null;
+  sameResolution: boolean;
+  sameContainer: boolean;
+  sameVideoCodec: boolean;
+  sameAudioCodec: boolean;
+  exactHashCompared: boolean;
 }
 
 export interface StartLocalShareRequest {
@@ -812,6 +947,36 @@ export interface LibraryArtworkCacheStatus {
   maxBytes: number;
 }
 
+export interface LibraryStorageBucket {
+  key: string;
+  label: string;
+  bytes: number;
+  itemCount: number;
+}
+
+export interface LibraryStorageSource {
+  sourceId: string;
+  name: string;
+  path: string;
+  catalogBytes: number;
+  itemCount: number;
+  availableBytes: number | null;
+}
+
+export interface LibraryStoragePlan {
+  catalogBytes: number;
+  sources: LibraryStorageSource[];
+  folders: LibraryStorageBucket[];
+  containers: LibraryStorageBucket[];
+  exactDuplicateReclaimableBytes: number;
+  playbackCacheBytes: number;
+  artworkCacheBytes: number;
+  incomingKnownBytes: number;
+  incomingUnknownItems: number;
+  activeTransformationCount: number;
+  warnings: string[];
+}
+
 export interface UpdateLibraryItemRequest {
   id: string;
   title: string;
@@ -849,6 +1014,17 @@ export interface LibraryMoment {
   color: LibraryMomentColor;
   createdAt: string;
   updatedAt: string;
+}
+
+export type LibraryChapterSuggestionKind = "chapter" | "highlight";
+
+export interface LibraryChapterSuggestion {
+  kind: LibraryChapterSuggestionKind;
+  label: string;
+  startSeconds: number;
+  endSeconds: number | null;
+  confidence: number;
+  reason: string;
 }
 
 export interface SaveLibraryMomentRequest {
@@ -1143,6 +1319,41 @@ export interface SaveLibrarySourceRequest {
   private: boolean;
   includePatterns: string[];
   excludePatterns: string[];
+}
+
+export interface LibraryPrivacyStatus {
+  configured: boolean;
+  locked: boolean;
+  autoLockMinutes: number;
+  privateSourceCount: number;
+  privateFolderCount: number;
+  privateItemCount: number;
+}
+
+export interface ConfigureLibraryPrivacyRequest {
+  passphrase: string;
+  autoLockMinutes: number;
+}
+
+export interface LibraryPrivateFolder {
+  sourceId: string;
+  relativePath: string;
+}
+
+export interface LibraryPrivacyRules {
+  itemIds: string[];
+  folders: LibraryPrivateFolder[];
+}
+
+export interface SetLibraryItemPrivacyRequest {
+  itemIds: string[];
+  private: boolean;
+}
+
+export interface SetLibraryFolderPrivacyRequest {
+  sourceId: string;
+  relativePath: string;
+  private: boolean;
 }
 
 export type LibraryScanState = "running" | "completed" | "cancelled" | "failed";

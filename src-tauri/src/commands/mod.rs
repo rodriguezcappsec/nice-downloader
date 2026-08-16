@@ -1,5 +1,10 @@
 use crate::models::LibraryWatchState;
+use crate::models::{
+    ConfigureLibraryPrivacyRequest, LibraryPrivacyRules, LibraryPrivacyStatus,
+    SetLibraryFolderPrivacyRequest, SetLibraryItemPrivacyRequest,
+};
 use crate::models::{LibraryPlaylist, SaveLibraryPlaylistRequest};
+use crate::models::{PrivacyDetectionRequest, PrivacyRedactionSuggestion};
 use crate::native_player::NativePlayerManager;
 use crate::DesktopRuntimeState;
 use crate::{
@@ -20,34 +25,41 @@ use crate::{
     models::{
         AuthenticationProfile, BatchAnalysisItem, BatchAnalysisResponse, BatchDownloadFailure,
         BatchDownloadResult, BrowserProfileInfo, DesktopPreferences, DesktopRuntimeStatus,
-        DiskSpaceInfo, DownloadArchiveMatch, DownloadJob, EngineId, EngineInfo, EnginePreferences,
-        ExportLibraryMomentsRequest, GalleryItemList, LibraryArtworkCacheStatus, LibraryBulkAction,
-        LibraryBulkMovePlan, LibraryBulkMoveResult, LibraryCacheResult, LibraryChange,
-        LibraryCollection, LibraryCompareSession, LibraryCurationDecision, LibraryCurationState,
-        LibraryDuplicateAnalysisJob, LibraryDuplicateGroup, LibraryDuplicateTrashResult,
-        LibraryFacetRequest, LibraryFacets, LibraryFileOperation, LibraryFileOperationPlan,
-        LibraryFileOperationResult, LibraryHealthSummary, LibraryImageSession, LibraryItem,
+        DiskSpaceInfo, DownloadArchiveMatch, DownloadJob, DownloadState, EngineId, EngineInfo,
+        EnginePreferences, ExportLibraryMomentsRequest, GalleryItemList, LibraryArtworkCacheStatus,
+        LibraryBulkAction, LibraryBulkMovePlan, LibraryBulkMoveResult, LibraryCacheResult,
+        LibraryChange, LibraryChapterSuggestion, LibraryCollection, LibraryCompareSession,
+        LibraryCurationDecision, LibraryCurationState, LibraryDuplicateAnalysisJob,
+        LibraryDuplicateGroup, LibraryDuplicateTrashResult, LibraryFacetRequest, LibraryFacets,
+        LibraryFileOperation, LibraryFileOperationPlan, LibraryFileOperationResult,
+        LibraryHealthSummary, LibraryImageSession, LibraryItem, LibraryLocalInferenceJob,
         LibraryMediaKind, LibraryMediaStack, LibraryMoment, LibraryMontage,
-        LibraryPlaybackCacheStatus, LibraryPlaybackEntry, LibraryPlaybackPreflight,
-        LibraryPlaybackSession, LibraryPlaybackState, LibraryQueryRequest, LibraryQueryResult,
-        LibraryRichMetadata, LibraryScanJob, LibraryScanResult, LibrarySearchStatus,
-        LibrarySmartView, LibrarySource, LibraryThemeAnalysis, LibraryThemeIndexStatus,
-        LibraryThemeJob, LibraryThemeProviderStatus, LibraryThemeSettings,
-        LibraryTranscriptIndexStatus, LibraryTranscriptMatch, LibraryVisualSimilarityJob,
+        LibraryNearDuplicateMatch, LibraryPlaybackCacheStatus, LibraryPlaybackEntry,
+        LibraryPlaybackPreflight, LibraryPlaybackSession, LibraryPlaybackState,
+        LibraryQueryRequest, LibraryQueryResult, LibraryRichMetadata, LibraryScanJob,
+        LibraryScanResult, LibrarySearchStatus, LibrarySemanticIndexStatus,
+        LibrarySemanticTranscriptMatch, LibrarySmartView, LibrarySource, LibraryStoragePlan,
+        LibraryThemeAnalysis, LibraryThemeIndexStatus, LibraryThemeJob, LibraryThemeProviderStatus,
+        LibraryThemeSettings, LibraryTranscriptIndexStatus, LibraryTranscriptMatch,
+        LibraryTranscriptionProviderStatus, LibraryVisualSimilarityJob,
         LibraryVisualSimilarityMatch, LibraryVisualSimilarityStatus, LocalShareSession,
-        MediaAnalysis, NativePlaybackSession, NativePlaybackStatus, OnboardingStatus, Preset,
-        PreviewLibraryBulkMoveRequest, PreviewLibraryFileOperationRequest, QueueSettings,
-        QueueSnapshot, SaveAuthenticationProfileRequest, SaveLibraryCollectionRequest,
+        MediaAnalysis, NativePlaybackSession, NativePlaybackStatus, OnboardingStatus,
+        PostDownloadRecipe, PostDownloadRecipeRun, Preset, PreviewLibraryBulkMoveRequest,
+        PreviewLibraryFileOperationRequest, QueueSettings, QueueSnapshot,
+        SaveAuthenticationProfileRequest, SaveLibraryCollectionRequest,
         SaveLibraryCompareSessionRequest, SaveLibraryMediaStackRequest, SaveLibraryMomentRequest,
         SaveLibraryMontageRequest, SaveLibraryPlaybackRequest, SaveLibraryRichMetadataRequest,
-        SaveLibrarySmartViewRequest, SaveLibrarySourceRequest, SavePresetRequest,
-        SaveSitePresetRuleRequest, SaveSubscriptionRequest, SetLibraryArtworkRequest,
-        SitePresetRule, StartDownloadRequest, StartLibraryClipExportRequest,
-        StartLibraryMontageExportRequest, StartLibraryThemeAnalysisRequest, StartLocalShareRequest,
-        StartTransformationRequest, Subscription, SubscriptionCheckResult, TransformationOperation,
+        SaveLibrarySmartViewRequest, SaveLibrarySourceRequest, SavePostDownloadRecipeRequest,
+        SavePresetRequest, SaveSitePresetRuleRequest, SaveSubscriptionRequest,
+        SetLibraryArtworkRequest, SitePresetRule, StartDownloadRequest,
+        StartLibraryClipExportRequest, StartLibraryMontageExportRequest,
+        StartLibrarySemanticIndexRequest, StartLibraryThemeAnalysisRequest,
+        StartLibraryTranscriptionRequest, StartLocalShareRequest, StartTransformationRequest,
+        Subscription, SubscriptionCheckResult, TransformationOperation, TransformationState,
         TransformationTask, UpdateLibraryItemRequest,
     },
     queue::{disk_space, QueueManager},
+    semantic_transcripts::SemanticTranscriptManager,
     subscriptions,
     theme_analysis::ThemeAnalysisManager,
     transformations::{MontageInput, TransformationManager},
@@ -58,7 +70,7 @@ use crate::{
     visual_similarity::VisualSimilarityManager,
 };
 use std::{collections::HashSet, sync::Arc};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::{sync::Semaphore, task::JoinSet};
 
 const MAX_BATCH_URLS: usize = 20;
@@ -89,6 +101,13 @@ pub fn cancel_transformation(
 }
 
 #[tauri::command]
+pub async fn suggest_privacy_redactions(
+    request: PrivacyDetectionRequest,
+) -> Result<Vec<PrivacyRedactionSuggestion>, AppError> {
+    crate::transformations::suggest_privacy_redactions(request).await
+}
+
+#[tauri::command]
 pub fn list_library_items(
     app: AppHandle,
     library: State<'_, library::LibraryManager>,
@@ -109,6 +128,95 @@ pub fn get_library_health_summary(
     database: State<'_, Database>,
 ) -> Result<LibraryHealthSummary, AppError> {
     database.library_health_summary()
+}
+
+#[tauri::command]
+pub async fn get_library_storage_plan(
+    app: AppHandle,
+    database: State<'_, Database>,
+    queue: State<'_, QueueManager>,
+    transformations: State<'_, TransformationManager>,
+    media_server: State<'_, MediaServerState>,
+    library: State<'_, library::LibraryManager>,
+) -> Result<LibraryStoragePlan, AppError> {
+    let database = database.inner().clone();
+    let mut plan =
+        tauri::async_runtime::spawn_blocking(move || database.library_storage_plan_base())
+            .await
+            .map_err(|error| AppError::internal("storage planner worker stopped", error))??;
+    let jobs = queue.list().await;
+    for job in jobs.iter().filter(|job| {
+        !matches!(
+            job.state,
+            DownloadState::Completed | DownloadState::Failed | DownloadState::Cancelled
+        )
+    }) {
+        if let Some(total) = job.total_bytes {
+            plan.incoming_known_bytes = plan
+                .incoming_known_bytes
+                .saturating_add(total.saturating_sub(job.downloaded_bytes.unwrap_or_default()));
+        } else {
+            plan.incoming_unknown_items += 1;
+        }
+    }
+    plan.active_transformation_count = transformations
+        .list()?
+        .into_iter()
+        .filter(|task| {
+            matches!(
+                task.state,
+                TransformationState::Queued | TransformationState::Running
+            )
+        })
+        .count();
+    plan.playback_cache_bytes = media_server.compatibility_cache_status().await?.total_bytes;
+    plan.artwork_cache_bytes = library.artwork_cache_status(&app).await?.total_bytes;
+
+    const LOW_SPACE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
+    for source in &plan.sources {
+        if source
+            .available_bytes
+            .is_some_and(|bytes| bytes < LOW_SPACE_BYTES)
+        {
+            plan.warnings
+                .push(format!("{} has less than 10 GiB available.", source.name));
+        }
+    }
+    let largest_available = plan
+        .sources
+        .iter()
+        .filter_map(|source| source.available_bytes)
+        .max();
+    if largest_available.is_some_and(|available| plan.incoming_known_bytes > available) {
+        plan.warnings.push(
+            "Known queued downloads exceed the free space of every indexed source volume."
+                .to_owned(),
+        );
+    }
+    if plan.incoming_unknown_items > 0 {
+        plan.warnings.push(format!(
+            "{} queued download{} ha{} no known final size yet.",
+            plan.incoming_unknown_items,
+            if plan.incoming_unknown_items == 1 {
+                ""
+            } else {
+                "s"
+            },
+            if plan.incoming_unknown_items == 1 {
+                "s"
+            } else {
+                "ve"
+            }
+        ));
+    }
+    if plan.active_transformation_count > 0 {
+        plan.warnings.push(format!(
+            "{} active transformation{} may create additional output files whose final size is unknown.",
+            plan.active_transformation_count,
+            if plan.active_transformation_count == 1 { "" } else { "s" }
+        ));
+    }
+    Ok(plan)
 }
 
 #[tauri::command]
@@ -154,6 +262,66 @@ pub async fn rebuild_library_transcript_index(
 }
 
 #[tauri::command]
+pub fn get_library_transcription_provider_status(
+    semantic_transcripts: State<'_, SemanticTranscriptManager>,
+) -> Result<LibraryTranscriptionProviderStatus, AppError> {
+    Ok(semantic_transcripts.transcription_provider_status())
+}
+
+#[tauri::command]
+pub fn get_library_local_inference_job(
+    semantic_transcripts: State<'_, SemanticTranscriptManager>,
+) -> Result<Option<LibraryLocalInferenceJob>, AppError> {
+    semantic_transcripts.job()
+}
+
+#[tauri::command]
+pub async fn start_library_transcription(
+    app: AppHandle,
+    semantic_transcripts: State<'_, SemanticTranscriptManager>,
+    request: StartLibraryTranscriptionRequest,
+) -> Result<LibraryLocalInferenceJob, AppError> {
+    semantic_transcripts.start_transcription(app, request).await
+}
+
+#[tauri::command]
+pub async fn start_library_semantic_transcript_index(
+    app: AppHandle,
+    semantic_transcripts: State<'_, SemanticTranscriptManager>,
+    request: StartLibrarySemanticIndexRequest,
+) -> Result<LibraryLocalInferenceJob, AppError> {
+    semantic_transcripts
+        .start_semantic_index(app, request)
+        .await
+}
+
+#[tauri::command]
+pub fn cancel_library_local_inference_job(
+    semantic_transcripts: State<'_, SemanticTranscriptManager>,
+    job_id: String,
+) -> Result<(), AppError> {
+    semantic_transcripts.cancel(&job_id)
+}
+
+#[tauri::command]
+pub fn get_library_semantic_transcript_index_status(
+    semantic_transcripts: State<'_, SemanticTranscriptManager>,
+    model: String,
+) -> Result<LibrarySemanticIndexStatus, AppError> {
+    semantic_transcripts.semantic_index_status(&model)
+}
+
+#[tauri::command]
+pub async fn search_library_semantic_transcripts(
+    semantic_transcripts: State<'_, SemanticTranscriptManager>,
+    search: String,
+    model: String,
+    limit: usize,
+) -> Result<Vec<LibrarySemanticTranscriptMatch>, AppError> {
+    semantic_transcripts.search(&search, &model, limit).await
+}
+
+#[tauri::command]
 pub fn get_library_visual_similarity_status(
     database: State<'_, Database>,
 ) -> Result<LibraryVisualSimilarityStatus, AppError> {
@@ -191,6 +359,20 @@ pub fn find_visually_similar_library_items(
     minimum_similarity_percent: f64,
 ) -> Result<Vec<LibraryVisualSimilarityMatch>, AppError> {
     database.find_visually_similar_items(&item_id, limit, minimum_similarity_percent)
+}
+
+#[tauri::command]
+pub fn find_library_near_duplicate_videos(
+    database: State<'_, Database>,
+    minimum_visual_similarity_percent: f64,
+    maximum_duration_delta_seconds: f64,
+    limit: usize,
+) -> Result<Vec<LibraryNearDuplicateMatch>, AppError> {
+    database.find_near_duplicate_videos(
+        minimum_visual_similarity_percent,
+        maximum_duration_delta_seconds,
+        limit,
+    )
 }
 
 #[tauri::command]
@@ -639,6 +821,15 @@ pub fn list_library_moments(
 }
 
 #[tauri::command]
+pub async fn suggest_library_chapters(
+    database: State<'_, Database>,
+    item_id: String,
+    maximum_suggestions: usize,
+) -> Result<Vec<LibraryChapterSuggestion>, AppError> {
+    crate::chapter_suggestions::suggest(&database, &item_id, maximum_suggestions).await
+}
+
+#[tauri::command]
 pub fn save_library_moment(
     database: State<'_, Database>,
     request: SaveLibraryMomentRequest,
@@ -1033,6 +1224,7 @@ pub fn reconcile_library(database: State<'_, Database>) -> Result<LibraryScanRes
 
 #[tauri::command]
 pub fn export_library(database: State<'_, Database>, path: String) -> Result<(), AppError> {
+    database.require_library_privacy_unlocked()?;
     library::export_backup(&database, &path)
 }
 
@@ -1042,6 +1234,82 @@ pub fn restore_library(
     path: String,
 ) -> Result<Vec<LibraryItem>, AppError> {
     library::restore_backup(&database, &path)
+}
+
+#[tauri::command]
+pub fn get_library_privacy_status(
+    database: State<'_, Database>,
+) -> Result<LibraryPrivacyStatus, AppError> {
+    database.library_privacy_status()
+}
+
+#[tauri::command]
+pub async fn configure_library_privacy(
+    app: AppHandle,
+    database: State<'_, Database>,
+    request: ConfigureLibraryPrivacyRequest,
+) -> Result<LibraryPrivacyStatus, AppError> {
+    let database = database.inner().clone();
+    let status = tauri::async_runtime::spawn_blocking(move || {
+        database.configure_library_privacy(&request.passphrase, request.auto_lock_minutes)
+    })
+    .await
+    .map_err(|error| AppError::internal("Library privacy setup task failed", error))??;
+    let _ = app.emit("library-privacy-changed", status.clone());
+    Ok(status)
+}
+
+#[tauri::command]
+pub async fn unlock_library_privacy(
+    app: AppHandle,
+    database: State<'_, Database>,
+    passphrase: String,
+) -> Result<LibraryPrivacyStatus, AppError> {
+    let database = database.inner().clone();
+    let status =
+        tauri::async_runtime::spawn_blocking(move || database.unlock_library_privacy(&passphrase))
+            .await
+            .map_err(|error| AppError::internal("Library privacy unlock task failed", error))??;
+    let _ = app.emit("library-privacy-changed", status.clone());
+    Ok(status)
+}
+
+#[tauri::command]
+pub fn lock_library_privacy(
+    app: AppHandle,
+    database: State<'_, Database>,
+) -> Result<LibraryPrivacyStatus, AppError> {
+    let status = database.lock_library_privacy()?;
+    let _ = app.emit("library-privacy-changed", status.clone());
+    Ok(status)
+}
+
+#[tauri::command]
+pub fn touch_library_privacy(database: State<'_, Database>) {
+    database.touch_library_privacy();
+}
+
+#[tauri::command]
+pub fn list_library_privacy_rules(
+    database: State<'_, Database>,
+) -> Result<LibraryPrivacyRules, AppError> {
+    database.list_library_privacy_rules()
+}
+
+#[tauri::command]
+pub fn set_library_items_private(
+    database: State<'_, Database>,
+    request: SetLibraryItemPrivacyRequest,
+) -> Result<LibraryPrivacyRules, AppError> {
+    database.set_library_items_private(request.item_ids, request.private)
+}
+
+#[tauri::command]
+pub fn set_library_folder_private(
+    database: State<'_, Database>,
+    request: SetLibraryFolderPrivacyRequest,
+) -> Result<LibraryPrivacyRules, AppError> {
+    database.set_library_folder_private(&request.source_id, &request.relative_path, request.private)
 }
 
 #[tauri::command]
@@ -1142,6 +1410,7 @@ pub fn get_desktop_runtime_status(runtime: State<'_, DesktopRuntimeState>) -> De
 pub fn hide_to_tray(
     app: AppHandle,
     runtime: State<'_, DesktopRuntimeState>,
+    database: State<'_, Database>,
 ) -> Result<(), AppError> {
     if !runtime.tray_available {
         return Err(AppError::new(
@@ -1152,14 +1421,21 @@ pub fn hide_to_tray(
     let window = app
         .get_webview_window("main")
         .ok_or_else(|| AppError::new("window_unavailable", "The main window is unavailable."))?;
+    let status = database.lock_library_privacy()?;
+    let _ = app.emit("library-privacy-changed", status);
     window
         .hide()
         .map_err(|error| AppError::internal("could not hide the main window", error))
 }
 
 #[tauri::command]
-pub fn quit_app(app: AppHandle, native_player: State<'_, NativePlayerManager>) {
+pub fn quit_app(
+    app: AppHandle,
+    native_player: State<'_, NativePlayerManager>,
+    database: State<'_, Database>,
+) {
     native_player.close();
+    let _ = database.lock_library_privacy();
     app.exit(0);
 }
 
@@ -1559,6 +1835,37 @@ pub async fn delete_history_entry(
     id: String,
 ) -> Result<(), AppError> {
     queue.delete_history_entry(&app, &id).await
+}
+
+#[tauri::command]
+pub fn list_post_download_recipes(
+    database: State<'_, Database>,
+) -> Result<Vec<PostDownloadRecipe>, AppError> {
+    database.list_post_download_recipes()
+}
+
+#[tauri::command]
+pub fn save_post_download_recipe(
+    database: State<'_, Database>,
+    request: SavePostDownloadRecipeRequest,
+) -> Result<PostDownloadRecipe, AppError> {
+    database.save_post_download_recipe(request)
+}
+
+#[tauri::command]
+pub fn delete_post_download_recipe(
+    database: State<'_, Database>,
+    id: String,
+) -> Result<(), AppError> {
+    database.delete_post_download_recipe(&id)
+}
+
+#[tauri::command]
+pub fn list_post_download_recipe_runs(
+    database: State<'_, Database>,
+    limit: usize,
+) -> Result<Vec<PostDownloadRecipeRun>, AppError> {
+    database.list_post_download_recipe_runs(limit)
 }
 
 #[tauri::command]

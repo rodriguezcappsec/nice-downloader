@@ -419,6 +419,7 @@ mod tests {
                 gallery_selection: None,
             },
             scheduled_for: None,
+            post_download_recipe_ids: Vec::new(),
         }
     }
 

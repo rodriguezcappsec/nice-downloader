@@ -1,0 +1,7 @@
+#EXTM3U
+#EXT-X-VERSION:6
+#EXT-X-PLAYLIST-TYPE:VOD
+#EXT-X-KEY:METHOD=SAMPLE-AES,URI="skd://license.example/key"
+#EXTINF:6.0,
+segment-0001.ts
+#EXT-X-ENDLIST

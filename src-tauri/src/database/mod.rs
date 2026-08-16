@@ -11,18 +11,22 @@ use crate::{
         LibraryHealthSummary, LibraryItem, LibraryMediaKind, LibraryMediaStack,
         LibraryMediaStackMember, LibraryMediaStackRole, LibraryMetadataFields,
         LibraryMetadataState, LibraryMoment, LibraryMontage, LibraryMontageSegment,
-        LibraryPlaybackEntry, LibraryPlaybackState, LibraryPlaylist, LibraryProbeResult,
+        LibraryNearDuplicateMatch, LibraryPlaybackEntry, LibraryPlaybackState, LibraryPlaylist,
+        LibraryPrivacyRules, LibraryPrivacyStatus, LibraryPrivateFolder, LibraryProbeResult,
         LibraryQueryRequest, LibraryQueryResult, LibraryRichMetadata, LibraryScanJob,
-        LibraryScanState, LibrarySearchStatus, LibrarySmartView, LibrarySmartViewQuery,
-        LibrarySort, LibrarySource, LibrarySourceStatus, LibraryThemeAnalysis,
+        LibraryScanState, LibrarySearchStatus, LibrarySemanticIndexStatus, LibrarySmartView,
+        LibrarySmartViewQuery, LibrarySort, LibrarySource, LibrarySourceStatus,
+        LibraryStorageBucket, LibraryStoragePlan, LibraryStorageSource, LibraryThemeAnalysis,
         LibraryThemeAnalysisMode, LibraryThemeAnalysisScope, LibraryThemeAssignment,
         LibraryThemeFacet, LibraryThemeIndexStatus, LibraryThemeSettings, LibraryTranscriptCue,
         LibraryTranscriptIndexStatus, LibraryTranscriptMatch, LibraryVisualSimilarityMatch,
-        LibraryVisualSimilarityStatus, LibraryWatchState, Preset, PresetIntent, QueueSettings,
-        SaveAuthenticationProfileRequest, SaveLibraryCollectionRequest,
-        SaveLibraryCompareSessionRequest, SaveLibraryMediaStackRequest, SaveLibraryMomentRequest,
-        SaveLibraryMontageRequest, SaveLibraryPlaybackRequest, SaveLibraryPlaylistRequest,
-        SaveLibraryRichMetadataRequest, SaveLibrarySmartViewRequest, SaveLibrarySourceRequest,
+        LibraryVisualSimilarityStatus, LibraryWatchState, PostDownloadRecipe,
+        PostDownloadRecipeRun, PostDownloadRecipeRunState, PostDownloadRecipeStep, Preset,
+        PresetIntent, QueueSettings, SaveAuthenticationProfileRequest,
+        SaveLibraryCollectionRequest, SaveLibraryCompareSessionRequest,
+        SaveLibraryMediaStackRequest, SaveLibraryMomentRequest, SaveLibraryMontageRequest,
+        SaveLibraryPlaybackRequest, SaveLibraryPlaylistRequest, SaveLibraryRichMetadataRequest,
+        SaveLibrarySmartViewRequest, SaveLibrarySourceRequest, SavePostDownloadRecipeRequest,
         SavePresetRequest, SaveSitePresetRuleRequest, SaveSubscriptionRequest, SitePresetRule,
         StartDownloadRequest, StartLibraryThemeAnalysisRequest, Subscription,
         TransformationOperation, TransformationState, TransformationTask, UpdateLibraryItemRequest,
@@ -34,10 +38,15 @@ use crate::{
 };
 use chrono::{DateTime, Duration, Utc};
 use rusqlite::{params, params_from_iter, types::Value as SqlValue, Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
     path::Path,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, AtomicI64, Ordering},
+        Arc, Mutex,
+    },
 };
 use uuid::Uuid;
 
@@ -69,15 +78,52 @@ const MIGRATION_0025: &str = include_str!("migrations/0025_library_montages.sql"
 const MIGRATION_0026: &str = include_str!("migrations/0026_library_visual_similarity.sql");
 const MIGRATION_0027: &str = include_str!("migrations/0027_library_themes.sql");
 const MIGRATION_0028: &str = include_str!("migrations/0028_gallery_file_progress.sql");
+const MIGRATION_0029: &str = include_str!("migrations/0029_library_privacy.sql");
+const MIGRATION_0030: &str = include_str!("migrations/0030_library_semantic_transcripts.sql");
+const MIGRATION_0031: &str = include_str!("migrations/0031_post_download_recipes.sql");
 const ENGINE_PREFERENCES_KEY: &str = "engine.preferences";
 const QUEUE_SETTINGS_KEY: &str = "queue.settings";
 const DESKTOP_PREFERENCES_KEY: &str = "desktop.preferences";
 const LIBRARY_THEME_SETTINGS_KEY: &str = "library.theme.settings";
+const LIBRARY_PRIVACY_SETTINGS_KEY: &str = "library.privacy.settings";
 const ONBOARDING_COMPLETED_KEY: &str = "onboarding.completed";
+const LOCKED_LIBRARY_FILTER_SQL: &str = "
+    AND NOT EXISTS (
+        SELECT 1 FROM library_sources privacy_source
+        WHERE privacy_source.id = media_library.source_id AND privacy_source.private = 1
+    )
+    AND NOT EXISTS (
+        SELECT 1 FROM library_private_items privacy_item
+        WHERE privacy_item.item_id = media_library.id
+    )
+    AND NOT EXISTS (
+        SELECT 1 FROM library_private_folders privacy_folder
+        WHERE privacy_folder.source_id = media_library.source_id
+          AND (privacy_folder.relative_path = ''
+            OR media_library.relative_path = privacy_folder.relative_path
+            OR media_library.relative_path LIKE privacy_folder.relative_path || '/%')
+    )";
+
+fn locked_library_filter_for(alias: &str) -> String {
+    debug_assert!(alias
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || character == '_'));
+    LOCKED_LIBRARY_FILTER_SQL.replace("media_library", alias)
+}
 
 #[derive(Clone)]
 pub struct Database {
     connection: Arc<Mutex<Connection>>,
+    library_privacy_unlocked: Arc<AtomicBool>,
+    library_privacy_last_activity_ms: Arc<AtomicI64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LibraryPrivacySettingsRecord {
+    salt: String,
+    verifier: String,
+    auto_lock_minutes: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -102,6 +148,28 @@ pub struct ThemeAnalysisTarget {
     pub transcript: Option<String>,
     pub file_size_bytes: Option<u64>,
     pub modified_at_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SemanticTranscriptDocument {
+    pub item_id: String,
+    pub title: String,
+    pub text: String,
+    pub fingerprint: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct StoredTranscriptEmbedding {
+    pub item_id: String,
+    pub vector_json: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct TranscriptExcerpt {
+    pub start_seconds: f64,
+    pub end_seconds: f64,
+    pub text: String,
+    pub language: Option<String>,
 }
 
 impl Database {
@@ -155,6 +223,9 @@ impl Database {
             (26, MIGRATION_0026),
             (27, MIGRATION_0027),
             (28, MIGRATION_0028),
+            (29, MIGRATION_0029),
+            (30, MIGRATION_0030),
+            (31, MIGRATION_0031),
         ] {
             let migrated: bool = transaction.query_row(
                 "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = ?1)",
@@ -173,8 +244,17 @@ impl Database {
             .commit()
             .map_err(|error| AppError::internal("could not commit database migration", error))?;
 
+        let privacy_configured = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM settings WHERE key = ?1)",
+            [LIBRARY_PRIVACY_SETTINGS_KEY],
+            |row| row.get::<_, bool>(0),
+        )?;
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
+            library_privacy_unlocked: Arc::new(AtomicBool::new(!privacy_configured)),
+            library_privacy_last_activity_ms: Arc::new(AtomicI64::new(
+                Utc::now().timestamp_millis(),
+            )),
         })
     }
 
@@ -446,6 +526,334 @@ impl Database {
         Ok(())
     }
 
+    pub fn library_privacy_status(&self) -> Result<LibraryPrivacyStatus, AppError> {
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "Library privacy settings are unavailable.",
+            )
+        })?;
+        let settings = load_library_privacy_settings_record(&connection)?;
+        let private_source_count = connection.query_row(
+            "SELECT COUNT(*) FROM library_sources WHERE private = 1",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        let private_folder_count =
+            connection.query_row("SELECT COUNT(*) FROM library_private_folders", [], |row| {
+                row.get::<_, i64>(0)
+            })?;
+        let private_item_count =
+            connection.query_row("SELECT COUNT(*) FROM library_private_items", [], |row| {
+                row.get::<_, i64>(0)
+            })?;
+        let configured = settings.is_some();
+        Ok(LibraryPrivacyStatus {
+            configured,
+            locked: configured && !self.library_privacy_unlocked.load(Ordering::SeqCst),
+            auto_lock_minutes: settings.map_or(15, |record| record.auto_lock_minutes),
+            private_source_count: usize::try_from(private_source_count).unwrap_or(usize::MAX),
+            private_folder_count: usize::try_from(private_folder_count).unwrap_or(usize::MAX),
+            private_item_count: usize::try_from(private_item_count).unwrap_or(usize::MAX),
+        })
+    }
+
+    pub fn configure_library_privacy(
+        &self,
+        passphrase: &str,
+        auto_lock_minutes: u32,
+    ) -> Result<LibraryPrivacyStatus, AppError> {
+        validate_library_privacy_passphrase(passphrase)?;
+        if !(1..=240).contains(&auto_lock_minutes) {
+            return Err(AppError::new(
+                "invalid_library_privacy_timeout",
+                "Choose an automatic lock timeout between 1 minute and 4 hours.",
+            ));
+        }
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "Library privacy settings are unavailable.",
+            )
+        })?;
+        if load_library_privacy_settings_record(&connection)?.is_some()
+            && !self.library_privacy_unlocked.load(Ordering::SeqCst)
+        {
+            return Err(library_locked_error());
+        }
+        let salt = Uuid::new_v4().to_string();
+        let record = LibraryPrivacySettingsRecord {
+            verifier: derive_library_privacy_verifier(passphrase, &salt),
+            salt,
+            auto_lock_minutes,
+        };
+        let value = serde_json::to_string(&record).map_err(|error| {
+            AppError::internal("could not serialize Library privacy settings", error)
+        })?;
+        connection.execute(
+            "INSERT INTO settings (key, value_json, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at",
+            params![LIBRARY_PRIVACY_SETTINGS_KEY, value, Utc::now().timestamp_millis()],
+        )?;
+        drop(connection);
+        self.library_privacy_unlocked.store(true, Ordering::SeqCst);
+        self.touch_library_privacy();
+        self.library_privacy_status()
+    }
+
+    pub fn unlock_library_privacy(
+        &self,
+        passphrase: &str,
+    ) -> Result<LibraryPrivacyStatus, AppError> {
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "Library privacy settings are unavailable.",
+            )
+        })?;
+        let record = load_library_privacy_settings_record(&connection)?.ok_or_else(|| {
+            AppError::new(
+                "library_privacy_not_configured",
+                "Set a Library privacy passphrase before using the lock.",
+            )
+        })?;
+        drop(connection);
+        let candidate = derive_library_privacy_verifier(passphrase, &record.salt);
+        if !constant_time_equal(candidate.as_bytes(), record.verifier.as_bytes()) {
+            return Err(AppError::new(
+                "library_privacy_unlock_failed",
+                "The Library privacy passphrase did not match.",
+            ));
+        }
+        self.library_privacy_unlocked.store(true, Ordering::SeqCst);
+        self.touch_library_privacy();
+        self.library_privacy_status()
+    }
+
+    pub fn lock_library_privacy(&self) -> Result<LibraryPrivacyStatus, AppError> {
+        if self.library_privacy_status()?.configured {
+            self.library_privacy_unlocked.store(false, Ordering::SeqCst);
+        }
+        self.library_privacy_status()
+    }
+
+    pub fn touch_library_privacy(&self) {
+        if self.library_privacy_unlocked.load(Ordering::Relaxed) {
+            self.library_privacy_last_activity_ms
+                .store(Utc::now().timestamp_millis(), Ordering::Relaxed);
+        }
+    }
+
+    pub fn expire_library_privacy_if_idle(&self) -> Result<bool, AppError> {
+        let status = self.library_privacy_status()?;
+        if !status.configured || status.locked {
+            return Ok(false);
+        }
+        let idle_ms = Utc::now().timestamp_millis().saturating_sub(
+            self.library_privacy_last_activity_ms
+                .load(Ordering::Relaxed),
+        );
+        if idle_ms >= i64::from(status.auto_lock_minutes) * 60_000 {
+            self.library_privacy_unlocked.store(false, Ordering::SeqCst);
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    pub fn list_library_privacy_rules(&self) -> Result<LibraryPrivacyRules, AppError> {
+        self.require_library_privacy_unlocked()?;
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "Library privacy rules are unavailable.",
+            )
+        })?;
+        let mut item_statement =
+            connection.prepare("SELECT item_id FROM library_private_items ORDER BY item_id")?;
+        let item_ids = item_statement
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<Vec<String>, _>>()?;
+        let mut folder_statement = connection.prepare(
+            "SELECT source_id, relative_path FROM library_private_folders
+             ORDER BY source_id, relative_path COLLATE NOCASE",
+        )?;
+        let folders = folder_statement
+            .query_map([], |row| {
+                Ok(LibraryPrivateFolder {
+                    source_id: row.get(0)?,
+                    relative_path: row.get(1)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(LibraryPrivacyRules { item_ids, folders })
+    }
+
+    pub fn set_library_items_private(
+        &self,
+        item_ids: Vec<String>,
+        private: bool,
+    ) -> Result<LibraryPrivacyRules, AppError> {
+        self.require_library_privacy_unlocked()?;
+        if item_ids.is_empty() || item_ids.len() > 500 {
+            return Err(AppError::new(
+                "invalid_library_privacy_selection",
+                "Choose between 1 and 500 Library items.",
+            ));
+        }
+        let mut unique = Vec::with_capacity(item_ids.len());
+        let mut seen = HashSet::new();
+        for item_id in item_ids {
+            validate_uuid(&item_id, "library item")?;
+            if seen.insert(item_id.clone()) {
+                unique.push(item_id);
+            }
+        }
+        let mut connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "Library privacy rules are unavailable.",
+            )
+        })?;
+        let transaction = connection.transaction()?;
+        for item_id in unique {
+            let exists = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM media_library WHERE id = ?1)",
+                [&item_id],
+                |row| row.get::<_, bool>(0),
+            )?;
+            if !exists {
+                return Err(AppError::new(
+                    "library_item_not_found",
+                    "A selected Library item is no longer available.",
+                ));
+            }
+            if private {
+                transaction.execute(
+                    "INSERT OR IGNORE INTO library_private_items (item_id, created_at) VALUES (?1, ?2)",
+                    params![item_id, Utc::now().timestamp_millis()],
+                )?;
+            } else {
+                transaction.execute(
+                    "DELETE FROM library_private_items WHERE item_id = ?1",
+                    [item_id],
+                )?;
+            }
+        }
+        transaction.commit()?;
+        drop(connection);
+        self.list_library_privacy_rules()
+    }
+
+    pub fn set_library_folder_private(
+        &self,
+        source_id: &str,
+        relative_path: &str,
+        private: bool,
+    ) -> Result<LibraryPrivacyRules, AppError> {
+        self.require_library_privacy_unlocked()?;
+        validate_uuid(source_id, "library source")?;
+        let relative_path = normalize_private_folder_path(relative_path)?;
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "Library privacy rules are unavailable.",
+            )
+        })?;
+        let exists = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM library_sources WHERE id = ?1)",
+            [source_id],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if !exists {
+            return Err(AppError::new(
+                "library_source_not_found",
+                "The selected Library source no longer exists.",
+            ));
+        }
+        if private {
+            connection.execute(
+                "INSERT OR IGNORE INTO library_private_folders (source_id, relative_path, created_at)
+                 VALUES (?1, ?2, ?3)",
+                params![source_id, relative_path, Utc::now().timestamp_millis()],
+            )?;
+        } else {
+            connection.execute(
+                "DELETE FROM library_private_folders WHERE source_id = ?1 AND relative_path = ?2",
+                params![source_id, relative_path],
+            )?;
+        }
+        drop(connection);
+        self.list_library_privacy_rules()
+    }
+
+    pub fn require_library_privacy_unlocked(&self) -> Result<(), AppError> {
+        let status = self.library_privacy_status()?;
+        if status.configured && status.locked {
+            Err(library_locked_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn filter_visible_library_records<T>(
+        &self,
+        records: Vec<T>,
+        item_id: impl Fn(&T) -> &str,
+    ) -> Result<Vec<T>, AppError> {
+        if !self.is_library_privacy_locked() {
+            return Ok(records);
+        }
+        let mut visible = Vec::with_capacity(records.len());
+        for record in records {
+            if !self.is_library_item_private(item_id(&record))? {
+                visible.push(record);
+            }
+        }
+        Ok(visible)
+    }
+
+    fn filter_visible_library_item_ids(
+        &self,
+        item_ids: Vec<String>,
+    ) -> Result<Vec<String>, AppError> {
+        self.filter_visible_library_records(item_ids, |item_id| item_id)
+    }
+
+    pub fn is_library_privacy_locked(&self) -> bool {
+        !self.library_privacy_unlocked.load(Ordering::SeqCst)
+    }
+
+    pub fn is_library_item_private(&self, item_id: &str) -> Result<bool, AppError> {
+        validate_uuid(item_id, "library item")?;
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "Library privacy rules are unavailable.",
+            )
+        })?;
+        connection
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM media_library media
+                    LEFT JOIN library_sources source ON source.id = media.source_id
+                    WHERE media.id = ?1 AND (
+                        COALESCE(source.private, 0) = 1
+                        OR EXISTS(SELECT 1 FROM library_private_items item_rule WHERE item_rule.item_id = media.id)
+                        OR EXISTS(
+                            SELECT 1 FROM library_private_folders folder_rule
+                            WHERE folder_rule.source_id = media.source_id
+                              AND (folder_rule.relative_path = ''
+                                OR media.relative_path = folder_rule.relative_path
+                                OR media.relative_path LIKE folder_rule.relative_path || '/%')
+                        )
+                    )
+                )",
+                [item_id],
+                |row| row.get(0),
+            )
+            .map_err(AppError::from)
+    }
+
     pub fn onboarding_completed(&self) -> Result<bool, AppError> {
         let connection = self.connection.lock().map_err(|_| {
             AppError::new(
@@ -669,6 +1077,295 @@ impl Database {
         serde_json::from_str(&value).map_err(|error| {
             AppError::internal("could not read the original download options", error)
         })
+    }
+
+    pub fn list_post_download_recipes(&self) -> Result<Vec<PostDownloadRecipe>, AppError> {
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "Post-download recipes are unavailable.",
+            )
+        })?;
+        let mut statement = connection.prepare(
+            "SELECT id, name, enabled, steps_json, created_at, updated_at
+             FROM post_download_recipes
+             ORDER BY name COLLATE NOCASE, id
+             LIMIT 100",
+        )?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, bool>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.into_iter()
+            .map(|(id, name, enabled, steps_json, created_at, updated_at)| {
+                let steps = serde_json::from_str::<Vec<PostDownloadRecipeStep>>(&steps_json)
+                    .map_err(|error| {
+                        AppError::internal("could not read post-download recipe", error)
+                    })?;
+                Ok(PostDownloadRecipe {
+                    id,
+                    name,
+                    enabled,
+                    steps,
+                    created_at: timestamp_or_epoch(created_at),
+                    updated_at: timestamp_or_epoch(updated_at),
+                })
+            })
+            .collect()
+    }
+
+    pub fn save_post_download_recipe(
+        &self,
+        mut request: SavePostDownloadRecipeRequest,
+    ) -> Result<PostDownloadRecipe, AppError> {
+        request.name = request.name.trim().chars().take(80).collect();
+        if request.name.is_empty() || request.name.chars().any(char::is_control) {
+            return Err(AppError::new(
+                "invalid_post_download_recipe_name",
+                "Recipe names contain between 1 and 80 visible characters.",
+            ));
+        }
+        validate_post_download_recipe_steps(&mut request.steps)?;
+        let id = match request.id {
+            Some(id) => {
+                validate_uuid(&id, "post-download recipe identifier")?;
+                id
+            }
+            None => Uuid::new_v4().to_string(),
+        };
+        let steps_json = serde_json::to_string(&request.steps).map_err(|error| {
+            AppError::internal("could not serialize post-download recipe", error)
+        })?;
+        let now = Utc::now().timestamp_millis();
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "Post-download recipes are unavailable.",
+            )
+        })?;
+        connection.execute(
+            "INSERT INTO post_download_recipes
+                (id, name, enabled, steps_json, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+             ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                enabled = excluded.enabled,
+                steps_json = excluded.steps_json,
+                updated_at = excluded.updated_at",
+            params![id, request.name, request.enabled, steps_json, now],
+        )?;
+        drop(connection);
+        self.list_post_download_recipes()?
+            .into_iter()
+            .find(|recipe| recipe.id == id)
+            .ok_or_else(|| {
+                AppError::new(
+                    "post_download_recipe_not_found",
+                    "The recipe could not be loaded after saving.",
+                )
+            })
+    }
+
+    pub fn delete_post_download_recipe(&self, id: &str) -> Result<(), AppError> {
+        validate_uuid(id, "post-download recipe identifier")?;
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "Post-download recipes are unavailable.",
+            )
+        })?;
+        if connection.execute("DELETE FROM post_download_recipes WHERE id = ?1", [id])? == 0 {
+            return Err(AppError::new(
+                "post_download_recipe_not_found",
+                "The post-download recipe was not found.",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn enabled_post_download_recipes_by_ids(
+        &self,
+        ids: &[String],
+    ) -> Result<Vec<PostDownloadRecipe>, AppError> {
+        if ids.len() > 8 {
+            return Err(AppError::new(
+                "too_many_post_download_recipes",
+                "A download can run at most eight post-download recipes.",
+            ));
+        }
+        let mut seen = HashSet::new();
+        for id in ids {
+            validate_uuid(id, "post-download recipe identifier")?;
+            if !seen.insert(id) {
+                return Err(AppError::new(
+                    "duplicate_post_download_recipe",
+                    "The same post-download recipe cannot be selected twice.",
+                ));
+            }
+        }
+        let by_id = self
+            .list_post_download_recipes()?
+            .into_iter()
+            .filter(|recipe| recipe.enabled)
+            .map(|recipe| (recipe.id.clone(), recipe))
+            .collect::<HashMap<_, _>>();
+        ids.iter()
+            .map(|id| {
+                by_id.get(id).cloned().ok_or_else(|| {
+                    AppError::new(
+                        "post_download_recipe_unavailable",
+                        "A selected post-download recipe is disabled or no longer exists.",
+                    )
+                })
+            })
+            .collect()
+    }
+
+    pub fn post_download_recipe_ids_for_download(
+        &self,
+        download_id: &str,
+    ) -> Result<Vec<String>, AppError> {
+        validate_uuid(download_id, "download identifier")?;
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "Post-download recipes are unavailable.",
+            )
+        })?;
+        let request_json = connection
+            .query_row(
+                "SELECT request_json FROM downloads WHERE id = ?1",
+                [download_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten()
+            .ok_or_else(|| {
+                AppError::new(
+                    "download_request_unavailable",
+                    "The completed download request is unavailable.",
+                )
+            })?;
+        let request =
+            serde_json::from_str::<StartDownloadRequest>(&request_json).map_err(|error| {
+                AppError::internal("could not read completed download request", error)
+            })?;
+        Ok(request.post_download_recipe_ids)
+    }
+
+    pub fn claim_post_download_recipe_run(
+        &self,
+        recipe: &PostDownloadRecipe,
+        download_id: &str,
+    ) -> Result<Option<PostDownloadRecipeRun>, AppError> {
+        validate_uuid(download_id, "download identifier")?;
+        let now = Utc::now();
+        let run = PostDownloadRecipeRun {
+            id: Uuid::new_v4().to_string(),
+            recipe_id: recipe.id.clone(),
+            recipe_name: recipe.name.clone(),
+            download_id: download_id.to_owned(),
+            state: PostDownloadRecipeRunState::Running,
+            current_step: 0,
+            step_count: recipe.steps.len(),
+            error: None,
+            created_at: now,
+            updated_at: now,
+            completed_at: None,
+        };
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "Post-download recipe runs are unavailable.",
+            )
+        })?;
+        let inserted = connection.execute(
+            "INSERT OR IGNORE INTO post_download_recipe_runs
+                (id, recipe_id, download_id, state, current_step, error, created_at, updated_at, completed_at)
+             VALUES (?1, ?2, ?3, 'running', 0, NULL, ?4, ?4, NULL)",
+            params![run.id, run.recipe_id, run.download_id, now.timestamp_millis()],
+        )?;
+        Ok((inserted == 1).then_some(run))
+    }
+
+    pub fn update_post_download_recipe_run(
+        &self,
+        run: &PostDownloadRecipeRun,
+    ) -> Result<(), AppError> {
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "Post-download recipe runs are unavailable.",
+            )
+        })?;
+        connection.execute(
+            "UPDATE post_download_recipe_runs
+             SET state = ?2, current_step = ?3, error = ?4, updated_at = ?5, completed_at = ?6
+             WHERE id = ?1",
+            params![
+                run.id,
+                post_download_recipe_run_state_name(run.state),
+                i64::try_from(run.current_step).unwrap_or(i64::MAX),
+                run.error,
+                run.updated_at.timestamp_millis(),
+                run.completed_at.map(|value| value.timestamp_millis())
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_post_download_recipe_runs(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<PostDownloadRecipeRun>, AppError> {
+        if !(1..=200).contains(&limit) {
+            return Err(AppError::new(
+                "invalid_post_download_recipe_run_limit",
+                "Recipe history returns between 1 and 200 runs.",
+            ));
+        }
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "Post-download recipe runs are unavailable.",
+            )
+        })?;
+        let mut statement = connection.prepare(
+            "SELECT run.id, run.recipe_id, recipe.name, run.download_id, run.state,
+                    run.current_step, json_array_length(recipe.steps_json), run.error,
+                    run.created_at, run.updated_at, run.completed_at
+             FROM post_download_recipe_runs run
+             JOIN post_download_recipes recipe ON recipe.id = run.recipe_id
+             ORDER BY run.updated_at DESC, run.id
+             LIMIT ?1",
+        )?;
+        let runs = statement
+            .query_map([i64::try_from(limit).unwrap_or(200)], |row| {
+                Ok(PostDownloadRecipeRun {
+                    id: row.get(0)?,
+                    recipe_id: row.get(1)?,
+                    recipe_name: row.get(2)?,
+                    download_id: row.get(3)?,
+                    state: post_download_recipe_run_state_from_name(&row.get::<_, String>(4)?),
+                    current_step: usize::try_from(row.get::<_, i64>(5)?.max(0))
+                        .unwrap_or(usize::MAX),
+                    step_count: usize::try_from(row.get::<_, i64>(6)?.max(0)).unwrap_or(usize::MAX),
+                    error: row.get(7)?,
+                    created_at: timestamp_or_epoch(row.get(8)?),
+                    updated_at: timestamp_or_epoch(row.get(9)?),
+                    completed_at: row.get::<_, Option<i64>>(10)?.map(timestamp_or_epoch),
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(runs)
     }
 
     pub fn list_presets(&self) -> Result<Vec<Preset>, AppError> {
@@ -1357,16 +2054,22 @@ impl Database {
         let connection = self.connection.lock().map_err(|_| {
             AppError::new("database_unavailable", "The media library is unavailable.")
         })?;
-        let mut statement = connection.prepare(
+        let privacy_filter = if self.is_library_privacy_locked() {
+            LOCKED_LIBRARY_FILTER_SQL
+        } else {
+            ""
+        };
+        let mut statement = connection.prepare(&format!(
             "SELECT media_library.id, path, title, source_url, thumbnail, media_library.duration_seconds, site,
-                    tags_json, metadata_json, missing, added_at, media_library.updated_at, source_id,
-                    relative_path, media_kind, file_size_bytes, modified_at_ms, width, height, fps,
-                    video_codec, audio_codec, container, dynamic_range,
-                    COALESCE(state, 'pending'), error, favorite, rating
+             tags_json, metadata_json, missing, added_at, media_library.updated_at, source_id,
+             relative_path, media_kind, file_size_bytes, modified_at_ms, width, height, fps,
+             video_codec, audio_codec, container, dynamic_range,
+             COALESCE(state, 'pending'), error, favorite, rating
              FROM media_library
              LEFT JOIN library_media_metadata ON item_id = media_library.id
-             ORDER BY added_at DESC LIMIT 5000",
-        )?;
+             WHERE 1 = 1{privacy_filter}
+             ORDER BY added_at DESC LIMIT 5000"
+        ))?;
         let rows = statement.query_map([], library_item_from_row)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
     }
@@ -1385,15 +2088,21 @@ impl Database {
         let connection = self.connection.lock().map_err(|_| {
             AppError::new("database_unavailable", "The media library is unavailable.")
         })?;
-        let mut statement = connection.prepare(
+        let privacy_filter = if self.is_library_privacy_locked() {
+            LOCKED_LIBRARY_FILTER_SQL
+        } else {
+            ""
+        };
+        let mut statement = connection.prepare(&format!(
             "SELECT id, path
              FROM media_library
              WHERE missing = 0
                AND media_kind IN ('video', 'both')
                AND (?1 IS NULL OR id > ?1)
+               {privacy_filter}
              ORDER BY id
-             LIMIT ?2",
-        )?;
+             LIMIT ?2"
+        ))?;
         let rows = statement.query_map(
             params![after_id, i64::try_from(limit).unwrap_or(1_000)],
             |row| Ok((row.get(0)?, row.get(1)?)),
@@ -1418,7 +2127,12 @@ impl Database {
                 "The visual similarity index is unavailable.",
             )
         })?;
-        let mut statement = connection.prepare(
+        let privacy_filter = if self.is_library_privacy_locked() {
+            locked_library_filter_for("media")
+        } else {
+            String::new()
+        };
+        let mut statement = connection.prepare(&format!(
             "SELECT media.id, media.path, media.title, COALESCE(media.media_kind, ''),
                     media.duration_seconds, metadata.file_size_bytes, metadata.modified_at_ms
              FROM media_library media
@@ -1434,9 +2148,10 @@ impl Database {
                         AND signature.modified_at_ms IS metadata.modified_at_ms
                     )
                )
+             {privacy_filter}
              ORDER BY media.id
-             LIMIT ?2",
-        )?;
+             LIMIT ?2"
+        ))?;
         let rows = statement.query_map(
             params![after_id, i64::try_from(limit).unwrap_or(500)],
             |row| {
@@ -1508,21 +2223,35 @@ impl Database {
                 "The visual similarity index is unavailable.",
             )
         })?;
+        let privacy_filter = if self.is_library_privacy_locked() {
+            LOCKED_LIBRARY_FILTER_SQL
+        } else {
+            ""
+        };
         let eligible_items: i64 = connection.query_row(
-            "SELECT COUNT(*) FROM media_library
-             WHERE missing = 0 AND media_kind IN ('video', 'image', 'both')",
+            &format!(
+                "SELECT COUNT(*) FROM media_library
+                 WHERE missing = 0 AND media_kind IN ('video', 'image', 'both'){privacy_filter}"
+            ),
             [],
             |row| row.get(0),
         )?;
+        let media_privacy_filter = if self.is_library_privacy_locked() {
+            locked_library_filter_for("media")
+        } else {
+            String::new()
+        };
         let indexed_items: i64 = connection.query_row(
-            "SELECT COUNT(*)
+            &format!(
+                "SELECT COUNT(*)
              FROM media_library media
              JOIN library_visual_signatures signature ON signature.item_id = media.id
              LEFT JOIN library_media_metadata metadata ON metadata.item_id = media.id
              WHERE media.missing = 0
                AND media.media_kind IN ('video', 'image', 'both')
                AND signature.file_size_bytes IS metadata.file_size_bytes
-               AND signature.modified_at_ms IS metadata.modified_at_ms",
+               AND signature.modified_at_ms IS metadata.modified_at_ms{media_privacy_filter}"
+            ),
             [],
             |row| row.get(0),
         )?;
@@ -1542,6 +2271,12 @@ impl Database {
         minimum_similarity_percent: f64,
     ) -> Result<Vec<LibraryVisualSimilarityMatch>, AppError> {
         validate_uuid(item_id, "library item")?;
+        if self.is_library_privacy_locked() && self.is_library_item_private(item_id)? {
+            return Err(AppError::new(
+                "library_item_not_found",
+                "The library item was not found.",
+            ));
+        }
         if !(1..=50).contains(&limit)
             || !minimum_similarity_percent.is_finite()
             || !(50.0..=100.0).contains(&minimum_similarity_percent)
@@ -1577,7 +2312,12 @@ impl Database {
                 "Build or refresh the visual index before finding similar media.",
             ));
         };
-        let mut statement = connection.prepare(
+        let privacy_filter = if self.is_library_privacy_locked() {
+            locked_library_filter_for("media")
+        } else {
+            String::new()
+        };
+        let mut statement = connection.prepare(&format!(
             "SELECT signature.item_id, signature.signature
              FROM library_visual_signatures signature
              JOIN media_library media ON media.id = signature.item_id
@@ -1587,8 +2327,9 @@ impl Database {
                AND media.media_kind IN ('video', 'image', 'both')
                AND signature.file_size_bytes IS metadata.file_size_bytes
                AND signature.modified_at_ms IS metadata.modified_at_ms
-             LIMIT 250000",
-        )?;
+               {privacy_filter}
+             LIMIT 250000"
+        ))?;
         let rows = statement.query_map([item_id], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?;
@@ -1628,6 +2369,212 @@ impl Database {
                     item: items.get(&id)?.clone(),
                     similarity_percent,
                     hamming_distance,
+                })
+            })
+            .collect())
+    }
+
+    pub fn find_near_duplicate_videos(
+        &self,
+        minimum_visual_similarity_percent: f64,
+        maximum_duration_delta_seconds: f64,
+        limit: usize,
+    ) -> Result<Vec<LibraryNearDuplicateMatch>, AppError> {
+        if !minimum_visual_similarity_percent.is_finite()
+            || !(70.0..=100.0).contains(&minimum_visual_similarity_percent)
+            || !maximum_duration_delta_seconds.is_finite()
+            || !(0.0..=600.0).contains(&maximum_duration_delta_seconds)
+            || !(1..=200).contains(&limit)
+        {
+            return Err(AppError::new(
+                "invalid_near_duplicate_query",
+                "Near-duplicate review uses a 70–100% visual threshold, a 0–600 second duration tolerance, and returns 1–200 pairs.",
+            ));
+        }
+        #[derive(Clone)]
+        struct CandidateRow {
+            id: String,
+            signature: u64,
+            duration: f64,
+            size: Option<i64>,
+            width: Option<i64>,
+            height: Option<i64>,
+            container: Option<String>,
+            video_codec: Option<String>,
+            audio_codec: Option<String>,
+            sha256: Option<String>,
+        }
+        let privacy_filter = if self.is_library_privacy_locked() {
+            locked_library_filter_for("media")
+        } else {
+            String::new()
+        };
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "Near-duplicate review is unavailable.",
+            )
+        })?;
+        let mut statement = connection.prepare(&format!(
+            "SELECT media.id, signature.signature, media.duration_seconds,
+                    metadata.file_size_bytes, metadata.width, metadata.height,
+                    metadata.container, metadata.video_codec, metadata.audio_codec,
+                    content.sha256
+             FROM media_library media
+             JOIN library_visual_signatures signature ON signature.item_id = media.id
+             JOIN library_media_metadata metadata ON metadata.item_id = media.id
+             LEFT JOIN library_content_hashes content
+               ON content.item_id = media.id
+              AND content.file_size_bytes IS metadata.file_size_bytes
+              AND content.modified_at_ms IS metadata.modified_at_ms
+             WHERE media.missing = 0
+               AND media.media_kind IN ('video', 'both')
+               AND media.duration_seconds IS NOT NULL
+               AND media.duration_seconds >= 0
+               AND signature.file_size_bytes IS metadata.file_size_bytes
+               AND signature.modified_at_ms IS metadata.modified_at_ms
+               {privacy_filter}
+             ORDER BY media.duration_seconds, media.id
+             LIMIT 20000"
+        ))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, f64>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, Option<i64>>(4)?,
+                    row.get::<_, Option<i64>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, Option<String>>(9)?,
+                ))
+            })?
+            .filter_map(|row| match row {
+                Ok((
+                    id,
+                    signature,
+                    duration,
+                    size,
+                    width,
+                    height,
+                    container,
+                    video_codec,
+                    audio_codec,
+                    sha256,
+                )) => u64::from_str_radix(&signature, 16)
+                    .ok()
+                    .map(|signature| CandidateRow {
+                        id,
+                        signature,
+                        duration,
+                        size,
+                        width,
+                        height,
+                        container,
+                        video_codec,
+                        audio_codec,
+                        sha256,
+                    }),
+                Err(_) => None,
+            })
+            .collect::<Vec<_>>();
+        drop(statement);
+        drop(connection);
+
+        #[derive(Clone)]
+        struct ScoredPair {
+            left_id: String,
+            right_id: String,
+            visual: f64,
+            duration_delta: f64,
+            size_delta: Option<i64>,
+            same_resolution: bool,
+            same_container: bool,
+            same_video_codec: bool,
+            same_audio_codec: bool,
+            exact_hash_compared: bool,
+        }
+        let same_optional_text = |left: &Option<String>, right: &Option<String>| matches!((left, right), (Some(left), Some(right)) if left.eq_ignore_ascii_case(right));
+        let mut pairs = Vec::new();
+        let mut comparisons = 0_usize;
+        'outer: for (left_index, left) in rows.iter().enumerate() {
+            for right in rows.iter().skip(left_index + 1) {
+                let duration_delta = right.duration - left.duration;
+                if duration_delta > maximum_duration_delta_seconds {
+                    break;
+                }
+                comparisons += 1;
+                if comparisons > 5_000_000 {
+                    break 'outer;
+                }
+                let distance = (left.signature ^ right.signature).count_ones();
+                let visual = (1.0 - f64::from(distance) / 64.0) * 100.0;
+                if visual < minimum_visual_similarity_percent {
+                    continue;
+                }
+                let exact_hash_compared = left.sha256.is_some() && right.sha256.is_some();
+                if matches!((&left.sha256, &right.sha256), (Some(left), Some(right)) if left == right)
+                {
+                    continue;
+                }
+                let size_delta = left.size.zip(right.size).map(|(left, right)| {
+                    let difference = i128::from(left) - i128::from(right);
+                    i64::try_from(difference.abs()).unwrap_or(i64::MAX)
+                });
+                pairs.push(ScoredPair {
+                    left_id: left.id.clone(),
+                    right_id: right.id.clone(),
+                    visual,
+                    duration_delta,
+                    size_delta,
+                    same_resolution: left.width.is_some()
+                        && left.width == right.width
+                        && left.height.is_some()
+                        && left.height == right.height,
+                    same_container: same_optional_text(&left.container, &right.container),
+                    same_video_codec: same_optional_text(&left.video_codec, &right.video_codec),
+                    same_audio_codec: same_optional_text(&left.audio_codec, &right.audio_codec),
+                    exact_hash_compared,
+                });
+            }
+        }
+        pairs.sort_by(|left, right| {
+            right
+                .visual
+                .total_cmp(&left.visual)
+                .then_with(|| left.duration_delta.total_cmp(&right.duration_delta))
+                .then_with(|| left.left_id.cmp(&right.left_id))
+                .then_with(|| left.right_id.cmp(&right.right_id))
+        });
+        pairs.truncate(limit);
+        let ids = pairs
+            .iter()
+            .flat_map(|pair| [pair.left_id.clone(), pair.right_id.clone()])
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let items = self
+            .list_library_items_by_ids(ids)?
+            .into_iter()
+            .map(|item| (item.id.clone(), item))
+            .collect::<HashMap<_, _>>();
+        Ok(pairs
+            .into_iter()
+            .filter_map(|pair| {
+                Some(LibraryNearDuplicateMatch {
+                    left: items.get(&pair.left_id)?.clone(),
+                    right: items.get(&pair.right_id)?.clone(),
+                    visual_similarity_percent: pair.visual,
+                    duration_delta_seconds: pair.duration_delta,
+                    size_delta_bytes: pair.size_delta,
+                    same_resolution: pair.same_resolution,
+                    same_container: pair.same_container,
+                    same_video_codec: pair.same_video_codec,
+                    same_audio_codec: pair.same_audio_codec,
+                    exact_hash_compared: pair.exact_hash_compared,
                 })
             })
             .collect())
@@ -1703,7 +2650,12 @@ impl Database {
         let connection = self.connection.lock().map_err(|_| {
             AppError::new("database_unavailable", "The theme index is unavailable.")
         })?;
-        let mut statement = connection.prepare(
+        let privacy_filter = if self.is_library_privacy_locked() {
+            locked_library_filter_for("media")
+        } else {
+            String::new()
+        };
+        let mut statement = connection.prepare(&format!(
             "SELECT media.id, media.path, media.title, media.duration_seconds, media.tags_json,
                     COALESCE(NULLIF(json_extract(rich.overrides_json, '$.description'), ''),
                              json_extract(rich.extracted_json, '$.description')),
@@ -1739,8 +2691,9 @@ impl Database {
                     )) OR
                     (?4 = 'items' AND media.id IN (SELECT value FROM json_each(?10)))
                )
-             ORDER BY media.id LIMIT ?11",
-        )?;
+             {privacy_filter}
+             ORDER BY media.id LIMIT ?11"
+        ))?;
         let rows = statement.query_map(
             params![
                 after_id,
@@ -1862,16 +2815,24 @@ impl Database {
         let connection = self.connection.lock().map_err(|_| {
             AppError::new("database_unavailable", "The theme index is unavailable.")
         })?;
+        let privacy_filter = if self.is_library_privacy_locked() {
+            locked_library_filter_for("media")
+        } else {
+            String::new()
+        };
         let eligible_items: i64 = connection.query_row(
-            "SELECT COUNT(*) FROM media_library media
+            &format!(
+                "SELECT COUNT(*) FROM media_library media
              JOIN library_media_metadata metadata ON metadata.item_id = media.id
              WHERE media.missing = 0 AND media.media_kind IN ('video', 'both')
-               AND metadata.state = 'ready'",
+               AND metadata.state = 'ready'{privacy_filter}"
+            ),
             [],
             |row| row.get(0),
         )?;
         let indexed_items: i64 = connection.query_row(
-            "SELECT COUNT(*)
+            &format!(
+                "SELECT COUNT(*)
              FROM library_theme_analyses analysis
              JOIN media_library media ON media.id = analysis.item_id
              LEFT JOIN library_media_metadata metadata ON metadata.item_id = media.id
@@ -1879,12 +2840,14 @@ impl Database {
                AND metadata.state = 'ready'
                AND analysis.model = ?1 AND analysis.mode = ?2
                AND analysis.file_size_bytes IS metadata.file_size_bytes
-               AND analysis.modified_at_ms IS metadata.modified_at_ms",
+               AND analysis.modified_at_ms IS metadata.modified_at_ms{privacy_filter}"
+            ),
             params![settings.model, library_theme_mode_name(settings.mode)],
             |row| row.get(0),
         )?;
         let theme_count: i64 = connection.query_row(
-            "SELECT COUNT(DISTINCT assignment.theme_key)
+            &format!(
+                "SELECT COUNT(DISTINCT assignment.theme_key)
              FROM library_theme_assignments assignment
              JOIN library_theme_analyses analysis ON analysis.item_id = assignment.item_id
              JOIN media_library media ON media.id = assignment.item_id
@@ -1892,7 +2855,8 @@ impl Database {
              WHERE media.missing = 0 AND metadata.state = 'ready'
                AND analysis.model = ?1 AND analysis.mode = ?2
                AND analysis.file_size_bytes IS metadata.file_size_bytes
-               AND analysis.modified_at_ms IS metadata.modified_at_ms",
+               AND analysis.modified_at_ms IS metadata.modified_at_ms{privacy_filter}"
+            ),
             params![settings.model, library_theme_mode_name(settings.mode)],
             |row| row.get(0),
         )?;
@@ -1956,7 +2920,8 @@ impl Database {
              FROM library_theme_assignments WHERE item_id = ?1
              ORDER BY confidence DESC, label COLLATE NOCASE",
         )?;
-        rows.into_iter()
+        let analyses = rows
+            .into_iter()
             .map(
                 |(item_id, title, model, mode, summary, overall_confidence, analyzed_at)| {
                     let themes = theme_statement
@@ -1983,7 +2948,10 @@ impl Database {
                     })
                 },
             )
-            .collect()
+            .collect::<Result<Vec<_>, AppError>>()?;
+        drop(theme_statement);
+        drop(connection);
+        self.filter_visible_library_records(analyses, |analysis| &analysis.item_id)
     }
 
     pub fn list_library_items_for_backup(
@@ -1999,7 +2967,12 @@ impl Database {
         let connection = self.connection.lock().map_err(|_| {
             AppError::new("database_unavailable", "The media library is unavailable.")
         })?;
-        let mut statement = connection.prepare(
+        let privacy_filter = if self.is_library_privacy_locked() {
+            LOCKED_LIBRARY_FILTER_SQL
+        } else {
+            ""
+        };
+        let mut statement = connection.prepare(&format!(
             "SELECT media_library.id, path, title, source_url, thumbnail, media_library.duration_seconds, site,
                     tags_json, metadata_json, missing, added_at, media_library.updated_at, source_id,
                     relative_path, media_kind, file_size_bytes, modified_at_ms, width, height, fps,
@@ -2007,8 +2980,9 @@ impl Database {
                     COALESCE(state, 'pending'), error, favorite, rating
              FROM media_library
              LEFT JOIN library_media_metadata ON item_id = media_library.id
-             ORDER BY added_at DESC LIMIT ?1",
-        )?;
+             WHERE 1 = 1{privacy_filter}
+             ORDER BY added_at DESC LIMIT ?1"
+        ))?;
         let rows = statement.query_map([limit], library_item_from_row)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
     }
@@ -2033,7 +3007,13 @@ impl Database {
                 "Library pages must contain between 1 and 60 items.",
             ));
         }
-        let (where_clause, parameters) = build_library_query(&request)?;
+        let (mut where_clause, parameters) = build_library_query(&request)?;
+        if self.is_library_privacy_locked() {
+            if where_clause.is_empty() {
+                where_clause.push_str(" WHERE 1 = 1");
+            }
+            where_clause.push_str(LOCKED_LIBRARY_FILTER_SQL);
+        }
         let connection = self.connection.lock().map_err(|_| {
             AppError::new("database_unavailable", "The media library is unavailable.")
         })?;
@@ -2098,16 +3078,23 @@ impl Database {
         let connection = self.connection.lock().map_err(|_| {
             AppError::new("database_unavailable", "The media library is unavailable.")
         })?;
+        let privacy_condition = if self.is_library_privacy_locked() {
+            LOCKED_LIBRARY_FILTER_SQL
+        } else {
+            ""
+        };
         let source_condition = if request.source_id.is_some() {
             " AND media_library.source_id = ?1"
         } else {
             ""
         };
         let (total_items, available_items, missing_items): (i64, i64, i64) = connection.query_row(
-            "SELECT COUNT(*),
-                        COALESCE(SUM(CASE WHEN missing = 0 THEN 1 ELSE 0 END), 0),
-                        COALESCE(SUM(CASE WHEN missing = 1 THEN 1 ELSE 0 END), 0)
-                 FROM media_library",
+            &format!(
+                "SELECT COUNT(*),
+                    COALESCE(SUM(CASE WHEN missing = 0 THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN missing = 1 THEN 1 ELSE 0 END), 0)
+             FROM media_library WHERE 1 = 1{privacy_condition}"
+            ),
             [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
@@ -2121,7 +3108,7 @@ impl Database {
                 "SELECT DISTINCT container
                  FROM library_media_metadata
                  JOIN media_library ON media_library.id = item_id
-                 WHERE container IS NOT NULL AND container != ''{availability_condition}{source_condition}
+                 WHERE container IS NOT NULL AND container != ''{availability_condition}{source_condition}{privacy_condition}
                  ORDER BY container COLLATE NOCASE"
             ))?;
             let values = statement
@@ -2138,7 +3125,7 @@ impl Database {
             let mut statement = connection.prepare(&format!(
                 "SELECT DISTINCT json_each.value
                  FROM media_library, json_each(media_library.tags_json)
-                 WHERE 1 = 1{availability_condition}{source_condition}
+                 WHERE 1 = 1{availability_condition}{source_condition}{privacy_condition}
                  ORDER BY json_each.value COLLATE NOCASE"
             ))?;
             let values = statement
@@ -2159,7 +3146,7 @@ impl Database {
                  ) AS creator
                  FROM library_rich_metadata rich
                  JOIN media_library ON media_library.id = rich.item_id
-                 WHERE creator IS NOT NULL AND creator != '' {availability_condition}{source_condition}
+                 WHERE creator IS NOT NULL AND creator != '' {availability_condition}{source_condition}{privacy_condition}
                  ORDER BY creator COLLATE NOCASE
                  LIMIT 200"
             ))?;
@@ -2188,7 +3175,7 @@ impl Database {
                    AND COALESCE(
                     NULLIF(json_extract(rich.overrides_json, '$.series'), ''),
                     json_extract(rich.extracted_json, '$.series')
-                 ) != '' {availability_condition}{source_condition}
+                 ) != '' {availability_condition}{source_condition}{privacy_condition}
                  ORDER BY series_name COLLATE NOCASE
                  LIMIT 200"
             ))?;
@@ -2206,7 +3193,7 @@ impl Database {
             let mut statement = connection.prepare(&format!(
                 "SELECT DISTINCT site
                  FROM media_library
-                 WHERE site IS NOT NULL AND site != '' {availability_condition}{source_condition}
+                 WHERE site IS NOT NULL AND site != '' {availability_condition}{source_condition}{privacy_condition}
                  ORDER BY site COLLATE NOCASE
                  LIMIT 200"
             ))?;
@@ -2237,7 +3224,7 @@ impl Database {
                        (SELECT json_extract(value_json, '$.mode') FROM settings WHERE key = 'library.theme.settings'),
                        'deep'
                    )
-                   {availability_condition}{source_condition}
+                   {availability_condition}{source_condition}{privacy_condition}
                  GROUP BY assignment.theme_key
                  ORDER BY COUNT(DISTINCT assignment.item_id) DESC, MIN(assignment.label) COLLATE NOCASE
                  LIMIT 200"
@@ -2267,6 +3254,7 @@ impl Database {
             folder_sql.push_str(" AND source_id = ?1");
             folder_parameters.push(SqlValue::Text(source_id.to_owned()));
         }
+        folder_sql.push_str(privacy_condition);
         let mut statement = connection.prepare(&folder_sql)?;
         let rows = statement.query_map(params_from_iter(folder_parameters.iter()), |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -2348,6 +3336,11 @@ impl Database {
             .map(|index| format!("?{index}"))
             .collect::<Vec<_>>()
             .join(", ");
+        let privacy_filter = if self.is_library_privacy_locked() {
+            LOCKED_LIBRARY_FILTER_SQL
+        } else {
+            ""
+        };
         let connection = self.connection.lock().map_err(|_| {
             AppError::new("database_unavailable", "The media library is unavailable.")
         })?;
@@ -2359,7 +3352,7 @@ impl Database {
                     COALESCE(state, 'pending'), error, favorite, rating
              FROM media_library
              LEFT JOIN library_media_metadata ON item_id = media_library.id
-             WHERE media_library.id IN ({placeholders})"
+             WHERE media_library.id IN ({placeholders}){privacy_filter}"
         ))?;
         let items = statement
             .query_map(params_from_iter(unique.iter()), library_item_from_row)?
@@ -2373,6 +3366,9 @@ impl Database {
         item_id: &str,
     ) -> Result<Option<LibraryPlaybackState>, AppError> {
         validate_uuid(item_id, "library item")?;
+        if self.is_library_privacy_locked() && self.is_library_item_private(item_id)? {
+            return Ok(None);
+        }
         let connection = self.connection.lock().map_err(|_| {
             AppError::new("database_unavailable", "The media library is unavailable.")
         })?;
@@ -2392,6 +3388,9 @@ impl Database {
         request: SaveLibraryPlaybackRequest,
     ) -> Result<LibraryPlaybackState, AppError> {
         validate_uuid(&request.item_id, "library item")?;
+        if self.is_library_privacy_locked() && self.is_library_item_private(&request.item_id)? {
+            return Err(library_locked_error());
+        }
         if !request.position_seconds.is_finite()
             || !request.duration_seconds.is_finite()
             || request.position_seconds < 0.0
@@ -2464,7 +3463,12 @@ impl Database {
         let connection = self.connection.lock().map_err(|_| {
             AppError::new("database_unavailable", "The media library is unavailable.")
         })?;
-        let mut statement = connection.prepare(
+        let privacy_filter = if self.is_library_privacy_locked() {
+            LOCKED_LIBRARY_FILTER_SQL
+        } else {
+            ""
+        };
+        let mut statement = connection.prepare(&format!(
             "SELECT media_library.id, path, title, source_url, thumbnail, media_library.duration_seconds, site,
                     tags_json, metadata_json, missing, added_at, media_library.updated_at, source_id,
                     relative_path, media_kind, file_size_bytes, modified_at_ms, width, height, fps,
@@ -2480,9 +3484,10 @@ impl Database {
                AND library_playback.completed = 0
                AND library_playback.position_seconds >= 5
                AND library_playback.duration_seconds - library_playback.position_seconds >= 10
+               {privacy_filter}
              ORDER BY library_playback.updated_at DESC
-             LIMIT ?1",
-        )?;
+             LIMIT ?1"
+        ))?;
         let entries = statement
             .query_map([i64::try_from(limit).unwrap_or(24)], |row| {
                 Ok(LibraryPlaybackEntry {
@@ -2496,6 +3501,12 @@ impl Database {
 
     pub fn get_library_watch_state(&self, item_id: &str) -> Result<LibraryWatchState, AppError> {
         validate_uuid(item_id, "library item")?;
+        if self.is_library_privacy_locked() && self.is_library_item_private(item_id)? {
+            return Err(AppError::new(
+                "library_video_not_found",
+                "The selected library video was not found.",
+            ));
+        }
         let playback = self.get_library_playback(item_id)?;
         let connection = self.connection.lock().map_err(|_| {
             AppError::new("database_unavailable", "The media library is unavailable.")
@@ -2531,6 +3542,9 @@ impl Database {
         watch_later: bool,
     ) -> Result<LibraryWatchState, AppError> {
         validate_uuid(item_id, "library item")?;
+        if self.is_library_privacy_locked() && self.is_library_item_private(item_id)? {
+            return Err(library_locked_error());
+        }
         {
             let connection = self.connection.lock().map_err(|_| {
                 AppError::new("database_unavailable", "The media library is unavailable.")
@@ -2570,6 +3584,9 @@ impl Database {
         watched: bool,
     ) -> Result<LibraryWatchState, AppError> {
         validate_uuid(item_id, "library item")?;
+        if self.is_library_privacy_locked() && self.is_library_item_private(item_id)? {
+            return Err(library_locked_error());
+        }
         if watched {
             let duration_seconds = {
                 let connection = self.connection.lock().map_err(|_| {
@@ -2624,7 +3641,12 @@ impl Database {
         let connection = self.connection.lock().map_err(|_| {
             AppError::new("database_unavailable", "The media library is unavailable.")
         })?;
-        let mut statement = connection.prepare(
+        let privacy_filter = if self.is_library_privacy_locked() {
+            LOCKED_LIBRARY_FILTER_SQL
+        } else {
+            ""
+        };
+        let mut statement = connection.prepare(&format!(
             "SELECT media_library.id, path, title, source_url, thumbnail,
                     media_library.duration_seconds, site, tags_json, metadata_json, missing,
                     media_library.added_at, media_library.updated_at, source_id, relative_path, media_kind,
@@ -2634,9 +3656,10 @@ impl Database {
              JOIN media_library ON media_library.id = library_watch_later.item_id
              LEFT JOIN library_media_metadata ON library_media_metadata.item_id = media_library.id
              WHERE media_library.missing = 0 AND media_library.media_kind = 'video'
+               {privacy_filter}
              ORDER BY library_watch_later.added_at DESC, media_library.id ASC
-             LIMIT ?1",
-        )?;
+             LIMIT ?1"
+        ))?;
         let items = statement
             .query_map([i64::try_from(limit).unwrap_or(24)], library_item_from_row)?
             .collect::<Result<Vec<_>, _>>()
@@ -2652,7 +3675,12 @@ impl Database {
         let connection = self.connection.lock().map_err(|_| {
             AppError::new("database_unavailable", "The media library is unavailable.")
         })?;
-        let mut statement = connection.prepare(
+        let privacy_filter = if self.is_library_privacy_locked() {
+            LOCKED_LIBRARY_FILTER_SQL
+        } else {
+            ""
+        };
+        let mut statement = connection.prepare(&format!(
             "SELECT media_library.id, path, title, source_url, thumbnail,
                     media_library.duration_seconds, site, tags_json, metadata_json, missing,
                     added_at, media_library.updated_at, source_id, relative_path, media_kind,
@@ -2666,9 +3694,10 @@ impl Database {
              LEFT JOIN library_media_metadata ON library_media_metadata.item_id = media_library.id
              WHERE media_library.missing = 0 AND media_library.media_kind = 'video'
                AND (library_playback.completed = 1 OR library_playback.position_seconds >= 5)
+               {privacy_filter}
              ORDER BY library_playback.updated_at DESC, media_library.id ASC
-             LIMIT ?1",
-        )?;
+             LIMIT ?1"
+        ))?;
         let entries = statement
             .query_map([i64::try_from(limit).unwrap_or(24)], |row| {
                 Ok(LibraryPlaybackEntry {
@@ -2682,6 +3711,12 @@ impl Database {
     }
 
     pub fn get_library_item(&self, id: &str) -> Result<LibraryItem, AppError> {
+        if self.is_library_privacy_locked() && self.is_library_item_private(id)? {
+            return Err(AppError::new(
+                "library_item_not_found",
+                "The library item was not found.",
+            ));
+        }
         let connection = self.connection.lock().map_err(|_| {
             AppError::new("database_unavailable", "The media library is unavailable.")
         })?;
@@ -3062,6 +4097,11 @@ impl Database {
         let connection = self.connection.lock().map_err(|_| {
             AppError::new("database_unavailable", "The media library is unavailable.")
         })?;
+        let privacy_filter = if self.is_library_privacy_locked() {
+            locked_library_filter_for("media")
+        } else {
+            String::new()
+        };
         let aggregate_sql = format!(
             "SELECT
                 COUNT(*),
@@ -3075,7 +4115,8 @@ impl Database {
                 COALESCE(SUM(CASE WHEN media.missing = 0 AND metadata.state IN ('failed', 'unavailable') THEN 1 ELSE 0 END), 0),
                 COALESCE(SUM(CASE WHEN {COMPATIBILITY_RISK} THEN 1 ELSE 0 END), 0)
              FROM media_library media
-             LEFT JOIN library_media_metadata metadata ON metadata.item_id = media.id"
+             LEFT JOIN library_media_metadata metadata ON metadata.item_id = media.id
+             WHERE 1 = 1{privacy_filter}"
         );
         let counts: (i64, i64, i64, i64, i64, i64, i64) =
             connection.query_row(&aggregate_sql, [], |row| {
@@ -3103,14 +4144,15 @@ impl Database {
                 CASE WHEN {COMPATIBILITY_RISK} THEN 1 ELSE 0 END
              FROM media_library media
              LEFT JOIN library_media_metadata metadata ON metadata.item_id = media.id
-             WHERE media.missing = 1
+             WHERE (media.missing = 1
                 OR metadata.state IS NULL
                 OR metadata.state IN ('pending', 'failed', 'unavailable')
                 OR EXISTS(
                     SELECT 1 FROM library_changes change
                     WHERE change.item_id = media.id AND change.reviewed_at IS NULL
                 )
-                OR {COMPATIBILITY_RISK}
+                OR {COMPATIBILITY_RISK})
+               {privacy_filter}
              ORDER BY
                 media.missing DESC,
                 CASE COALESCE(metadata.state, 'pending') WHEN 'failed' THEN 0 WHEN 'unavailable' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END,
@@ -3165,6 +4207,184 @@ impl Database {
         })
     }
 
+    pub fn library_storage_plan_base(&self) -> Result<LibraryStoragePlan, AppError> {
+        let visible_sources = self.list_library_sources()?;
+        let source_names = visible_sources
+            .iter()
+            .map(|source| (source.id.clone(), source.name.clone()))
+            .collect::<HashMap<_, _>>();
+        let privacy_filter = if self.is_library_privacy_locked() {
+            locked_library_filter_for("media")
+        } else {
+            String::new()
+        };
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "The storage planner is unavailable.",
+            )
+        })?;
+        let mut statement = connection.prepare(&format!(
+            "SELECT media.source_id, media.relative_path,
+                    metadata.file_size_bytes, metadata.container
+             FROM media_library media
+             LEFT JOIN library_media_metadata metadata ON metadata.item_id = media.id
+             WHERE media.missing = 0
+               {privacy_filter}
+             ORDER BY media.source_id, media.relative_path, media.id
+             LIMIT 250000"
+        ))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        drop(connection);
+
+        let mut source_totals = HashMap::<String, (u64, usize)>::new();
+        let mut folder_totals = HashMap::<(String, String), (u64, usize)>::new();
+        let mut container_totals = HashMap::<String, (u64, usize)>::new();
+        let mut catalog_bytes = 0_u64;
+        for (source_id, relative_path, size, container) in rows {
+            let size = u64::try_from(size.unwrap_or_default().max(0)).unwrap_or_default();
+            catalog_bytes = catalog_bytes.saturating_add(size);
+            let source_key = source_id.unwrap_or_default();
+            let source_total = source_totals.entry(source_key.clone()).or_default();
+            source_total.0 = source_total.0.saturating_add(size);
+            source_total.1 += 1;
+
+            let normalized = relative_path.unwrap_or_default().replace('\\', "/");
+            let folder = normalized
+                .rsplit_once('/')
+                .map(|(parent, _)| parent)
+                .filter(|parent| !parent.is_empty())
+                .unwrap_or("Root")
+                .to_owned();
+            let folder_total = folder_totals
+                .entry((source_key.clone(), folder))
+                .or_default();
+            folder_total.0 = folder_total.0.saturating_add(size);
+            folder_total.1 += 1;
+
+            let container = container
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| "Unknown".to_owned())
+                .to_ascii_lowercase();
+            let container_total = container_totals.entry(container).or_default();
+            container_total.0 = container_total.0.saturating_add(size);
+            container_total.1 += 1;
+        }
+
+        let mut sources = visible_sources
+            .into_iter()
+            .map(|source| {
+                let (catalog_bytes, item_count) =
+                    source_totals.remove(&source.id).unwrap_or_default();
+                LibraryStorageSource {
+                    source_id: source.id,
+                    name: source.name,
+                    path: source.path,
+                    catalog_bytes,
+                    item_count,
+                    available_bytes: None,
+                }
+            })
+            .collect::<Vec<_>>();
+        if let Some((bytes, item_count)) = source_totals.remove("") {
+            sources.push(LibraryStorageSource {
+                source_id: String::new(),
+                name: "Downloads and unassigned".to_owned(),
+                path: String::new(),
+                catalog_bytes: bytes,
+                item_count,
+                available_bytes: None,
+            });
+        }
+        for source in &mut sources {
+            if !source.path.is_empty() {
+                source.available_bytes = fs2::available_space(&source.path).ok();
+            }
+        }
+        sources.sort_by(|left, right| {
+            right.catalog_bytes.cmp(&left.catalog_bytes).then_with(|| {
+                left.name
+                    .to_ascii_lowercase()
+                    .cmp(&right.name.to_ascii_lowercase())
+            })
+        });
+
+        let mut folders = folder_totals
+            .into_iter()
+            .map(|((source_id, folder), (bytes, item_count))| {
+                let source_name = source_names
+                    .get(&source_id)
+                    .cloned()
+                    .unwrap_or_else(|| "Downloads and unassigned".to_owned());
+                LibraryStorageBucket {
+                    key: format!("{source_id}:{folder}"),
+                    label: format!("{source_name} / {folder}"),
+                    bytes,
+                    item_count,
+                }
+            })
+            .collect::<Vec<_>>();
+        folders.sort_by(|left, right| {
+            right
+                .bytes
+                .cmp(&left.bytes)
+                .then_with(|| left.label.cmp(&right.label))
+        });
+        folders.truncate(40);
+        let mut containers = container_totals
+            .into_iter()
+            .map(|(container, (bytes, item_count))| LibraryStorageBucket {
+                key: container.clone(),
+                label: container.to_ascii_uppercase(),
+                bytes,
+                item_count,
+            })
+            .collect::<Vec<_>>();
+        containers.sort_by(|left, right| {
+            right
+                .bytes
+                .cmp(&left.bytes)
+                .then_with(|| left.key.cmp(&right.key))
+        });
+
+        let mut hash_groups = HashMap::<(u64, String), usize>::new();
+        for (_, size, hash) in self.list_current_library_content_hashes()? {
+            *hash_groups.entry((size, hash)).or_default() += 1;
+        }
+        let exact_duplicate_reclaimable_bytes = hash_groups
+            .into_iter()
+            .filter(|(_, count)| *count > 1)
+            .fold(0_u64, |total, ((size, _), count)| {
+                total.saturating_add(
+                    size.saturating_mul(u64::try_from(count - 1).unwrap_or(u64::MAX)),
+                )
+            });
+
+        Ok(LibraryStoragePlan {
+            catalog_bytes,
+            sources,
+            folders,
+            containers,
+            exact_duplicate_reclaimable_bytes,
+            playback_cache_bytes: 0,
+            artwork_cache_bytes: 0,
+            incoming_known_bytes: 0,
+            incoming_unknown_items: 0,
+            active_transformation_count: 0,
+            warnings: Vec::new(),
+        })
+    }
+
     pub fn rebuild_library_search_index(&self) -> Result<LibrarySearchStatus, AppError> {
         let mut connection = self.connection.lock().map_err(|_| {
             AppError::new("database_unavailable", "The media library is unavailable.")
@@ -3208,6 +4428,10 @@ impl Database {
             "DELETE FROM library_transcript_search WHERE item_id = ?1",
             [item_id],
         )?;
+        transaction.execute(
+            "DELETE FROM library_transcript_embeddings WHERE item_id = ?1",
+            [item_id],
+        )?;
         {
             let mut statement = transaction.prepare(
                 "INSERT INTO library_transcript_search
@@ -3233,6 +4457,87 @@ impl Database {
                 ])?;
             }
         }
+        transaction.execute(
+            "INSERT INTO library_transcript_search
+                (item_id, subtitle_name, language, start_seconds, end_seconds, cue_text)
+             SELECT item_id, subtitle_name, language, start_seconds, end_seconds, cue_text
+             FROM library_local_transcript_cues
+             WHERE item_id = ?1
+             ORDER BY start_seconds, id",
+            [item_id],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn replace_library_local_transcript_cues(
+        &self,
+        item_id: &str,
+        cues: &[LibraryTranscriptCue],
+    ) -> Result<(), AppError> {
+        validate_uuid(item_id, "library item identifier")?;
+        let mut connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "The local transcript store is unavailable.",
+            )
+        })?;
+        let transaction = connection.transaction()?;
+        transaction.execute(
+            "DELETE FROM library_transcript_search
+             WHERE item_id = ?1
+               AND subtitle_name IN (
+                   SELECT DISTINCT subtitle_name FROM library_local_transcript_cues WHERE item_id = ?1
+               )",
+            [item_id],
+        )?;
+        transaction.execute(
+            "DELETE FROM library_local_transcript_cues WHERE item_id = ?1",
+            [item_id],
+        )?;
+        {
+            let mut local_statement = transaction.prepare(
+                "INSERT INTO library_local_transcript_cues
+                    (item_id, subtitle_name, language, start_seconds, end_seconds, cue_text)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )?;
+            let mut search_statement = transaction.prepare(
+                "INSERT INTO library_transcript_search
+                    (item_id, subtitle_name, language, start_seconds, end_seconds, cue_text)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )?;
+            for cue in cues.iter().take(50_000) {
+                if !cue.start_seconds.is_finite()
+                    || !cue.end_seconds.is_finite()
+                    || cue.start_seconds < 0.0
+                    || cue.end_seconds <= cue.start_seconds
+                    || cue.text.trim().is_empty()
+                {
+                    continue;
+                }
+                let values = params![
+                    item_id,
+                    cue.subtitle_name,
+                    cue.language,
+                    cue.start_seconds,
+                    cue.end_seconds,
+                    cue.text,
+                ];
+                local_statement.execute(values)?;
+                search_statement.execute(params![
+                    item_id,
+                    cue.subtitle_name,
+                    cue.language,
+                    cue.start_seconds,
+                    cue.end_seconds,
+                    cue.text,
+                ])?;
+            }
+        }
+        transaction.execute(
+            "DELETE FROM library_transcript_embeddings WHERE item_id = ?1",
+            [item_id],
+        )?;
         transaction.commit()?;
         Ok(())
     }
@@ -3262,7 +4567,12 @@ impl Database {
                 "The transcript search index is unavailable.",
             )
         })?;
-        let mut statement = connection.prepare(
+        let privacy_filter = if self.is_library_privacy_locked() {
+            LOCKED_LIBRARY_FILTER_SQL
+        } else {
+            ""
+        };
+        let mut statement = connection.prepare(&format!(
             "SELECT transcript.item_id, transcript.start_seconds, transcript.end_seconds,
                     transcript.cue_text, NULLIF(transcript.language, '')
              FROM library_transcript_search transcript
@@ -3270,9 +4580,10 @@ impl Database {
              WHERE library_transcript_search MATCH ?1
                AND media_library.missing = 0
                AND media_library.media_kind IN ('video', 'both')
+               {privacy_filter}
              ORDER BY bm25(library_transcript_search), transcript.start_seconds, transcript.rowid
-             LIMIT ?2",
-        )?;
+             LIMIT ?2"
+        ))?;
         let matches = statement
             .query_map(params![query, i64::try_from(limit).unwrap_or(50)], |row| {
                 Ok(LibraryTranscriptMatch {
@@ -3296,12 +4607,19 @@ impl Database {
                 "The transcript search index is unavailable.",
             )
         })?;
+        let privacy_filter = if self.is_library_privacy_locked() {
+            LOCKED_LIBRARY_FILTER_SQL
+        } else {
+            ""
+        };
         let (cue_count, indexed_items): (i64, i64) = connection.query_row(
-            "SELECT COUNT(*), COUNT(DISTINCT transcript.item_id)
+            &format!(
+                "SELECT COUNT(*), COUNT(DISTINCT transcript.item_id)
              FROM library_transcript_search transcript
              JOIN media_library ON media_library.id = transcript.item_id
              WHERE media_library.missing = 0
-               AND media_library.media_kind IN ('video', 'both')",
+               AND media_library.media_kind IN ('video', 'both'){privacy_filter}"
+            ),
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
@@ -3309,6 +4627,357 @@ impl Database {
             indexed_items: usize::try_from(indexed_items).unwrap_or(usize::MAX),
             cue_count: usize::try_from(cue_count).unwrap_or(usize::MAX),
         })
+    }
+
+    pub fn list_semantic_transcript_documents(
+        &self,
+        item_ids: &[String],
+        limit: usize,
+    ) -> Result<Vec<SemanticTranscriptDocument>, AppError> {
+        if !(1..=500).contains(&limit) || item_ids.len() > 500 {
+            return Err(AppError::new(
+                "invalid_semantic_transcript_batch",
+                "Semantic transcript batches contain between 1 and 500 videos.",
+            ));
+        }
+        for item_id in item_ids {
+            validate_uuid(item_id, "library item identifier")?;
+        }
+        let item_ids_json = serde_json::to_string(item_ids)
+            .map_err(|error| AppError::internal("could not serialize transcript targets", error))?;
+        let privacy_filter = if self.is_library_privacy_locked() {
+            locked_library_filter_for("media")
+        } else {
+            String::new()
+        };
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "The semantic transcript index is unavailable.",
+            )
+        })?;
+        let mut item_statement = connection.prepare(&format!(
+            "SELECT DISTINCT media.id, media.title
+             FROM media_library media
+             JOIN library_transcript_search transcript ON transcript.item_id = media.id
+             WHERE media.missing = 0
+               AND media.media_kind IN ('video', 'both')
+               AND (?1 = 0 OR media.id IN (SELECT value FROM json_each(?2)))
+               {privacy_filter}
+             ORDER BY media.id
+             LIMIT ?3"
+        ))?;
+        let item_rows = item_statement
+            .query_map(
+                params![
+                    i64::from(!item_ids.is_empty()),
+                    item_ids_json,
+                    i64::try_from(limit).unwrap_or(500)
+                ],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(item_statement);
+
+        let mut cue_statement = connection.prepare(
+            "SELECT start_seconds, end_seconds, cue_text
+             FROM library_transcript_search
+             WHERE item_id = ?1
+             ORDER BY start_seconds, rowid
+             LIMIT 50000",
+        )?;
+        let mut documents = Vec::with_capacity(item_rows.len());
+        for (item_id, title) in item_rows {
+            let cues = cue_statement
+                .query_map([&item_id], |row| {
+                    Ok((
+                        row.get::<_, f64>(0)?,
+                        row.get::<_, f64>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut text = String::new();
+            let mut hasher = Sha256::new();
+            for (start, end, cue_text) in cues {
+                hasher.update(start.to_le_bytes());
+                hasher.update(end.to_le_bytes());
+                hasher.update(cue_text.as_bytes());
+                if text.chars().count() < 120_000 {
+                    if !text.is_empty() {
+                        text.push(' ');
+                    }
+                    text.extend(cue_text.chars().take(2_000));
+                }
+            }
+            if !text.trim().is_empty() {
+                documents.push(SemanticTranscriptDocument {
+                    item_id,
+                    title,
+                    text,
+                    fingerprint: format!("{:x}", hasher.finalize()),
+                });
+            }
+        }
+        Ok(documents)
+    }
+
+    pub fn save_semantic_transcript_embedding(
+        &self,
+        document: &SemanticTranscriptDocument,
+        model: &str,
+        vector_json: &str,
+    ) -> Result<(), AppError> {
+        validate_uuid(&document.item_id, "library item identifier")?;
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "The semantic transcript index is unavailable.",
+            )
+        })?;
+        connection.execute(
+            "INSERT INTO library_transcript_embeddings
+                (item_id, model, vector_json, transcript_fingerprint, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(item_id) DO UPDATE SET
+                model = excluded.model,
+                vector_json = excluded.vector_json,
+                transcript_fingerprint = excluded.transcript_fingerprint,
+                updated_at = excluded.updated_at",
+            params![
+                document.item_id,
+                model,
+                vector_json,
+                document.fingerprint,
+                Utc::now().timestamp_millis()
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn semantic_transcript_embedding_is_current(
+        &self,
+        document: &SemanticTranscriptDocument,
+        model: &str,
+    ) -> Result<bool, AppError> {
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "The semantic transcript index is unavailable.",
+            )
+        })?;
+        connection
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM library_transcript_embeddings
+                    WHERE item_id = ?1 AND model = ?2 AND transcript_fingerprint = ?3
+                )",
+                params![document.item_id, model, document.fingerprint],
+                |row| row.get(0),
+            )
+            .map_err(AppError::from)
+    }
+
+    pub fn list_semantic_transcript_embeddings(
+        &self,
+        model: &str,
+        limit: usize,
+    ) -> Result<Vec<StoredTranscriptEmbedding>, AppError> {
+        if !(1..=50_000).contains(&limit) {
+            return Err(AppError::new(
+                "invalid_semantic_transcript_limit",
+                "Semantic search examines between 1 and 50,000 indexed videos.",
+            ));
+        }
+        let privacy_filter = if self.is_library_privacy_locked() {
+            locked_library_filter_for("media")
+        } else {
+            String::new()
+        };
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "The semantic transcript index is unavailable.",
+            )
+        })?;
+        let mut statement = connection.prepare(&format!(
+            "SELECT embedding.item_id, embedding.vector_json
+             FROM library_transcript_embeddings embedding
+             JOIN media_library media ON media.id = embedding.item_id
+             WHERE embedding.model = ?1
+               AND media.missing = 0
+               AND media.media_kind IN ('video', 'both')
+               {privacy_filter}
+             ORDER BY embedding.updated_at DESC
+             LIMIT ?2"
+        ))?;
+        let embeddings = statement
+            .query_map(
+                params![model, i64::try_from(limit).unwrap_or(50_000)],
+                |row| {
+                    Ok(StoredTranscriptEmbedding {
+                        item_id: row.get(0)?,
+                        vector_json: row.get(1)?,
+                    })
+                },
+            )?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(AppError::from)?;
+        Ok(embeddings)
+    }
+
+    pub fn semantic_transcript_index_status(
+        &self,
+        model: &str,
+    ) -> Result<LibrarySemanticIndexStatus, AppError> {
+        let privacy_filter = if self.is_library_privacy_locked() {
+            locked_library_filter_for("media")
+        } else {
+            String::new()
+        };
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "The semantic transcript index is unavailable.",
+            )
+        })?;
+        let eligible: i64 = connection.query_row(
+            &format!(
+                "SELECT COUNT(DISTINCT media.id)
+                 FROM media_library media
+                 JOIN library_transcript_search transcript ON transcript.item_id = media.id
+                 WHERE media.missing = 0
+                   AND media.media_kind IN ('video', 'both')
+                   {privacy_filter}"
+            ),
+            [],
+            |row| row.get(0),
+        )?;
+        let indexed: i64 = connection.query_row(
+            &format!(
+                "SELECT COUNT(*)
+                 FROM library_transcript_embeddings embedding
+                 JOIN media_library media ON media.id = embedding.item_id
+                 WHERE embedding.model = ?1
+                   AND media.missing = 0
+                   AND media.media_kind IN ('video', 'both')
+                   {privacy_filter}"
+            ),
+            [model],
+            |row| row.get(0),
+        )?;
+        let eligible = usize::try_from(eligible).unwrap_or(usize::MAX);
+        let indexed = usize::try_from(indexed).unwrap_or(usize::MAX);
+        Ok(LibrarySemanticIndexStatus {
+            model: model.to_owned(),
+            indexed_items: indexed,
+            stale_items: eligible.saturating_sub(indexed),
+        })
+    }
+
+    pub fn library_transcript_excerpt(
+        &self,
+        item_id: &str,
+        query: &str,
+    ) -> Result<Option<TranscriptExcerpt>, AppError> {
+        validate_uuid(item_id, "library item identifier")?;
+        let privacy_filter = if self.is_library_privacy_locked() {
+            LOCKED_LIBRARY_FILTER_SQL
+        } else {
+            ""
+        };
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "The transcript search index is unavailable.",
+            )
+        })?;
+        let mut statement = connection.prepare(&format!(
+            "SELECT transcript.start_seconds, transcript.end_seconds,
+                    transcript.cue_text, NULLIF(transcript.language, '')
+             FROM library_transcript_search transcript
+             JOIN media_library ON media_library.id = transcript.item_id
+             WHERE transcript.item_id = ?1
+               AND media_library.missing = 0
+               {privacy_filter}
+             ORDER BY transcript.start_seconds, transcript.rowid
+             LIMIT 500"
+        ))?;
+        let rows = statement
+            .query_map([item_id], |row| {
+                Ok(TranscriptExcerpt {
+                    start_seconds: row.get(0)?,
+                    end_seconds: row.get(1)?,
+                    text: row.get(2)?,
+                    language: row.get(3)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let terms = query
+            .split_whitespace()
+            .map(str::to_ascii_lowercase)
+            .filter(|term| term.chars().count() >= 2)
+            .take(12)
+            .collect::<Vec<_>>();
+        Ok(rows.into_iter().max_by_key(|cue| {
+            let text = cue.text.to_ascii_lowercase();
+            terms
+                .iter()
+                .filter(|term| text.contains(term.as_str()))
+                .count()
+        }))
+    }
+
+    pub fn library_transcript_cues_for_suggestions(
+        &self,
+        item_id: &str,
+        limit: usize,
+    ) -> Result<Vec<LibraryTranscriptCue>, AppError> {
+        validate_uuid(item_id, "library item identifier")?;
+        if !(1..=5_000).contains(&limit) {
+            return Err(AppError::new(
+                "invalid_chapter_transcript_limit",
+                "Chapter analysis reads between 1 and 5,000 transcript cues.",
+            ));
+        }
+        let privacy_filter = if self.is_library_privacy_locked() {
+            LOCKED_LIBRARY_FILTER_SQL
+        } else {
+            ""
+        };
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "Transcript chapter analysis is unavailable.",
+            )
+        })?;
+        let mut statement = connection.prepare(&format!(
+            "SELECT transcript.subtitle_name, NULLIF(transcript.language, ''),
+                    transcript.start_seconds, transcript.end_seconds, transcript.cue_text
+             FROM library_transcript_search transcript
+             JOIN media_library ON media_library.id = transcript.item_id
+             WHERE transcript.item_id = ?1
+               AND media_library.missing = 0
+               AND media_library.media_kind IN ('video', 'both')
+               {privacy_filter}
+             ORDER BY transcript.start_seconds, transcript.rowid
+             LIMIT ?2"
+        ))?;
+        let cues = statement
+            .query_map(
+                params![item_id, i64::try_from(limit).unwrap_or(5_000)],
+                |row| {
+                    Ok(LibraryTranscriptCue {
+                        subtitle_name: row.get(0)?,
+                        language: row.get(1)?,
+                        start_seconds: row.get(2)?,
+                        end_seconds: row.get(3)?,
+                        text: row.get(4)?,
+                    })
+                },
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(cues)
     }
 
     pub fn list_library_smart_views(&self) -> Result<Vec<LibrarySmartView>, AppError> {
@@ -3517,6 +5186,12 @@ impl Database {
                 updated_at: timestamp_or_epoch(updated_at),
             });
         }
+        drop(membership);
+        drop(connection);
+        for collection in &mut collections {
+            collection.item_ids =
+                self.filter_visible_library_item_ids(std::mem::take(&mut collection.item_ids))?;
+        }
         Ok(collections)
     }
 
@@ -3615,6 +5290,12 @@ impl Database {
                 updated_at: timestamp_or_epoch(updated_at),
             });
         }
+        drop(membership);
+        drop(connection);
+        for playlist in &mut playlists {
+            playlist.item_ids =
+                self.filter_visible_library_item_ids(std::mem::take(&mut playlist.item_ids))?;
+        }
         Ok(playlists)
     }
 
@@ -3685,6 +5366,12 @@ impl Database {
 
     pub fn list_library_moments(&self, item_id: &str) -> Result<Vec<LibraryMoment>, AppError> {
         validate_uuid(item_id, "library item")?;
+        if self.is_library_privacy_locked() && self.is_library_item_private(item_id)? {
+            return Err(AppError::new(
+                "library_item_not_found",
+                "The library item was not found.",
+            ));
+        }
         let connection = self.connection.lock().map_err(|_| {
             AppError::new("database_unavailable", "Library moments are unavailable.")
         })?;
@@ -3730,6 +5417,9 @@ impl Database {
         request: SaveLibraryMomentRequest,
     ) -> Result<LibraryMoment, AppError> {
         validate_uuid(&request.item_id, "library item")?;
+        if self.is_library_privacy_locked() && self.is_library_item_private(&request.item_id)? {
+            return Err(library_locked_error());
+        }
         let id = request.id.unwrap_or_else(|| Uuid::new_v4().to_string());
         validate_uuid(&id, "moment")?;
         let label = validate_moment_label(&request.label)?;
@@ -3869,6 +5559,30 @@ impl Database {
                 created_at: timestamp_or_epoch(created_at),
                 updated_at: timestamp_or_epoch(updated_at),
             });
+        }
+        drop(segment_statement);
+        drop(connection);
+        if self.is_library_privacy_locked() {
+            let mut visible_montages = Vec::with_capacity(montages.len());
+            for mut montage in montages {
+                let original_count = montage.segments.len();
+                let mut visible_segments = Vec::with_capacity(original_count);
+                for segment in montage.segments {
+                    if !self.is_library_item_private(&segment.item_id)? {
+                        visible_segments.push(segment);
+                    }
+                }
+                if visible_segments.is_empty() && original_count > 0 {
+                    continue;
+                }
+                if visible_segments.len() != original_count {
+                    montage.expected_segment_count = visible_segments.len();
+                    montage.incomplete = false;
+                }
+                montage.segments = visible_segments;
+                visible_montages.push(montage);
+            }
+            return Ok(visible_montages);
         }
         Ok(montages)
     }
@@ -4358,6 +6072,32 @@ impl Database {
                 updated_at: timestamp_or_epoch(updated_at),
             });
         }
+        drop(member_statement);
+        drop(connection);
+        if self.is_library_privacy_locked() {
+            let mut visible_stacks = Vec::with_capacity(stacks.len());
+            for mut stack in stacks {
+                let mut members = Vec::with_capacity(stack.members.len());
+                for member in stack.members {
+                    if !self.is_library_item_private(&member.item_id)? {
+                        members.push(member);
+                    }
+                }
+                if members.is_empty() {
+                    continue;
+                }
+                if stack
+                    .cover_item_id
+                    .as_deref()
+                    .is_some_and(|cover| !members.iter().any(|member| member.item_id == cover))
+                {
+                    stack.cover_item_id = None;
+                }
+                stack.members = members;
+                visible_stacks.push(stack);
+            }
+            return Ok(visible_stacks);
+        }
         Ok(stacks)
     }
 
@@ -4574,6 +6314,12 @@ impl Database {
         item_id: &str,
     ) -> Result<LibraryCurationState, AppError> {
         validate_uuid(item_id, "library item")?;
+        if self.is_library_privacy_locked() && self.is_library_item_private(item_id)? {
+            return Err(AppError::new(
+                "library_item_not_found",
+                "The library item was not found.",
+            ));
+        }
         let connection = self
             .connection
             .lock()
@@ -4631,6 +6377,9 @@ impl Database {
         decision: Option<LibraryCurationDecision>,
     ) -> Result<LibraryCurationState, AppError> {
         validate_uuid(item_id, "library item")?;
+        if self.is_library_privacy_locked() && self.is_library_item_private(item_id)? {
+            return Err(library_locked_error());
+        }
         let connection = self
             .connection
             .lock()
@@ -4988,7 +6737,10 @@ impl Database {
              ORDER BY detected_at DESC LIMIT 500",
         )?;
         let rows = statement.query_map([], library_change_from_row)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+        let changes = rows.collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        drop(connection);
+        self.filter_visible_library_records(changes, |change| &change.item_id)
     }
 
     pub fn review_library_changes(&self, ids: Vec<String>) -> Result<usize, AppError> {
@@ -5056,18 +6808,24 @@ impl Database {
     pub fn list_current_library_content_hashes(
         &self,
     ) -> Result<Vec<(String, u64, String)>, AppError> {
+        let privacy_filter = if self.is_library_privacy_locked() {
+            LOCKED_LIBRARY_FILTER_SQL
+        } else {
+            ""
+        };
         let connection = self.connection.lock().map_err(|_| {
             AppError::new("database_unavailable", "Duplicate analysis is unavailable.")
         })?;
-        let mut statement = connection.prepare(
+        let mut statement = connection.prepare(&format!(
             "SELECT library_content_hashes.item_id, library_content_hashes.file_size_bytes, sha256
              FROM library_content_hashes
              JOIN library_media_metadata ON library_media_metadata.item_id = library_content_hashes.item_id
              JOIN media_library ON media_library.id = library_content_hashes.item_id
              WHERE media_library.missing = 0
-               AND library_media_metadata.file_size_bytes = library_content_hashes.file_size_bytes
-               AND library_media_metadata.modified_at_ms = library_content_hashes.modified_at_ms",
-        )?;
+             AND library_media_metadata.file_size_bytes = library_content_hashes.file_size_bytes
+             AND library_media_metadata.modified_at_ms = library_content_hashes.modified_at_ms
+             {privacy_filter}"
+        ))?;
         let rows = statement.query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -5193,7 +6951,10 @@ impl Database {
              ORDER BY created_at DESC LIMIT 100",
         )?;
         let rows = statement.query_map([], library_file_operation_from_row)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+        let operations = rows.collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        drop(connection);
+        self.filter_visible_library_records(operations, |operation| &operation.item_id)
     }
 
     pub fn reconcile_library_file_operations(&self) -> Result<usize, AppError> {
@@ -5308,7 +7069,11 @@ impl Database {
              FROM library_sources ORDER BY name COLLATE NOCASE",
         )?;
         let rows = statement.query_map([], library_source_from_row)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+        let mut sources = rows.collect::<Result<Vec<_>, _>>()?;
+        if self.is_library_privacy_locked() {
+            sources.retain(|source| !source.private);
+        }
+        Ok(sources)
     }
 
     pub fn get_library_source(&self, id: &str) -> Result<LibrarySource, AppError> {
@@ -7543,6 +9308,181 @@ fn timestamp_or_epoch(milliseconds: i64) -> DateTime<Utc> {
     DateTime::from_timestamp_millis(milliseconds).unwrap_or(DateTime::<Utc>::UNIX_EPOCH)
 }
 
+fn validate_post_download_recipe_steps(
+    steps: &mut Vec<PostDownloadRecipeStep>,
+) -> Result<(), AppError> {
+    if steps.is_empty() || steps.len() > 12 {
+        return Err(AppError::new(
+            "invalid_post_download_recipe_steps",
+            "A post-download recipe contains between 1 and 12 typed steps.",
+        ));
+    }
+    for step in steps {
+        match step {
+            PostDownloadRecipeStep::AddTags { tags } => {
+                *tags = normalize_library_tags(std::mem::take(tags))?;
+                if tags.is_empty() {
+                    return Err(AppError::new(
+                        "invalid_post_download_recipe_tags",
+                        "The Add tags step needs at least one valid tag.",
+                    ));
+                }
+            }
+            PostDownloadRecipeStep::AddToCollection { collection_id } => {
+                validate_uuid(collection_id, "collection identifier")?;
+            }
+            PostDownloadRecipeStep::Transcribe {
+                model_path,
+                language,
+            } => {
+                *model_path = model_path.trim().chars().take(4_096).collect();
+                if model_path.is_empty() || model_path.chars().any(char::is_control) {
+                    return Err(AppError::new(
+                        "invalid_recipe_whisper_model",
+                        "Choose a valid local whisper.cpp model path.",
+                    ));
+                }
+                if language.as_ref().is_some_and(|value| {
+                    value.chars().count() > 24
+                        || !value.chars().all(|character| {
+                            character.is_ascii_alphanumeric()
+                                || character == '-'
+                                || character == '_'
+                        })
+                }) {
+                    return Err(AppError::new(
+                        "invalid_recipe_transcription_language",
+                        "Use a short whisper.cpp language code.",
+                    ));
+                }
+            }
+            PostDownloadRecipeStep::SemanticIndex { model } => {
+                *model = model.trim().chars().take(100).collect();
+                if model.is_empty()
+                    || model.chars().any(char::is_control)
+                    || model.chars().any(char::is_whitespace)
+                {
+                    return Err(AppError::new(
+                        "invalid_recipe_embedding_model",
+                        "Use a valid local Ollama embedding model name.",
+                    ));
+                }
+            }
+            PostDownloadRecipeStep::ImportLibrary
+            | PostDownloadRecipeStep::TranscodeMp4
+            | PostDownloadRecipeStep::ExtractAudio { .. }
+            | PostDownloadRecipeStep::PrivacySafeCopy => {}
+        }
+    }
+    Ok(())
+}
+
+fn post_download_recipe_run_state_name(state: PostDownloadRecipeRunState) -> &'static str {
+    match state {
+        PostDownloadRecipeRunState::Running => "running",
+        PostDownloadRecipeRunState::Completed => "completed",
+        PostDownloadRecipeRunState::Failed => "failed",
+    }
+}
+
+fn post_download_recipe_run_state_from_name(value: &str) -> PostDownloadRecipeRunState {
+    match value {
+        "completed" => PostDownloadRecipeRunState::Completed,
+        "failed" => PostDownloadRecipeRunState::Failed,
+        _ => PostDownloadRecipeRunState::Running,
+    }
+}
+
+fn load_library_privacy_settings_record(
+    connection: &Connection,
+) -> Result<Option<LibraryPrivacySettingsRecord>, AppError> {
+    let value: Option<String> = connection
+        .query_row(
+            "SELECT value_json FROM settings WHERE key = ?1",
+            [LIBRARY_PRIVACY_SETTINGS_KEY],
+            |row| row.get(0),
+        )
+        .optional()?;
+    value
+        .map(|value| {
+            serde_json::from_str(&value).map_err(|error| {
+                AppError::internal("could not read Library privacy settings", error)
+            })
+        })
+        .transpose()
+}
+
+fn validate_library_privacy_passphrase(passphrase: &str) -> Result<(), AppError> {
+    let length = passphrase.chars().count();
+    if !(6..=256).contains(&length) || passphrase.chars().any(char::is_control) {
+        return Err(AppError::new(
+            "invalid_library_privacy_passphrase",
+            "Use a Library privacy passphrase between 6 and 256 characters without control characters.",
+        ));
+    }
+    Ok(())
+}
+
+fn derive_library_privacy_verifier(passphrase: &str, salt: &str) -> String {
+    let mut digest = Sha256::new()
+        .chain_update(b"nice-downloader-library-privacy-v1")
+        .chain_update(salt.as_bytes())
+        .chain_update(passphrase.as_bytes())
+        .finalize()
+        .to_vec();
+    for round in 0_u32..50_000 {
+        digest = Sha256::new()
+            .chain_update(b"nice-downloader-library-privacy-v1")
+            .chain_update(salt.as_bytes())
+            .chain_update(round.to_le_bytes())
+            .chain_update(&digest)
+            .chain_update(passphrase.as_bytes())
+            .finalize()
+            .to_vec();
+    }
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.iter()
+        .zip(right)
+        .fold(0_u8, |difference, (left, right)| {
+            difference | (left ^ right)
+        })
+        == 0
+}
+
+fn normalize_private_folder_path(value: &str) -> Result<String, AppError> {
+    if value.chars().count() > 1_024 || value.chars().any(char::is_control) {
+        return Err(AppError::new(
+            "invalid_library_private_folder",
+            "The private folder path is invalid.",
+        ));
+    }
+    let normalized = value.replace('\\', "/");
+    let normalized = normalized.trim_matches('/');
+    if normalized
+        .split('/')
+        .any(|segment| segment == "." || segment == "..")
+    {
+        return Err(AppError::new(
+            "invalid_library_private_folder",
+            "Private folder paths cannot contain parent-directory segments.",
+        ));
+    }
+    Ok(normalized.to_owned())
+}
+
+fn library_locked_error() -> AppError {
+    AppError::new(
+        "library_locked",
+        "The private Library is locked. Unlock it before accessing this media.",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7684,6 +9624,7 @@ mod tests {
             },
             options,
             scheduled_for: None,
+            post_download_recipe_ids: Vec::new(),
         };
         database.save_job(&job, &request).expect("save history");
         let repeated = database
@@ -7777,6 +9718,59 @@ mod tests {
         );
         database.complete_onboarding().expect("complete onboarding");
         assert!(database.onboarding_completed().expect("completed status"));
+    }
+
+    #[test]
+    fn saves_validates_and_deletes_typed_post_download_recipes() {
+        let directory = tempdir().expect("temporary directory");
+        let database = Database::open(&directory.path().join("recipes.sqlite3")).expect("database");
+        let recipe = database
+            .save_post_download_recipe(SavePostDownloadRecipeRequest {
+                id: None,
+                name: "  Archive and index  ".to_owned(),
+                enabled: true,
+                steps: vec![
+                    PostDownloadRecipeStep::AddTags {
+                        tags: vec![" Archive ".to_owned(), "archive".to_owned()],
+                    },
+                    PostDownloadRecipeStep::PrivacySafeCopy,
+                    PostDownloadRecipeStep::SemanticIndex {
+                        model: "nomic-embed-text".to_owned(),
+                    },
+                ],
+            })
+            .expect("save recipe");
+        assert_eq!(recipe.name, "Archive and index");
+        assert_eq!(recipe.steps.len(), 3);
+        assert!(matches!(
+            &recipe.steps[0],
+            PostDownloadRecipeStep::AddTags { tags } if tags == &vec!["Archive".to_owned()]
+        ));
+        assert_eq!(
+            database
+                .enabled_post_download_recipes_by_ids(std::slice::from_ref(&recipe.id))
+                .expect("selected recipe")
+                .len(),
+            1
+        );
+        let invalid = database
+            .save_post_download_recipe(SavePostDownloadRecipeRequest {
+                id: None,
+                name: "Invalid".to_owned(),
+                enabled: true,
+                steps: vec![PostDownloadRecipeStep::SemanticIndex {
+                    model: "not a model".to_owned(),
+                }],
+            })
+            .expect_err("invalid model");
+        assert_eq!(invalid.code, "invalid_recipe_embedding_model");
+        database
+            .delete_post_download_recipe(&recipe.id)
+            .expect("delete recipe");
+        assert!(database
+            .list_post_download_recipes()
+            .expect("recipes")
+            .is_empty());
     }
 
     #[test]
@@ -8034,7 +10028,7 @@ mod tests {
                 row.get(0)
             })
             .expect("recovered migration version");
-        assert_eq!(latest_version, 28);
+        assert_eq!(latest_version, 31);
         let has_playback: bool = connection
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'library_playback')",
@@ -8921,6 +10915,209 @@ mod tests {
     }
 
     #[test]
+    fn locked_library_hides_private_sources_folders_items_and_activity() {
+        let directory = tempdir().expect("temporary directory");
+        let database_path = directory.path().join("privacy.sqlite3");
+        let database = Database::open(&database_path).expect("database");
+        let public_source = database
+            .save_library_source(SaveLibrarySourceRequest {
+                id: None,
+                name: "Visible source".to_owned(),
+                path: directory.path().to_string_lossy().into_owned(),
+                media_kind: LibraryMediaKind::Video,
+                recursive: true,
+                watch_enabled: false,
+                private: false,
+                include_patterns: Vec::new(),
+                exclude_patterns: Vec::new(),
+            })
+            .expect("public source");
+        let private_source = database
+            .save_library_source(SaveLibrarySourceRequest {
+                id: None,
+                name: "Private source".to_owned(),
+                path: directory
+                    .path()
+                    .join("private-source")
+                    .to_string_lossy()
+                    .into_owned(),
+                media_kind: LibraryMediaKind::Video,
+                recursive: true,
+                watch_enabled: false,
+                private: true,
+                include_patterns: Vec::new(),
+                exclude_patterns: Vec::new(),
+            })
+            .expect("private source");
+
+        let public_item = database
+            .upsert_library_item(&media_stack_test_item(
+                directory.path(),
+                "Public video",
+                LibraryMediaKind::Video,
+            ))
+            .expect("public item");
+        let explicit_private = database
+            .upsert_library_item(&media_stack_test_item(
+                directory.path(),
+                "Explicit private",
+                LibraryMediaKind::Video,
+            ))
+            .expect("explicit private item");
+        let mut folder_private =
+            media_stack_test_item(directory.path(), "Folder private", LibraryMediaKind::Video);
+        folder_private.source_id = Some(public_source.id.clone());
+        folder_private.relative_path = Some("secret/folder-private.mp4".to_owned());
+        let folder_private = database
+            .upsert_library_item(&folder_private)
+            .expect("folder item");
+        let mut source_private =
+            media_stack_test_item(directory.path(), "Source private", LibraryMediaKind::Video);
+        source_private.source_id = Some(private_source.id.clone());
+        source_private.relative_path = Some("source-private.mp4".to_owned());
+        let source_private = database
+            .upsert_library_item(&source_private)
+            .expect("source item");
+
+        database
+            .configure_library_privacy("correct horse battery staple", 15)
+            .expect("configure privacy");
+        database
+            .set_library_items_private(vec![explicit_private.id.clone()], true)
+            .expect("private item rule");
+        database
+            .set_library_folder_private(&public_source.id, "secret", true)
+            .expect("private folder rule");
+        for item in [&public_item, &explicit_private] {
+            database
+                .save_library_playback(SaveLibraryPlaybackRequest {
+                    item_id: item.id.clone(),
+                    position_seconds: 12.0,
+                    duration_seconds: 30.0,
+                    completed: false,
+                })
+                .expect("playback state");
+            database
+                .replace_library_transcript_cues(
+                    &item.id,
+                    &[LibraryTranscriptCue {
+                        subtitle_name: "captions.vtt".to_owned(),
+                        language: Some("en".to_owned()),
+                        start_seconds: 1.0,
+                        end_seconds: 2.0,
+                        text: "shared privacy phrase".to_owned(),
+                    }],
+                )
+                .expect("transcript cue");
+        }
+
+        database.lock_library_privacy().expect("lock privacy");
+        let visible_ids = database
+            .list_library_items()
+            .expect("visible items")
+            .into_iter()
+            .map(|item| item.id)
+            .collect::<HashSet<_>>();
+        assert_eq!(visible_ids, HashSet::from([public_item.id.clone()]));
+        let query = database
+            .query_library_items(library_query_request())
+            .expect("private query");
+        assert_eq!(
+            query.total_items, 1,
+            "query result should count only visible items"
+        );
+        assert_eq!(
+            query.items.iter().map(|item| &item.id).collect::<Vec<_>>(),
+            vec![&public_item.id]
+        );
+        let facets = database
+            .library_facets(LibraryFacetRequest {
+                source_id: None,
+                availability: LibraryAvailabilityFilter::Available,
+            })
+            .expect("private facets");
+        assert_eq!(facets.total_items, 1);
+        let health = database.library_health_summary().expect("private health");
+        assert_eq!(health.total_items, 1);
+        let by_ids = database
+            .list_library_items_by_ids(vec![
+                public_item.id.clone(),
+                explicit_private.id.clone(),
+                folder_private.id.clone(),
+                source_private.id.clone(),
+            ])
+            .expect("items by id");
+        assert_eq!(by_ids.len(), 1);
+        assert_eq!(by_ids[0].id, public_item.id);
+        assert_eq!(
+            database
+                .get_library_item(&explicit_private.id)
+                .expect_err("private item hidden")
+                .code,
+            "library_item_not_found"
+        );
+        assert_eq!(
+            database
+                .list_library_sources()
+                .expect("visible sources")
+                .iter()
+                .map(|source| source.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![public_source.id.as_str()]
+        );
+        let playback = database
+            .list_continue_watching(24)
+            .expect("visible playback");
+        assert_eq!(playback.len(), 1);
+        assert_eq!(playback[0].item.id, public_item.id);
+        let transcripts = database
+            .search_library_transcripts("shared privacy", 10)
+            .expect("visible transcripts");
+        assert_eq!(transcripts.len(), 1);
+        assert_eq!(transcripts[0].item_id, public_item.id);
+        assert_eq!(
+            database
+                .unlock_library_privacy("wrong passphrase")
+                .expect_err("wrong passphrase")
+                .code,
+            "library_privacy_unlock_failed"
+        );
+        database
+            .unlock_library_privacy("correct horse battery staple")
+            .expect("unlock privacy");
+        assert_eq!(
+            database.list_library_items().expect("unlocked items").len(),
+            4
+        );
+
+        database
+            .library_privacy_last_activity_ms
+            .store(0, Ordering::SeqCst);
+        assert!(database
+            .expire_library_privacy_if_idle()
+            .expect("expire privacy"));
+        assert!(
+            database
+                .library_privacy_status()
+                .expect("expired status")
+                .locked
+        );
+        drop(database);
+
+        let reopened = Database::open(&database_path).expect("reopen database");
+        assert!(
+            reopened
+                .library_privacy_status()
+                .expect("restart status")
+                .locked
+        );
+        assert_eq!(
+            reopened.list_library_items().expect("restart items").len(),
+            1
+        );
+    }
+
+    #[test]
     fn targets_bounded_theme_analysis_jobs_by_folder_and_items() {
         let directory = tempdir().expect("temporary directory");
         let database =
@@ -9302,6 +11499,75 @@ mod tests {
     }
 
     #[test]
+    fn near_duplicate_review_combines_visual_duration_and_exact_hash_evidence() {
+        let directory = tempdir().expect("temporary directory");
+        let database =
+            Database::open(&directory.path().join("near-duplicates.sqlite3")).expect("database");
+        let first = database
+            .upsert_library_item(&media_stack_test_item(
+                directory.path(),
+                "Original video",
+                LibraryMediaKind::Video,
+            ))
+            .expect("first video");
+        let mut second_input = media_stack_test_item(
+            directory.path(),
+            "Re-encoded video",
+            LibraryMediaKind::Video,
+        );
+        second_input.duration_seconds = Some(32.0);
+        let second = database
+            .upsert_library_item(&second_input)
+            .expect("second video");
+        let third = database
+            .upsert_library_item(&media_stack_test_item(
+                directory.path(),
+                "Exact copy",
+                LibraryMediaKind::Video,
+            ))
+            .expect("third video");
+        let targets = database
+            .list_visual_signature_targets_after(None, 100)
+            .expect("signature targets")
+            .into_iter()
+            .map(|target| (target.id.clone(), target))
+            .collect::<HashMap<_, _>>();
+        database
+            .save_visual_signature(&targets[&first.id], 0)
+            .expect("first signature");
+        database
+            .save_visual_signature(&targets[&second.id], 1)
+            .expect("second signature");
+        database
+            .save_visual_signature(&targets[&third.id], 0)
+            .expect("third signature");
+        database
+            .save_library_content_hash(&first.id, 100, 1, &"a".repeat(64))
+            .expect("first hash");
+        database
+            .save_library_content_hash(&second.id, 100, 1, &"b".repeat(64))
+            .expect("second hash");
+        database
+            .save_library_content_hash(&third.id, 100, 1, &"a".repeat(64))
+            .expect("third hash");
+
+        let matches = database
+            .find_near_duplicate_videos(90.0, 5.0, 20)
+            .expect("near duplicate review");
+        let contains_pair = |candidate: &LibraryNearDuplicateMatch, left: &str, right: &str| {
+            [candidate.left.id.as_str(), candidate.right.id.as_str()].contains(&left)
+                && [candidate.left.id.as_str(), candidate.right.id.as_str()].contains(&right)
+        };
+        assert!(matches
+            .iter()
+            .any(|candidate| contains_pair(candidate, &first.id, &second.id)
+                && candidate.exact_hash_compared));
+        assert!(!matches
+            .iter()
+            .any(|candidate| contains_pair(candidate, &first.id, &third.id)));
+    }
+
+    #[test]
     fn indexes_replaces_searches_and_cascades_library_transcript_cues() {
         let directory = tempdir().expect("temporary directory");
         let database =
@@ -9398,6 +11664,72 @@ mod tests {
             .expect("cascade status");
         assert_eq!(status.indexed_items, 0);
         assert_eq!(status.cue_count, 0);
+    }
+
+    #[test]
+    fn persists_semantic_embeddings_and_invalidates_them_when_transcripts_change() {
+        let directory = tempdir().expect("temporary directory");
+        let database = Database::open(&directory.path().join("semantic-transcripts.sqlite3"))
+            .expect("database");
+        let item = database
+            .upsert_scanned_library_item(&media_stack_test_item(
+                directory.path(),
+                "Semantic transcript fixture",
+                LibraryMediaKind::Video,
+            ))
+            .expect("catalog video");
+        database
+            .replace_library_transcript_cues(
+                &item.id,
+                &[LibraryTranscriptCue {
+                    subtitle_name: "fixture.vtt".to_owned(),
+                    language: Some("en".to_owned()),
+                    start_seconds: 2.0,
+                    end_seconds: 6.0,
+                    text: "A quiet walk through a rainy city at night".to_owned(),
+                }],
+            )
+            .expect("transcript cues");
+
+        let documents = database
+            .list_semantic_transcript_documents(std::slice::from_ref(&item.id), 10)
+            .expect("semantic documents");
+        assert_eq!(documents.len(), 1);
+        let document = &documents[0];
+        let vector_json = serde_json::to_string(&vec![0.25_f32; 8]).expect("vector json");
+        database
+            .save_semantic_transcript_embedding(document, "fixture-embed", &vector_json)
+            .expect("save embedding");
+        assert!(database
+            .semantic_transcript_embedding_is_current(document, "fixture-embed")
+            .expect("current embedding"));
+        let status = database
+            .semantic_transcript_index_status("fixture-embed")
+            .expect("semantic status");
+        assert_eq!(status.indexed_items, 1);
+        assert_eq!(status.stale_items, 0);
+
+        database
+            .replace_library_transcript_cues(
+                &item.id,
+                &[LibraryTranscriptCue {
+                    subtitle_name: "fixture.vtt".to_owned(),
+                    language: Some("en".to_owned()),
+                    start_seconds: 8.0,
+                    end_seconds: 12.0,
+                    text: "The scene changed to a sunny beach".to_owned(),
+                }],
+            )
+            .expect("replace transcript");
+        assert!(database
+            .list_semantic_transcript_embeddings("fixture-embed", 10)
+            .expect("stored embeddings")
+            .is_empty());
+        let status = database
+            .semantic_transcript_index_status("fixture-embed")
+            .expect("stale semantic status");
+        assert_eq!(status.indexed_items, 0);
+        assert_eq!(status.stale_items, 1);
     }
 
     #[test]

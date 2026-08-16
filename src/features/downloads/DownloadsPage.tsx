@@ -31,6 +31,10 @@ export function DownloadsPage({ queueOnly = false }: { queueOnly?: boolean }) {
       : b.createdAt.localeCompare(a.createdAt));
   const removable = visible.filter((job) => terminalStates.has(job.state));
   const selectedRemovable = selectedJobIds.filter((id) => removable.some((job) => job.id === id));
+  const activeCount = jobs.filter((job) => ["Analyzing", "Preparing", "Downloading", "PostProcessing", "Merging", "Verifying"].includes(job.state)).length;
+  const waitingCount = jobs.filter((job) => job.state === "Queued").length;
+  const completedCount = jobs.filter((job) => job.state === "Completed").length;
+  const attentionCount = jobs.filter((job) => job.state === "Failed" || job.state === "Cancelled").length;
 
   async function removeRecords(ids: string[], confirmBulk = false) {
     const removableIds = ids.filter((id) => removable.some((job) => job.id === id));
@@ -43,13 +47,22 @@ export function DownloadsPage({ queueOnly = false }: { queueOnly?: boolean }) {
   return (
     <Page
       title={queueOnly ? "Queue" : "Downloads"}
-      description={queueOnly ? "Downloads waiting for an available worker." : "Live status from the Rust download queue."}
+      description={queueOnly ? "Shape what downloads next and how many transfers run together." : "Follow every transfer from first byte to finished file."}
       actions={
         <Button onClick={() => setView("new")}><Download size={16} /> New download</Button>
       }
     >
+      <DownloadOverview
+        queueOnly={queueOnly}
+        activeCount={activeCount}
+        waitingCount={waitingCount}
+        completedCount={completedCount}
+        attentionCount={attentionCount}
+        paused={queue.settings.paused}
+        workerLimit={queue.settings.concurrentDownloads}
+      />
       {queueOnly ? (
-        <div className="panel-shadow mb-5 flex flex-wrap items-center gap-x-5 gap-y-3 rounded-[11px] border border-line/60 bg-panel/75 p-4 text-sm">
+        <div className="panel-shadow mb-6 flex flex-wrap items-center gap-x-5 gap-y-3 rounded-panel border border-line/45 bg-panel/70 p-5 text-sm">
           <label className="flex items-center gap-2 text-muted">
             Concurrent downloads
             <select
@@ -83,11 +96,11 @@ export function DownloadsPage({ queueOnly = false }: { queueOnly?: boolean }) {
               <option value="none">Do nothing</option><option value="openFolder">Open folder</option>
             </select>
           </label>
-          <span className="number-font ml-auto rounded-[6px] bg-canvas/60 px-2.5 py-1.5 text-[10px] text-muted">{queue.activeJobIds.length} active · {queue.orderedJobIds.length} waiting</span>
+          <span className="number-font ml-auto rounded-control bg-canvas/60 px-3 py-2 text-[10px] text-muted">{queue.activeJobIds.length} active · {queue.orderedJobIds.length} waiting</span>
         </div>
       ) : null}
       {!queueOnly && removable.length > 0 ? (
-        <div className="panel-shadow mb-4 flex flex-wrap items-center gap-2 border border-line/60 bg-panel/65 p-3">
+        <div className="mb-5 flex flex-wrap items-center gap-2 rounded-panel border border-line/45 bg-panel/55 p-3.5 shadow-control">
           <span className="mr-2 text-xs text-muted">{selectedRemovable.length > 0 ? `${selectedRemovable.length} selected` : `${removable.length} finished records`}</span>
           <Button variant="secondary" className="h-8 px-2.5 text-xs" onClick={() => setSelectedJobIds(removable.map((job) => job.id))}>Select finished</Button>
           {selectedRemovable.length > 0 ? <Button variant="secondary" className="h-8 px-2.5 text-xs" onClick={() => setSelectedJobIds([])}>Clear selection</Button> : null}
@@ -105,8 +118,8 @@ export function DownloadsPage({ queueOnly = false }: { queueOnly?: boolean }) {
           description={queueOnly ? "Queued jobs appear here while the configured workers are busy." : "Analyze a URL and start a download to see live progress here."}
         />
       ) : (
-        <div className="panel-shadow overflow-hidden rounded-[11px] border border-line/60 bg-panel/70">
-          <div className="grid grid-cols-[28px_minmax(180px,1fr)_minmax(120px,.65fr)_96px_174px] gap-3 border-b border-line/60 bg-elevated/45 px-4 py-2.5 text-[10px] font-semibold tracking-[0.04em] text-muted">
+        <div className="panel-shadow overflow-hidden rounded-media border border-line/45 bg-panel/70">
+          <div className="grid grid-cols-[28px_minmax(180px,1fr)_minmax(120px,.65fr)_96px_174px] gap-3 border-b border-line/45 bg-elevated/35 px-5 py-3 text-[10px] font-semibold tracking-[0.045em] text-muted">
             <span>{!queueOnly && removable.length > 0 ? <input type="checkbox" aria-label="Select all finished downloads" checked={selectedRemovable.length === removable.length} onChange={(event) => setSelectedJobIds(event.target.checked ? removable.map((job) => job.id) : [])} /> : null}</span><span>Download</span><span>Status</span><span className="text-right">Transfer</span><span className="text-right">Actions</span>
           </div>
           <div className="divide-y divide-line/65">
@@ -139,6 +152,52 @@ export function DownloadsPage({ queueOnly = false }: { queueOnly?: boolean }) {
   );
 }
 
+function DownloadOverview({ queueOnly, activeCount, waitingCount, completedCount, attentionCount, paused, workerLimit }: {
+  queueOnly: boolean;
+  activeCount: number;
+  waitingCount: number;
+  completedCount: number;
+  attentionCount: number;
+  paused: boolean;
+  workerLimit: number;
+}) {
+  const metrics = queueOnly
+    ? [
+      { label: "Workers", value: `${activeCount}/${workerLimit}` },
+      { label: "Waiting", value: waitingCount.toLocaleString() },
+      { label: "Needs attention", value: attentionCount.toLocaleString() },
+    ]
+    : [
+      { label: "In motion", value: activeCount.toLocaleString() },
+      { label: "Waiting", value: waitingCount.toLocaleString() },
+      { label: "Finished", value: completedCount.toLocaleString() },
+    ];
+  const quiet = activeCount === 0 && waitingCount === 0;
+  const heading = queueOnly
+    ? paused ? "Queue paused" : waitingCount > 0 ? "Queue is moving" : "Queue is ready"
+    : quiet ? "All quiet" : activeCount > 0 ? "Transfers in progress" : "Downloads are waiting";
+  const detail = queueOnly
+    ? paused ? "No new jobs will start until you resume the queue." : `${workerLimit} worker${workerLimit === 1 ? "" : "s"} can run at the same time.`
+    : quiet ? "New transfers will appear here as soon as they start." : "Progress and recovery stay owned by the local Rust queue.";
+
+  return (
+    <section className="panel-shadow mb-6 grid overflow-hidden rounded-media border border-line/40 bg-panel/65 lg:grid-cols-[minmax(0,1.45fr)_repeat(3,minmax(110px,.45fr))]" aria-label={queueOnly ? "Queue overview" : "Download overview"}>
+      <div className="ingest-card flex min-h-28 items-center gap-4 border-b border-line/40 px-6 py-5 lg:border-b-0 lg:border-r">
+        <span className={`grid size-11 shrink-0 place-items-center rounded-panel ${quiet || paused ? "bg-elevated text-muted" : "bg-accent text-accentInk shadow-[0_12px_32px_rgb(var(--accent)/0.18)]"}`}>
+          {queueOnly ? <ListOrdered size={19} /> : <Download size={19} />}
+        </span>
+        <span className="min-w-0"><strong className="block text-[17px] font-semibold tracking-[-0.025em]">{heading}</strong><span className="mt-1 block max-w-md text-[11px] leading-4 text-muted">{detail}</span></span>
+      </div>
+      {metrics.map((metric) => (
+        <div key={metric.label} className="flex min-h-24 flex-col justify-center border-t border-line/35 px-5 py-4 first:border-t-0 lg:min-h-28 lg:border-l lg:border-t-0">
+          <span className="number-font text-[22px] font-semibold tracking-[-0.04em] text-ink">{metric.value}</span>
+          <span className="mt-1 text-[10px] font-medium tracking-[0.035em] text-muted">{metric.label}</span>
+        </div>
+      ))}
+    </section>
+  );
+}
+
 function DownloadRow({ job, onCancel, onRetry, onRetryFailedGalleryFiles, onPause, onResume, onReveal, onDismiss, selected, onSelect, pauseSupported, queueControls }: {
   job: DownloadJob;
   onCancel: () => void;
@@ -159,7 +218,7 @@ function DownloadRow({ job, onCancel, onRetry, onRetryFailedGalleryFiles, onPaus
   const progressTone = job.state === "Failed" ? "red" : job.state === "Completed" ? "green" : job.currentOperation.toLocaleLowerCase().includes("retry") ? "amber" : "blue";
   return (
     <article
-      className="grid grid-cols-[28px_minmax(180px,1fr)_minmax(120px,.65fr)_96px_174px] items-center gap-3 px-4 py-3.5 transition-colors duration-200 hover:bg-elevated/30"
+      className="grid grid-cols-[28px_minmax(180px,1fr)_minmax(120px,.65fr)_96px_174px] items-center gap-3 px-5 py-4 transition-colors duration-200 hover:bg-elevated/35"
       draggable={Boolean(queueControls)}
       onDragStart={(event) => event.dataTransfer.setData("text/plain", job.id)}
       onDragOver={(event) => { if (queueControls) event.preventDefault(); }}
@@ -168,7 +227,7 @@ function DownloadRow({ job, onCancel, onRetry, onRetryFailedGalleryFiles, onPaus
       <div>{terminalStates.has(job.state) && !queueControls ? <input type="checkbox" checked={selected} onChange={(event) => onSelect(event.target.checked)} aria-label={`Select ${job.title}`} /> : null}</div>
       <div className="flex min-w-0 items-center gap-3">
       {queueControls ? <GripVertical size={15} className="shrink-0 text-muted" aria-label="Drag to reorder" /> : null}
-      <div className="hidden h-14 w-24 shrink-0 overflow-hidden rounded-[7px] border border-line/50 bg-elevated xl:block">
+      <div className="hidden h-14 w-24 shrink-0 overflow-hidden rounded-control border border-line/40 bg-elevated xl:block">
         {job.thumbnail ? <img className="h-full w-full object-cover" src={job.thumbnail} alt={`${job.title} thumbnail`} /> : <div className="grid h-full place-items-center text-muted"><Download size={22} /></div>}
       </div>
       <div className="min-w-0 flex-1">
@@ -251,5 +310,5 @@ function StatusBadge({ job }: { job: DownloadJob }) {
   const retrying = job.currentOperation.toLocaleLowerCase().includes("retry");
   const label = retrying ? "Retrying" : job.state;
   const tone = job.state === "Failed" ? "bg-red-500/10 text-red-400" : job.state === "Completed" ? "bg-emerald-500/10 text-emerald-400" : retrying ? "bg-amber-500/10 text-amber-400" : job.state === "Verifying" ? "bg-violet-500/10 text-violet-400" : job.state === "Paused" || job.state === "Cancelled" ? "bg-line/50 text-muted" : "bg-accent/10 text-accent";
-  return <span className={`inline-flex rounded-[5px] px-2 py-1 text-[10px] font-semibold tracking-[0.02em] ${tone}`}>{label}</span>;
+  return <span className={`inline-flex rounded-full px-2.5 py-1 text-[10px] font-semibold tracking-[0.02em] ${tone}`}>{label}</span>;
 }

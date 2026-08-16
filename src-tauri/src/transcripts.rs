@@ -95,6 +95,23 @@ fn parse_webvtt(contents: &str) -> Vec<(f64, f64, String)> {
     cues
 }
 
+pub fn parse_webvtt_cues(
+    contents: &str,
+    subtitle_name: &str,
+    language: Option<&str>,
+) -> Vec<LibraryTranscriptCue> {
+    parse_webvtt(contents)
+        .into_iter()
+        .map(|(start_seconds, end_seconds, text)| LibraryTranscriptCue {
+            subtitle_name: subtitle_name.chars().take(240).collect(),
+            language: language.map(|value| value.chars().take(24).collect()),
+            start_seconds,
+            end_seconds,
+            text,
+        })
+        .collect()
+}
+
 fn parse_timestamp(value: &str) -> Option<f64> {
     let normalized = value.replace(',', ".");
     let parts = normalized.split(':').collect::<Vec<_>>();

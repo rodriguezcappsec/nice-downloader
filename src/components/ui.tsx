@@ -8,14 +8,14 @@ export function Button({
   variant?: "primary" | "secondary" | "ghost" | "danger";
 }) {
   const variants = {
-    primary: "bg-accent text-[#081426] hover:brightness-110 border-accent shadow-[0_8px_22px_rgb(var(--accent)/0.16)]",
+      primary: "bg-accent text-accentInk hover:brightness-105 border-accent shadow-[0_10px_28px_rgb(var(--accent)/0.19)]",
     secondary: "bg-elevated/85 text-ink hover:bg-elevated hover:border-accent/35 border-line/80 shadow-control",
     ghost: "bg-transparent text-muted hover:text-ink hover:bg-elevated/70 border-transparent",
     danger: "bg-danger/10 text-red-400 hover:bg-danger/20 border-danger/25",
   };
   return (
     <button
-      className={`inline-flex h-10 items-center justify-center gap-2 rounded-[8px] border px-4 text-[13px] font-semibold transition-[transform,background-color,border-color,filter,color,box-shadow] duration-200 hover:-translate-y-0.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/75 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas disabled:pointer-events-none disabled:opacity-45 ${variants[variant]} ${className}`}
+        className={`inline-flex h-10 items-center justify-center gap-2 rounded-control border px-4 text-[13px] font-semibold transition-[transform,background-color,border-color,filter,color,box-shadow] duration-200 hover:-translate-y-0.5 active:translate-y-px active:scale-[0.985] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/75 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas disabled:pointer-events-none disabled:opacity-45 ${variants[variant]} ${className}`}
       {...props}
     />
   );
@@ -24,7 +24,7 @@ export function Button({
 export function Input({ className = "", ...props }: InputHTMLAttributes<HTMLInputElement>) {
   return (
     <input
-      className={`h-11 w-full rounded-[8px] border border-line/80 bg-canvas/70 px-3.5 text-[13px] text-ink shadow-[inset_0_1px_2px_rgb(0_0_0/0.08)] outline-none transition-[border-color,box-shadow,background-color] duration-200 placeholder:text-muted/80 hover:border-muted/60 focus:border-accent/80 focus:bg-panel focus:ring-2 focus:ring-accent/15 ${className}`}
+        className={`h-11 w-full rounded-control border border-line/80 bg-canvas/70 px-3.5 text-[13px] text-ink shadow-[inset_0_1px_2px_rgb(0_0_0/0.08)] outline-none transition-[border-color,box-shadow,background-color] duration-200 placeholder:text-muted/80 hover:border-muted/60 focus:border-accent/80 focus:bg-panel focus:ring-2 focus:ring-accent/15 ${className}`}
       {...props}
     />
   );
@@ -33,7 +33,7 @@ export function Input({ className = "", ...props }: InputHTMLAttributes<HTMLInpu
 export function Textarea({ className = "", ...props }: TextareaHTMLAttributes<HTMLTextAreaElement>) {
   return (
     <textarea
-      className={`min-h-20 w-full resize-y rounded-[8px] border border-line/80 bg-canvas/70 px-3.5 py-3 text-[13px] leading-5 text-ink shadow-[inset_0_1px_2px_rgb(0_0_0/0.08)] outline-none transition-[border-color,box-shadow,background-color] duration-200 placeholder:text-muted/80 hover:border-muted/60 focus:border-accent/80 focus:bg-panel focus:ring-2 focus:ring-accent/15 ${className}`}
+        className={`min-h-20 w-full resize-y rounded-control border border-line/80 bg-canvas/70 px-3.5 py-3 text-[13px] leading-5 text-ink shadow-[inset_0_1px_2px_rgb(0_0_0/0.08)] outline-none transition-[border-color,box-shadow,background-color] duration-200 placeholder:text-muted/80 hover:border-muted/60 focus:border-accent/80 focus:bg-panel focus:ring-2 focus:ring-accent/15 ${className}`}
       {...props}
     />
   );
@@ -56,7 +56,7 @@ export function Select({
 }: React.SelectHTMLAttributes<HTMLSelectElement>) {
   return (
     <select
-      className={`h-11 w-full rounded-[8px] border border-line/80 bg-canvas/70 px-3 text-[13px] text-ink shadow-[inset_0_1px_2px_rgb(0_0_0/0.08)] outline-none transition-[border-color,box-shadow,background-color] duration-200 hover:border-muted/50 focus:border-accent/80 focus:bg-panel focus:ring-2 focus:ring-accent/15 ${className}`}
+      className={`h-11 w-full rounded-control border border-line/80 bg-canvas/70 px-3 text-[13px] text-ink shadow-[inset_0_1px_2px_rgb(0_0_0/0.08)] outline-none transition-[border-color,box-shadow,background-color] duration-200 hover:border-muted/50 focus:border-accent/80 focus:bg-panel focus:ring-2 focus:ring-accent/15 ${className}`}
       {...props}
     >
       {children}
@@ -78,7 +78,7 @@ export function Progress({ value, tone = "blue" }: { value: number; tone?: "blue
 
 export function EmptyState({ icon, title, description }: { icon: ReactNode; title: string; description: string }) {
   return (
-    <div className="relative grid min-h-64 overflow-hidden rounded-[12px] border border-line/60 bg-panel/55 p-8 shadow-[inset_0_1px_0_rgb(255_255_255/0.025)]">
+    <div className="relative grid min-h-64 overflow-hidden rounded-panel border border-line/50 bg-panel/55 p-8 shadow-[inset_0_1px_0_rgb(255_255_255/0.025)]">
       <div className="absolute -right-12 -top-16 size-48 rounded-full bg-accent/5 blur-3xl" />
       <div className="relative flex max-w-xl items-start gap-5">
         <div className="grid size-12 shrink-0 place-items-center rounded-[10px] border border-line/70 bg-elevated/75 text-accent shadow-control">{icon}</div>

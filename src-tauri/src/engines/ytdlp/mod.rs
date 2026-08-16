@@ -2,7 +2,13 @@ mod metadata;
 mod url_resolver;
 
 use crate::{
-    engines::DownloadEngine,
+    engines::{
+        manifest::{
+            classify_manifest_url, map_manifest_analysis_error, normalize_manifest_analysis,
+            validate_manifest_metadata,
+        },
+        DownloadEngine,
+    },
     errors::AppError,
     models::{
         DownloadOptions, EnginePreferences, FormatStrategy, MediaAnalysis, OutputConflictPolicy,
@@ -64,14 +70,25 @@ impl YtDlpEngine {
         url: &str,
         preferences: &EnginePreferences,
     ) -> Result<MediaAnalysis, AppError> {
+        let requested_manifest = classify_manifest_url(url);
         let validated = url_resolver::resolve_for_analysis(validate_media_url(url)?).await?;
+        let manifest_kind =
+            requested_manifest.or_else(|| classify_manifest_url(validated.as_str()));
         let capabilities = self.runtime_capabilities().await;
         let initial_result = self
             .run_structured_analysis(validated.as_str(), preferences, &capabilities)
             .await;
 
         match initial_result {
-            Ok(value) => parse_metadata(value, validated.as_str()),
+            Ok(value) => {
+                if let Some(kind) = manifest_kind {
+                    validate_manifest_metadata(&value, kind)?;
+                    let analysis = parse_metadata(value, validated.as_str())?;
+                    normalize_manifest_analysis(analysis, validated.as_str(), kind)
+                } else {
+                    parse_metadata(value, validated.as_str())
+                }
+            }
             Err(initial_error) if is_reddit_api_ip_error(initial_error.details.as_deref()) => {
                 self.analyze_reddit_embed_fallback(
                     &validated,
@@ -81,7 +98,10 @@ impl YtDlpEngine {
                 )
                 .await
             }
-            Err(error) => Err(error),
+            Err(error) => Err(match manifest_kind {
+                Some(kind) => map_manifest_analysis_error(kind, error),
+                None => error,
+            }),
         }
     }
 
@@ -549,7 +569,18 @@ fn redact_sensitive_line(line: &str) -> String {
 
 fn redact_sensitive_query_values(line: &str) -> String {
     let mut output = line.to_owned();
-    for key in ["token=", "signature=", "authorization=", "auth=", "sig="] {
+    for key in [
+        "token=",
+        "signature=",
+        "authorization=",
+        "auth=",
+        "sig=",
+        "policy=",
+        "key-pair-id=",
+        "x-amz-signature=",
+        "x-amz-credential=",
+        "x-amz-security-token=",
+    ] {
         let mut search_from = 0;
         loop {
             let lowercase = output.to_ascii_lowercase();

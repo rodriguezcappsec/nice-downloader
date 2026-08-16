@@ -121,9 +121,9 @@ yt-dlp version. Site behavior can change without an application update.
 
 Nice Downloader also provides:
 
-- Bunkr album inspection, individual-file selection, durable per-file progress, failed-file retry, and direct `/f`, `/v`, `/i`, and `/d` media-page downloads through gallery-dl
+- Bunkr album inspection and direct media pages, plus Imgur albums/galleries, Flickr albums/galleries, and Pinterest boards through gallery-dl, with individual-file selection, durable per-file progress, and failed-file retry
 - Resumable direct HTTP downloads through aria2c, with curl as a fallback
-- HLS/DASH handling when exposed through a supported extraction engine
+- Explicit and signed HLS/DASH manifests through yt-dlp, with clear VOD/live, DRM, encryption-key, and parse diagnostics
 - Reddit share-link canonicalization and a limited public-embed fallback when
   Reddit blocks its API for the current IP address
 

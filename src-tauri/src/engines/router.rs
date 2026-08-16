@@ -1,7 +1,8 @@
 use crate::{
     engines::{
         aria2::{analyze_direct, is_direct_download_url, prepare_direct},
-        gallery_dl::{is_bunkr_url, GalleryDlEngine},
+        gallery_dl::{is_supported_gallery_url, GalleryDlEngine},
+        manifest::classify_manifest_url,
         ytdlp::YtDlpEngine,
         DownloadEngine,
     },
@@ -35,8 +36,10 @@ pub async fn analyze(
     url: &str,
     preferences: &EnginePreferences,
 ) -> Result<MediaAnalysis, AppError> {
-    if is_bunkr_url(url) {
+    if is_supported_gallery_url(url) {
         GalleryDlEngine::discover()?.analyze(url, preferences).await
+    } else if classify_manifest_url(url).is_some() {
+        YtDlpEngine::discover()?.analyze(url, preferences).await
     } else if is_direct_download_url(url) {
         analyze_direct(url).await
     } else {
@@ -48,9 +51,9 @@ pub async fn prepare_download(
     request: &StartDownloadRequest,
     preferences: &EnginePreferences,
 ) -> Result<PreparedDownload, AppError> {
-    let bunkr_url = is_bunkr_url(&request.url);
+    let gallery_url = is_supported_gallery_url(&request.url);
     match request.analysis.engine {
-        DownloadEngineKind::GalleryDl if bunkr_url => {
+        DownloadEngineKind::GalleryDl if gallery_url => {
             let engine = GalleryDlEngine::discover()?;
             let prepared = engine.build_download(request, preferences)?;
             Ok(PreparedDownload {
@@ -70,11 +73,11 @@ pub async fn prepare_download(
         }
         DownloadEngineKind::GalleryDl => Err(AppError::new(
             "engine_route_mismatch",
-            "The selected gallery engine does not support this URL.",
+            "The gallery engine only accepts a supported Bunkr, Imgur, Flickr, or Pinterest URL.",
         )),
-        DownloadEngineKind::YtDlp if bunkr_url => Err(AppError::new(
+        DownloadEngineKind::YtDlp if gallery_url => Err(AppError::new(
             "engine_route_mismatch",
-            "Analyze this Bunkr album again so it can be downloaded with gallery-dl.",
+            "Analyze this gallery again so it can be downloaded with gallery-dl.",
         )),
         DownloadEngineKind::YtDlp => {
             if request.options.gallery_selection.is_some() {
@@ -127,11 +130,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn selects_gallery_only_for_supported_bunkr_shapes() {
-        assert!(is_bunkr_url("https://bunkr.cr/a/ul3n82nu"));
-        assert!(is_bunkr_url("https://bunkr.cr/f/eiK5ATuIv7DIY"));
-        assert!(is_bunkr_url("https://bunkr.cr/v/video_1"));
-        assert!(!is_bunkr_url("https://notbunkr.cr/a/ul3n82nu"));
-        assert!(!is_bunkr_url("https://bunkr.cr/u/unsupported"));
+    fn selects_gallery_only_for_supported_shapes() {
+        assert!(is_supported_gallery_url("https://bunkr.cr/a/ul3n82nu"));
+        assert!(is_supported_gallery_url("https://bunkr.cr/f/eiK5ATuIv7DIY"));
+        assert!(is_supported_gallery_url("https://bunkr.cr/v/video_1"));
+        assert!(is_supported_gallery_url("https://imgur.com/a/album123"));
+        assert!(is_supported_gallery_url(
+            "https://www.flickr.com/photos/example/albums/721777"
+        ));
+        assert!(is_supported_gallery_url(
+            "https://www.pinterest.com/example/board-name/"
+        ));
+        assert!(!is_supported_gallery_url("https://notbunkr.cr/a/ul3n82nu"));
+        assert!(!is_supported_gallery_url("https://bunkr.cr/u/unsupported"));
+        assert!(!is_supported_gallery_url(
+            "https://www.pinterest.com/pin/12345/"
+        ));
+    }
+
+    #[test]
+    fn recognizes_manifests_before_direct_file_routing() {
+        assert!(classify_manifest_url("https://cdn.example/master.m3u8?token=signed").is_some());
+        assert!(
+            classify_manifest_url("https://cdn.example/manifest?format=mpd&signature=signed")
+                .is_some()
+        );
     }
 }
