@@ -50,6 +50,20 @@ Status: implemented on `feat/library-creative-workspaces`.
 
 27: optional local VLM theme discovery with deep frame sampling, evidence, cross-creator Library theme filtering, and bounded all/folder/item targeting — implemented.
 
+28: locked private library — implemented. The existing private-source marker is now a Rust-enforced privacy boundary for selected sources, folders, and items. Locked records are filtered from catalog queries, facets, playback activity, transcripts, themes, similarity, health, backups, and LAN/media resolution. Passphrase setup, explicit unlock/lock, bounded activity pings, idle expiry, minimize/tray locking, restart locking, and clear app-level-hiding disclosure are included; originals remain untouched and unencrypted.
+
+29: privacy-safe video export — implemented. Typed cancellable FFmpeg metadata stripping, timed normalized blur regions, timed audio muting, a redaction-layout review, imagery-free audit reports, and optional local Ollama VLM suggestions for faces, license plates, and screens are included. Sampled frames stay on the machine, are not retained, and every detector suggestion requires explicit review before it becomes a blur region.
+
+30: local transcription and semantic transcript search — implemented. Selected catalog videos can be transcribed by a system whisper.cpp executable with a user-chosen local model; Rust owns temporary audio, cancellation, progress, and durable generated cues. Optional Ollama embeddings are fingerprint-aware, bounded, loopback-only, private-library filtered, and exposed separately from exact lexical WebVTT search.
+
+31: near-duplicate detection — implemented. Review-only video pairs combine current perceptual fingerprints, configurable duration tolerance, resolution/codec/container/size differences, and exact-hash evidence. Matching SHA-256 copies are excluded and approximate candidates remain isolated from permanent exact-duplicate cleanup.
+
+32: storage planner — implemented. The Media Health workspace now computes read-only catalog usage by source, largest folder, and container; available source-volume space; exact-duplicate reclaimable bytes; playback/artwork cache use; queued known and unknown download sizes; and active transformation warnings. It never deletes or moves media.
+
+33: automatic chapters and highlights — implemented. The player Creative Tools can generate bounded local suggestions from transcript pauses/wording and FFmpeg scene changes. Every suggestion includes evidence and confidence, stays temporary, and becomes a durable moment or range only after the user clicks Add; existing moments and source files are never overwritten.
+
+34: typed post-download recipes — implemented. A dedicated automation workspace persists ordered, validated steps for Library import confirmation, tags, collections, H.264/AAC copies, audio extraction, metadata-free privacy copies, whisper.cpp transcription, and Ollama semantic indexing. Downloads opt into up to eight enabled recipes; Rust claims each recipe/download pair idempotently, runs steps sequentially without shell strings, and records live run history.
+
 ## Maturity roadmap delivered
 
 - First-run engine/privacy onboarding and Linux AppImage/DEB plus Windows NSIS release workflows.
@@ -133,12 +147,8 @@ Delivered foundations include Recommended/Compatibility/Quality/Smallest selecti
 Delivered foundation:
 
 - Analyzer/router policy and strict URL classification.
-- gallery-dl analysis, lazy paced album browsing, per-file selection and durable status, failed-file-only retry, resumable original-file download, cancellation, progress, and history for Bunkr albums plus `/f`, `/v`, `/i`, and `/d` single-media pages.
-
-Still planned:
-
-- Extend gallery-dl routing to additional tested image/gallery sites.
-- HLS/DASH diagnostics and engine routing improvements.
+- gallery-dl analysis, lazy paced gallery browsing, per-file selection and durable status, failed-file-only retry, resumable original-file download, cancellation, progress, and history for Bunkr albums plus `/f`, `/v`, `/i`, and `/d` single-media pages, Imgur albums/galleries, Flickr albums/galleries, and Pinterest boards.
+- Strict HLS/DASH manifest routing through yt-dlp, including signed manifest URL preservation and distinct diagnostics for DRM, unsupported HLS key/encryption access, live streams, and malformed or unavailable manifests.
 
 Delivered:
 

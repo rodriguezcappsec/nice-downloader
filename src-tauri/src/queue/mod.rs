@@ -261,7 +261,7 @@ impl QueueManager {
             if previous.state != DownloadState::Failed {
                 return Err(AppError::new(
                     "job_not_retryable",
-                    "Failed gallery files can be retried only after the album job fails.",
+                    "Failed gallery files can be retried only after the collection job fails.",
                 ));
             }
             let mut request = self
@@ -276,17 +276,19 @@ impl QueueManager {
                         "The original gallery download options are no longer available.",
                     )
                 })?;
-            if request.analysis.extractor != "gallery-dl:bunkr" {
+            if !request.analysis.extractor.starts_with("gallery-dl:")
+                || request.analysis.extractor.ends_with(":media")
+            {
                 return Err(AppError::new(
                     "gallery_retry_unavailable",
-                    "Per-file retry is available only for Bunkr album downloads.",
+                    "Per-file retry is available only for gallery collection downloads.",
                 ));
             }
             let failed_files = failed_gallery_selection(&previous.gallery_files);
             if failed_files.is_empty() {
                 return Err(AppError::new(
                     "no_failed_gallery_files",
-                    "This album job has no individually identified failed files to retry.",
+                    "This gallery job has no individually identified failed files to retry.",
                 ));
             }
             request.analysis.total_size_bytes = failed_files
@@ -323,6 +325,8 @@ impl QueueManager {
         let destination = validate_destination(&request.options.destination)?;
         request.options.destination = destination.to_string_lossy().into_owned();
         validate_destination_writable(&destination)?;
+        self.database
+            .enabled_post_download_recipes_by_ids(&request.post_download_recipe_ids)?;
         let prepared = router::prepare_download(&request, &preferences).await?;
 
         preflight_disk_space(&destination, request_estimated_bytes(&request))?;
@@ -1044,6 +1048,9 @@ impl QueueManager {
             }
             self.cancellations.lock().await.remove(&id);
             tracing::info!(job_id = %id, "download completed");
+            if let Some(completed) = self.jobs.read().await.get(&id).cloned() {
+                crate::post_download_recipes::schedule(app.clone(), completed);
+            }
         } else {
             let error = download_failure_message(prepared.kind, prepared.engine_name, &diagnostics);
             let retry = transient_retry(&diagnostics);
@@ -1133,7 +1140,7 @@ impl QueueManager {
                 }
                 job.state = DownloadState::Downloading;
                 job.current_operation =
-                    "Bunkr rate limited the transfer; waiting before retry".to_owned();
+                    "The gallery host rate limited the transfer; waiting before retry".to_owned();
                 job.speed_bytes_per_second = None;
                 job.eta_seconds = None;
             })
@@ -1943,9 +1950,9 @@ fn download_failure_message(
             .find(|line| is_rate_limit_line(line) || is_incomplete_read_line(line))
         {
             if is_incomplete_read_line(transient) {
-                return "Bunkr repeatedly interrupted the transfer. The partial file was preserved; retry this job to resume it.".to_owned();
+                return "The gallery host repeatedly interrupted the transfer. The partial file was preserved; retry this job to resume it.".to_owned();
             }
-            return "Bunkr rate-limited the media transfer after several retries. Wait a few minutes and retry, or configure a different network proxy in Settings.".to_owned();
+            return "The gallery host rate-limited the media transfer after several retries. Wait a few minutes and retry, or configure a different network proxy in Settings.".to_owned();
         }
     }
     let detail = diagnostics
@@ -2215,6 +2222,7 @@ mod tests {
                 gallery_selection: None,
             },
             scheduled_for: None,
+            post_download_recipe_ids: Vec::new(),
         }
     }
 
@@ -2351,7 +2359,7 @@ mod tests {
         ]);
         assert_eq!(
             download_failure_message(PreparedEngineKind::GalleryDl, "gallery-dl", &diagnostics),
-            "Bunkr rate-limited the media transfer after several retries. Wait a few minutes and retry, or configure a different network proxy in Settings."
+            "The gallery host rate-limited the media transfer after several retries. Wait a few minutes and retry, or configure a different network proxy in Settings."
         );
         assert!(is_rate_limit_line(&diagnostics[0]));
     }
@@ -2364,7 +2372,7 @@ mod tests {
         ]);
         assert_eq!(
             download_failure_message(PreparedEngineKind::GalleryDl, "gallery-dl", &diagnostics),
-            "Bunkr repeatedly interrupted the transfer. The partial file was preserved; retry this job to resume it."
+            "The gallery host repeatedly interrupted the transfer. The partial file was preserved; retry this job to resume it."
         );
         assert!(is_incomplete_read_line(&diagnostics[0]));
     }
@@ -2496,6 +2504,7 @@ mod tests {
                 gallery_selection: None,
             },
             scheduled_for: None,
+            post_download_recipe_ids: Vec::new(),
         };
         let mut job = DownloadJob::from_request("recover-me".to_owned(), &request);
         job.state = DownloadState::Downloading;

@@ -24,6 +24,63 @@ enum BunkrUrlKind {
     Media { id: String },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GallerySite {
+    Bunkr,
+    Imgur,
+    Flickr,
+    Pinterest,
+}
+
+impl GallerySite {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Bunkr => "Bunkr",
+            Self::Imgur => "Imgur",
+            Self::Flickr => "Flickr",
+            Self::Pinterest => "Pinterest",
+        }
+    }
+
+    fn slug(self) -> &'static str {
+        match self {
+            Self::Bunkr => "bunkr",
+            Self::Imgur => "imgur",
+            Self::Flickr => "flickr",
+            Self::Pinterest => "pinterest",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum GalleryUrlKind {
+    Bunkr(BunkrUrlKind),
+    Collection { site: GallerySite, id: String },
+}
+
+impl GalleryUrlKind {
+    fn site(&self) -> GallerySite {
+        match self {
+            Self::Bunkr(_) => GallerySite::Bunkr,
+            Self::Collection { site, .. } => *site,
+        }
+    }
+
+    fn is_collection(&self) -> bool {
+        match self {
+            Self::Bunkr(kind) => kind.is_album(),
+            Self::Collection { .. } => true,
+        }
+    }
+
+    fn id(&self) -> &str {
+        match self {
+            Self::Bunkr(kind) => kind.id(),
+            Self::Collection { id, .. } => id,
+        }
+    }
+}
+
 impl BunkrUrlKind {
     fn is_album(&self) -> bool {
         matches!(self, Self::Album { .. })
@@ -67,7 +124,7 @@ impl GalleryDlEngine {
         url: &str,
         preferences: &EnginePreferences,
     ) -> Result<MediaAnalysis, AppError> {
-        let (validated, kind) = validate_bunkr_url(url)?;
+        let (validated, kind) = validate_gallery_url(url)?;
         let mut command = Command::new(&self.executable);
         crate::utils::process::sanitize_tokio_command(&mut command);
         command.kill_on_drop(true).args([
@@ -84,7 +141,7 @@ impl GalleryDlEngine {
         tracing::info!(
             engine = "gallery-dl",
             operation = "analyze",
-            site = "bunkr",
+            site = kind.site().slug(),
             "starting engine operation"
         );
         let output = timeout(Duration::from_secs(60), command.output())
@@ -108,14 +165,21 @@ impl GalleryDlEngine {
         if output.stdout.len() > MAX_ANALYSIS_BYTES {
             return Err(AppError::new(
                 "analysis_too_large",
-                "gallery-dl returned more Bunkr metadata than the application can safely process.",
+                "gallery-dl returned more metadata than the application can safely process.",
             ));
         }
         let value: Value = serde_json::from_slice(&output.stdout)
             .map_err(|error| AppError::internal("gallery-dl returned invalid JSON", error))?;
-        match kind {
-            BunkrUrlKind::Album { .. } => parse_album_metadata(value, validated.as_str()),
-            BunkrUrlKind::Media { .. } => parse_media_metadata(value, validated.as_str()),
+        match &kind {
+            GalleryUrlKind::Bunkr(BunkrUrlKind::Album { .. }) => {
+                parse_album_metadata(value, validated.as_str())
+            }
+            GalleryUrlKind::Bunkr(BunkrUrlKind::Media { .. }) => {
+                parse_media_metadata(value, validated.as_str())
+            }
+            GalleryUrlKind::Collection { site, .. } => {
+                parse_collection_metadata(value, validated.as_str(), *site)
+            }
         }
     }
 
@@ -126,7 +190,7 @@ impl GalleryDlEngine {
         offset: u32,
         limit: u32,
     ) -> Result<GalleryItemList, AppError> {
-        let validated = validate_bunkr_album_url(url)?;
+        let (validated, kind) = validate_gallery_collection_url(url)?;
         if offset >= MAX_SELECTABLE_ITEMS || !(1..=MAX_GALLERY_PAGE_SIZE).contains(&limit) {
             return Err(AppError::new(
                 "invalid_gallery_page",
@@ -158,7 +222,7 @@ impl GalleryDlEngine {
         tracing::info!(
             engine = "gallery-dl",
             operation = "list_items",
-            site = "bunkr",
+            site = kind.site().slug(),
             "starting engine operation"
         );
         let output = timeout(Duration::from_secs(120), command.output())
@@ -166,7 +230,7 @@ impl GalleryDlEngine {
             .map_err(|_| {
                 AppError::new(
                     "gallery_items_timeout",
-                    "Loading Bunkr album contents timed out after 120 seconds.",
+                    "Loading gallery contents timed out after 120 seconds.",
                 )
             })?
             .map_err(|error| AppError::internal("could not start gallery-dl", error))?;
@@ -192,14 +256,14 @@ impl GalleryDlEngine {
         request: &StartDownloadRequest,
         preferences: &EnginePreferences,
     ) -> Result<GalleryDownload, AppError> {
-        let (validated, kind) = validate_bunkr_url(&request.url)?;
-        if !kind.is_album() && request.options.gallery_selection.is_some() {
+        let (validated, kind) = validate_gallery_url(&request.url)?;
+        if !kind.is_collection() && request.options.gallery_selection.is_some() {
             return Err(AppError::new(
                 "invalid_gallery_selection",
-                "Individual Bunkr media links do not accept an album file selection.",
+                "Individual media links do not accept a gallery file selection.",
             ));
         }
-        let output_directory = if kind.is_album() {
+        let output_directory = if kind.is_collection() {
             safe_album_directory(&request.analysis.title, kind.id())
         } else {
             ".".to_owned()
@@ -238,7 +302,7 @@ impl GalleryDlEngine {
             "--option".to_owned(),
             "downloader.http.retry-codes=[429]".to_owned(),
         ];
-        if kind.is_album() {
+        if kind.is_collection() {
             if let Some(selection) = &request.options.gallery_selection {
                 let range = build_range(
                     selection.iter().map(|item| item.index),
@@ -394,8 +458,143 @@ fn is_video_extension(value: &str) -> bool {
     )
 }
 
-pub fn is_bunkr_url(value: &str) -> bool {
+#[cfg(test)]
+fn is_bunkr_url(value: &str) -> bool {
     validate_bunkr_url(value).is_ok()
+}
+
+pub fn is_supported_gallery_url(value: &str) -> bool {
+    validate_gallery_url(value).is_ok()
+}
+
+fn validate_gallery_url(value: &str) -> Result<(Url, GalleryUrlKind), AppError> {
+    let url = validate_media_url(value)?;
+    let host = normalized_host(&url);
+    if host == "bunkr.cr" || host.ends_with(".bunkr.cr") {
+        let (url, kind) = validate_bunkr_url(value)?;
+        return Ok((url, GalleryUrlKind::Bunkr(kind)));
+    }
+
+    let segments = url
+        .path_segments()
+        .into_iter()
+        .flatten()
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    let collection = if matches!(host.as_str(), "imgur.com" | "www.imgur.com")
+        && segments.len() == 2
+        && matches!(segments[0], "a" | "gallery")
+        && is_safe_gallery_segment(segments[1], 120)
+    {
+        Some((GallerySite::Imgur, segments[1].to_owned()))
+    } else if matches!(host.as_str(), "flickr.com" | "www.flickr.com")
+        && segments.len() == 4
+        && segments[0] == "photos"
+        && matches!(segments[2], "albums" | "galleries")
+        && is_safe_gallery_segment(segments[1], 120)
+        && is_safe_gallery_segment(segments[3], 120)
+    {
+        Some((
+            GallerySite::Flickr,
+            format!("{}-{}", segments[1], segments[3]),
+        ))
+    } else if is_pinterest_host(&host)
+        && segments.len() == 2
+        && !matches!(
+            segments[0].to_ascii_lowercase().as_str(),
+            "pin" | "search" | "ideas" | "today" | "business"
+        )
+        && is_safe_gallery_segment(segments[0], 120)
+        && is_safe_gallery_segment(segments[1], 120)
+    {
+        Some((
+            GallerySite::Pinterest,
+            format!("{}-{}", segments[0], segments[1]),
+        ))
+    } else {
+        None
+    };
+
+    let Some((site, id)) = collection else {
+        return Err(unsupported_gallery_url());
+    };
+    Ok((url, GalleryUrlKind::Collection { site, id }))
+}
+
+fn validate_gallery_collection_url(value: &str) -> Result<(Url, GalleryUrlKind), AppError> {
+    let (url, kind) = validate_gallery_url(value)?;
+    if !kind.is_collection() {
+        return Err(AppError::new(
+            "unsupported_gallery_url",
+            "This link identifies one media file, not a browsable gallery.",
+        ));
+    }
+    Ok((url, kind))
+}
+
+fn normalized_host(url: &Url) -> String {
+    url.host_str()
+        .unwrap_or_default()
+        .trim_end_matches('.')
+        .to_ascii_lowercase()
+}
+
+fn is_pinterest_host(host: &str) -> bool {
+    matches!(
+        host,
+        "pinterest.com"
+            | "www.pinterest.com"
+            | "www.pinterest.ca"
+            | "www.pinterest.co.uk"
+            | "www.pinterest.com.au"
+            | "www.pinterest.de"
+            | "www.pinterest.fr"
+            | "www.pinterest.es"
+            | "www.pinterest.it"
+            | "www.pinterest.jp"
+            | "www.pinterest.com.mx"
+            | "www.pinterest.pt"
+            | "www.pinterest.se"
+            | "www.pinterest.dk"
+            | "www.pinterest.nz"
+            | "www.pinterest.ie"
+            | "www.pinterest.ch"
+            | "www.pinterest.at"
+            | "www.pinterest.nl"
+            | "www.pinterest.be"
+    )
+}
+
+fn is_safe_gallery_segment(value: &str, max_length: usize) -> bool {
+    if value.is_empty() || value.len() > max_length {
+        return false;
+    }
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            if index + 2 >= bytes.len()
+                || !bytes[index + 1].is_ascii_hexdigit()
+                || !bytes[index + 2].is_ascii_hexdigit()
+            {
+                return false;
+            }
+            index += 3;
+            continue;
+        }
+        if !(bytes[index].is_ascii_alphanumeric() || matches!(bytes[index], b'-' | b'_' | b'.')) {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+fn unsupported_gallery_url() -> AppError {
+    AppError::new(
+        "unsupported_gallery_url",
+        "Supported gallery links include Bunkr albums/media, Imgur albums, Flickr albums/galleries, and Pinterest boards.",
+    )
 }
 
 fn validate_bunkr_url(value: &str) -> Result<(Url, BunkrUrlKind), AppError> {
@@ -460,6 +659,7 @@ fn unsupported_bunkr_url() -> AppError {
     )
 }
 
+#[cfg(test)]
 fn validate_bunkr_album_url(value: &str) -> Result<Url, AppError> {
     let (url, kind) = validate_bunkr_url(value)?;
     if !kind.is_album() {
@@ -533,6 +733,112 @@ fn parse_album_metadata(value: Value, requested_url: &str) -> Result<MediaAnalys
             id: "original".to_owned(),
             label: "Original files".to_owned(),
             description: "Preserve every file in the album".to_owned(),
+            kind: QualityKind::Best,
+            max_height: None,
+        }],
+        item_count,
+        total_size_bytes,
+    })
+}
+
+fn parse_collection_metadata(
+    value: Value,
+    requested_url: &str,
+    site: GallerySite,
+) -> Result<MediaAnalysis, AppError> {
+    let events = value.as_array().ok_or_else(|| {
+        AppError::new(
+            "invalid_metadata",
+            "gallery-dl did not return structured gallery metadata.",
+        )
+    })?;
+    let metadata_objects = events
+        .iter()
+        .filter_map(Value::as_array)
+        .filter_map(|parts| match parts.first().and_then(Value::as_u64) {
+            Some(2) => parts.get(1).and_then(Value::as_object),
+            Some(3) => parts.get(2).and_then(Value::as_object),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if metadata_objects.is_empty() {
+        return Err(AppError::new(
+            "invalid_metadata",
+            format!("gallery-dl did not identify a {} gallery.", site.label()),
+        ));
+    }
+
+    let title = metadata_objects
+        .iter()
+        .find_map(|metadata| {
+            [
+                "album_name",
+                "album",
+                "gallery_name",
+                "gallery",
+                "set_title",
+                "board",
+                "collection",
+                "title",
+                "category",
+            ]
+            .iter()
+            .find_map(|key| metadata.get(*key).and_then(Value::as_str))
+        })
+        .map(clean_title)
+        .filter(|title| !title.is_empty())
+        .unwrap_or_else(|| format!("{} gallery", site.label()));
+    let uploader = metadata_objects.iter().find_map(|metadata| {
+        ["username", "user", "owner", "author", "account"]
+            .iter()
+            .find_map(|key| metadata.get(*key).and_then(Value::as_str))
+            .map(clean_title)
+            .filter(|value| !value.is_empty())
+    });
+    let item_count = metadata_objects.iter().find_map(|metadata| {
+        ["count", "total", "num", "image_count", "pin_count"]
+            .iter()
+            .find_map(|key| metadata.get(*key).and_then(Value::as_u64))
+            .and_then(|count| u32::try_from(count).ok())
+    });
+    let total_size_bytes = metadata_objects.iter().find_map(|metadata| {
+        ["total_size", "total_size_bytes"]
+            .iter()
+            .find_map(|key| metadata.get(*key).and_then(Value::as_u64))
+            .or_else(|| {
+                metadata
+                    .get("album_size")
+                    .and_then(Value::as_str)
+                    .and_then(parse_human_bytes)
+            })
+    });
+    let thumbnail = metadata_objects
+        .iter()
+        .find_map(|metadata| {
+            ["thumbnail", "thumb", "preview"]
+                .iter()
+                .find_map(|key| metadata.get(*key).and_then(Value::as_str))
+        })
+        .filter(|url| validate_media_url(url).is_ok())
+        .map(str::to_owned);
+
+    Ok(MediaAnalysis {
+        engine: DownloadEngineKind::GalleryDl,
+        title,
+        uploader,
+        duration_seconds: None,
+        thumbnail,
+        webpage_url: requested_url.to_owned(),
+        download_url: requested_url.to_owned(),
+        extractor: format!("gallery-dl:{}", site.slug()),
+        site_name: site.label().to_owned(),
+        playlist_title: None,
+        playlist_index: None,
+        formats: Vec::new(),
+        quality_options: vec![QualityOption {
+            id: "original".to_owned(),
+            label: "Original files".to_owned(),
+            description: "Preserve the original gallery files".to_owned(),
             kind: QualityKind::Best,
             max_height: None,
         }],
@@ -662,7 +968,7 @@ fn safe_album_directory(title: &str, album_id: &str) -> String {
         .collect::<String>();
     clean = clean.trim().trim_matches('.').to_owned();
     if clean.is_empty() {
-        clean = "Bunkr album".to_owned();
+        clean = "Gallery".to_owned();
     }
     format!("{clean} [{album_id}]")
 }
@@ -750,6 +1056,7 @@ mod tests {
                 gallery_selection,
             },
             scheduled_for: None,
+            post_download_recipe_ids: Vec::new(),
         }
     }
 
@@ -770,6 +1077,47 @@ mod tests {
             "https://bunkr.cr/f/{}",
             "x".repeat(241)
         )));
+        assert!(validate_bunkr_album_url("https://bunkr.cr/a/ul3n82nu").is_ok());
+        assert!(validate_bunkr_album_url("https://bunkr.cr/f/eiK5ATuIv7DIY").is_err());
+    }
+
+    #[test]
+    fn routes_only_explicit_tested_gallery_collection_shapes() {
+        assert!(is_supported_gallery_url("https://imgur.com/a/album123"));
+        assert!(is_supported_gallery_url(
+            "https://imgur.com/gallery/album_123/"
+        ));
+        assert!(is_supported_gallery_url(
+            "https://www.flickr.com/photos/example/albums/721777"
+        ));
+        assert!(is_supported_gallery_url(
+            "https://www.flickr.com/photos/example/galleries/721778/"
+        ));
+        assert!(is_supported_gallery_url(
+            "https://www.pinterest.com/example/board-name/"
+        ));
+        assert!(!is_supported_gallery_url("https://imgur.com/example"));
+        assert!(!is_supported_gallery_url(
+            "https://www.flickr.com/photos/example/721777"
+        ));
+        assert!(!is_supported_gallery_url(
+            "https://www.pinterest.com/pin/12345/"
+        ));
+    }
+
+    #[test]
+    fn normalizes_generic_gallery_json_without_exposing_media_urls() {
+        let fixture: Value =
+            serde_json::from_str(include_str!("fixtures/imgur_gallery.json")).unwrap();
+        let analysis =
+            parse_collection_metadata(fixture, "https://imgur.com/a/album123", GallerySite::Imgur)
+                .unwrap();
+        assert_eq!(analysis.site_name, "Imgur");
+        assert_eq!(analysis.extractor, "gallery-dl:imgur");
+        assert_eq!(analysis.title, "Night sky");
+        assert_eq!(analysis.uploader.as_deref(), Some("example"));
+        assert_eq!(analysis.item_count, Some(2));
+        assert!(!serde_json::to_string(&analysis).unwrap().contains("secret"));
     }
 
     #[test]
@@ -883,6 +1231,7 @@ mod tests {
                 gallery_selection: None,
             },
             scheduled_for: None,
+            post_download_recipe_ids: Vec::new(),
         };
         let prepared = engine
             .build_download(&request, &EnginePreferences::default())
@@ -1065,6 +1414,7 @@ mod tests {
             },
             analysis,
             scheduled_for: None,
+            post_download_recipe_ids: Vec::new(),
         };
         let mut prepared = engine
             .build_download(&request, &EnginePreferences::default())

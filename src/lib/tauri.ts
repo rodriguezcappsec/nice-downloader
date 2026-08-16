@@ -1,3 +1,4 @@
+import type { ConfigureLibraryPrivacyRequest, LibraryPrivacyRules, LibraryPrivacyStatus, PrivacyDetectionRequest, PrivacyRedactionSuggestion, SetLibraryFolderPrivacyRequest, SetLibraryItemPrivacyRequest } from "../types";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
@@ -7,6 +8,7 @@ import type {
   LibraryMediaStack,
   ExportLibraryMomentsRequest,
   LibraryMoment,
+  LibraryChapterSuggestion,
   LibraryMontage,
   LibraryPlaylist,
   LibraryStoryboard,
@@ -34,6 +36,9 @@ import type {
   QueueSnapshot,
   Preset,
   SavePresetRequest,
+  PostDownloadRecipe,
+  PostDownloadRecipeRun,
+  SavePostDownloadRecipeRequest,
   SaveSitePresetRuleRequest,
   SitePresetRule,
   DownloadArchiveMatch,
@@ -51,6 +56,8 @@ import type {
   LibraryThemeProviderStatus,
   LibraryThemeSettings,
   StartLibraryThemeAnalysisRequest,
+  StartLibrarySemanticIndexRequest,
+  StartLibraryTranscriptionRequest,
   LibrarySearchStatus,
   LibrarySmartView,
   LibraryFacetRequest,
@@ -66,9 +73,14 @@ import type {
   LibraryPlaybackState,
   LibraryTranscriptIndexStatus,
   LibraryTranscriptMatch,
+  LibraryLocalInferenceJob,
+  LibrarySemanticIndexStatus,
+  LibrarySemanticTranscriptMatch,
+  LibraryTranscriptionProviderStatus,
   LibraryVisualSimilarityJob,
   LibraryVisualSimilarityMatch,
   LibraryVisualSimilarityStatus,
+  LibraryNearDuplicateMatch,
   LocalShareSession,
   NativePlaybackSession,
   NativePlaybackStatus,
@@ -79,6 +91,7 @@ import type {
   LibraryBulkMovePlan,
   LibraryBulkMoveResult,
   LibraryArtworkCacheStatus,
+  LibraryStoragePlan,
   LibraryChange,
   LibraryDuplicateAnalysisJob,
   LibraryDuplicateGroup,
@@ -150,6 +163,12 @@ export const api = {
   listJobs: () => invoke<DownloadJob[]>("list_jobs"),
   listHistory: () => invoke<HistoryEntry[]>("list_history"),
   deleteHistoryEntry: (id: string) => invoke<void>("delete_history_entry", { id }),
+  listPostDownloadRecipes: () => invoke<PostDownloadRecipe[]>("list_post_download_recipes"),
+  savePostDownloadRecipe: (request: SavePostDownloadRecipeRequest) =>
+    invoke<PostDownloadRecipe>("save_post_download_recipe", { request }),
+  deletePostDownloadRecipe: (id: string) => invoke<void>("delete_post_download_recipe", { id }),
+  listPostDownloadRecipeRuns: (limit = 50) =>
+    invoke<PostDownloadRecipeRun[]>("list_post_download_recipe_runs", { limit }),
   listPresets: () => invoke<Preset[]>("list_presets"),
   savePreset: (request: SavePresetRequest) => invoke<Preset>("save_preset", { request }),
   deletePreset: (id: string) => invoke<void>("delete_preset", { id }),
@@ -175,10 +194,12 @@ export const api = {
   startTransformation: (request: StartTransformationRequest) =>
     invoke<TransformationTask>("start_transformation", { request }),
   cancelTransformation: (id: string) => invoke<void>("cancel_transformation", { id }),
+  suggestPrivacyRedactions: (request: PrivacyDetectionRequest) => invoke<PrivacyRedactionSuggestion[]>("suggest_privacy_redactions", { request }),
   listLibraryItems: () => invoke<LibraryItem[]>("list_library_items"),
   queryLibraryItems: (request: LibraryQueryRequest) =>
     invoke<LibraryQueryResult>("query_library_items", { request }),
   getLibraryHealthSummary: () => invoke<LibraryHealthSummary>("get_library_health_summary"),
+  getLibraryStoragePlan: () => invoke<LibraryStoragePlan>("get_library_storage_plan"),
   getLibraryFacets: (request: LibraryFacetRequest) =>
     invoke<LibraryFacets>("get_library_facets", { request }),
   getLibraryItemsByIds: (ids: string[]) =>
@@ -189,6 +210,20 @@ export const api = {
     invoke<LibraryTranscriptIndexStatus>("get_library_transcript_index_status"),
   rebuildLibraryTranscriptIndex: () =>
     invoke<LibraryTranscriptIndexStatus>("rebuild_library_transcript_index"),
+  getLibraryTranscriptionProviderStatus: () =>
+    invoke<LibraryTranscriptionProviderStatus>("get_library_transcription_provider_status"),
+  getLibraryLocalInferenceJob: () =>
+    invoke<LibraryLocalInferenceJob | null>("get_library_local_inference_job"),
+  startLibraryTranscription: (request: StartLibraryTranscriptionRequest) =>
+    invoke<LibraryLocalInferenceJob>("start_library_transcription", { request }),
+  startLibrarySemanticTranscriptIndex: (request: StartLibrarySemanticIndexRequest) =>
+    invoke<LibraryLocalInferenceJob>("start_library_semantic_transcript_index", { request }),
+  cancelLibraryLocalInferenceJob: (jobId: string) =>
+    invoke<void>("cancel_library_local_inference_job", { jobId }),
+  getLibrarySemanticTranscriptIndexStatus: (model: string) =>
+    invoke<LibrarySemanticIndexStatus>("get_library_semantic_transcript_index_status", { model }),
+  searchLibrarySemanticTranscripts: (search: string, model: string, limit = 12) =>
+    invoke<LibrarySemanticTranscriptMatch[]>("search_library_semantic_transcripts", { search, model, limit }),
   getLibraryVisualSimilarityStatus: () =>
     invoke<LibraryVisualSimilarityStatus>("get_library_visual_similarity_status"),
   getLibraryVisualSimilarityJob: () =>
@@ -199,6 +234,12 @@ export const api = {
     invoke<void>("cancel_library_visual_similarity_index", { jobId }),
   findVisuallySimilarLibraryItems: (itemId: string, limit = 24, minimumSimilarityPercent = 75) =>
     invoke<LibraryVisualSimilarityMatch[]>("find_visually_similar_library_items", { itemId, limit, minimumSimilarityPercent }),
+  findLibraryNearDuplicateVideos: (minimumVisualSimilarityPercent = 85, maximumDurationDeltaSeconds = 5, limit = 100) =>
+    invoke<LibraryNearDuplicateMatch[]>("find_library_near_duplicate_videos", {
+      minimumVisualSimilarityPercent,
+      maximumDurationDeltaSeconds,
+      limit,
+    }),
   getLibraryThemeSettings: () => invoke<LibraryThemeSettings>("get_library_theme_settings"),
   saveLibraryThemeSettings: (settings: LibraryThemeSettings) =>
     invoke<LibraryThemeSettings>("save_library_theme_settings", { settings }),
@@ -275,6 +316,8 @@ export const api = {
     invoke<LibraryItem[]>("list_library_playlist_items", { playlistId }),
   listLibraryMoments: (itemId: string) =>
     invoke<LibraryMoment[]>("list_library_moments", { itemId }),
+  suggestLibraryChapters: (itemId: string, maximumSuggestions = 16) =>
+    invoke<LibraryChapterSuggestion[]>("suggest_library_chapters", { itemId, maximumSuggestions }),
   saveLibraryMoment: (request: SaveLibraryMomentRequest) =>
     invoke<LibraryMoment>("save_library_moment", { request }),
   deleteLibraryMoment: (id: string) => invoke<void>("delete_library_moment", { id }),
@@ -336,6 +379,16 @@ export const api = {
   reconcileLibrary: () => invoke<LibraryScanResult>("reconcile_library"),
   exportLibrary: (path: string) => invoke<void>("export_library", { path }),
   restoreLibrary: (path: string) => invoke<LibraryItem[]>("restore_library", { path }),
+  getLibraryPrivacyStatus: () => invoke<LibraryPrivacyStatus>("get_library_privacy_status"),
+  configureLibraryPrivacy: (request: ConfigureLibraryPrivacyRequest) => invoke<LibraryPrivacyStatus>("configure_library_privacy", { request }),
+  unlockLibraryPrivacy: (passphrase: string) => invoke<LibraryPrivacyStatus>("unlock_library_privacy", { passphrase }),
+  lockLibraryPrivacy: () => invoke<LibraryPrivacyStatus>("lock_library_privacy"),
+  touchLibraryPrivacy: () => invoke<void>("touch_library_privacy"),
+  onLibraryPrivacyChanged: (callback: (status: LibraryPrivacyStatus) => void) =>
+    listen<LibraryPrivacyStatus>("library-privacy-changed", (event) => callback(event.payload)),
+  listLibraryPrivacyRules: () => invoke<LibraryPrivacyRules>("list_library_privacy_rules"),
+  setLibraryItemsPrivate: (request: SetLibraryItemPrivacyRequest) => invoke<LibraryPrivacyRules>("set_library_items_private", { request }),
+  setLibraryFolderPrivate: (request: SetLibraryFolderPrivacyRequest) => invoke<LibraryPrivacyRules>("set_library_folder_private", { request }),
   listLibrarySources: () => invoke<LibrarySource[]>("list_library_sources"),
   saveLibrarySource: (request: SaveLibrarySourceRequest) => invoke<LibrarySource>("save_library_source", { request }),
   removeLibrarySource: (id: string) => invoke<void>("remove_library_source", { id }),
@@ -368,6 +421,10 @@ export const api = {
     listen<LibraryVisualSimilarityJob>("library-visual-similarity-updated", (event) => handler(event.payload)),
   onLibraryThemeAnalysisUpdated: (handler: (job: LibraryThemeJob) => void): Promise<UnlistenFn> =>
     listen<LibraryThemeJob>("library-theme-analysis-updated", (event) => handler(event.payload)),
+  onLibraryLocalInferenceUpdated: (handler: (job: LibraryLocalInferenceJob) => void): Promise<UnlistenFn> =>
+    listen<LibraryLocalInferenceJob>("library-local-inference-updated", (event) => handler(event.payload)),
+  onPostDownloadRecipeRunUpdated: (handler: (run: PostDownloadRecipeRun) => void): Promise<UnlistenFn> =>
+    listen<PostDownloadRecipeRun>("post-download-recipe-run-updated", (event) => handler(event.payload)),
   onLibraryScanUpdated: (handler: (job: LibraryScanJob) => void): Promise<UnlistenFn> =>
     listen<LibraryScanJob>("library-scan-updated", (event) => handler(event.payload)),
   onLibraryItemIndexed: (handler: (item: LibraryItem) => void): Promise<UnlistenFn> =>

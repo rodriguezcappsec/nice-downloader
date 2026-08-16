@@ -10,6 +10,7 @@ import {
   Play,
   Scissors,
   Trash2,
+  WandSparkles,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Button, Input, Select, Textarea } from "../../components/ui";
@@ -18,6 +19,7 @@ import { api, normalizeError } from "../../lib/tauri";
 import { useAppStore } from "../../stores/app-store";
 import type {
   LibraryItem,
+  LibraryChapterSuggestion,
   LibraryMoment,
   LibraryMomentColor,
   LibraryStoryboard,
@@ -61,6 +63,9 @@ export function CreativeTimeline({
   const [saving, setSaving] = useState(false);
   const [exportingId, setExportingId] = useState<string | null>(null);
   const [exportingNotes, setExportingNotes] = useState(false);
+  const [suggestions, setSuggestions] = useState<LibraryChapterSuggestion[]>([]);
+  const [suggestionBusy, setSuggestionBusy] = useState(false);
+  const [addingSuggestion, setAddingSuggestion] = useState<number | null>(null);
   const [label, setLabel] = useState("");
   const [note, setNote] = useState("");
   const [color, setColor] = useState<LibraryMomentColor>("accent");
@@ -77,6 +82,7 @@ export function CreativeTimeline({
     setNote("");
     setMarkIn(null);
     setMarkOut(null);
+    setSuggestions([]);
     void api.listLibraryMoments(item.id)
       .then((loaded) => {
         if (requestRevision.current === revision) setMoments(loaded);
@@ -209,6 +215,41 @@ export function CreativeTimeline({
     }
   }
 
+  async function generateSuggestions() {
+    if (suggestionBusy) return;
+    setSuggestionBusy(true);
+    try {
+      const generated = await api.suggestLibraryChapters(item.id, 16);
+      setSuggestions(generated);
+      setNotice({ message: generated.length ? `Generated ${generated.length} reviewable chapter and highlight suggestions.` : "No strong local chapter evidence was found." });
+    } catch (error) {
+      setError(normalizeError(error));
+    } finally {
+      setSuggestionBusy(false);
+    }
+  }
+
+  async function addSuggestion(suggestion: LibraryChapterSuggestion, index: number) {
+    setAddingSuggestion(index);
+    try {
+      const saved = await api.saveLibraryMoment({
+        itemId: item.id,
+        label: suggestion.label,
+        note: `Automatic suggestion reviewed by you. ${suggestion.reason}.`,
+        startSeconds: suggestion.startSeconds,
+        endSeconds: suggestion.endSeconds,
+        color: suggestion.kind === "highlight" ? "amber" : "blue",
+      });
+      setMoments((current) => [...current, saved]);
+      setSuggestions((current) => current.filter((_, candidateIndex) => candidateIndex !== index));
+      setNotice({ message: suggestion.kind === "highlight" ? "Added suggested highlight as a saved range." : "Added suggested chapter as a saved moment." });
+    } catch (error) {
+      setError(normalizeError(error));
+    } finally {
+      setAddingSuggestion(null);
+    }
+  }
+
   return <section className="border-t border-white/10 bg-[#0a0d12] text-white" aria-labelledby="creative-tools-title">
     <header className="flex flex-wrap items-center gap-3 border-b border-white/10 px-5 py-3">
       <div><p className="text-[9px] font-semibold uppercase tracking-[0.13em] text-accent">Creative tools</p><h2 id="creative-tools-title" className="mt-0.5 text-xs font-semibold">Moments and storyboard</h2></div>
@@ -236,6 +277,11 @@ export function CreativeTimeline({
         <div className="flex items-center gap-3"><div><h3 className="text-xs font-semibold">Visual storyboard</h3><p className="mt-1 text-[10px] text-white/45">Generate 12 cached previews and jump directly to a scene.</p></div><Button variant="secondary" className="ml-auto h-8 text-[10px] text-white/70" disabled={storyboardBusy || safeDuration <= 0} onClick={() => void generateStoryboard()}>{storyboardBusy ? <LoaderCircle className="animate-spin" size={12} /> : <ImageIcon size={12} />} {storyboard ? "Refresh" : "Generate"}</Button></div>
         {storyboard ? <div className="mt-3 grid grid-cols-4 gap-1.5 sm:grid-cols-6" aria-label="Video storyboard">{storyboard.frames.map((frame) => <button key={frame.timeSeconds} className="group relative aspect-video overflow-hidden rounded-[5px] border border-white/10 bg-black focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/80" onClick={() => onSeek(frame.timeSeconds)} aria-label={`Seek to ${formatDuration(frame.timeSeconds)}`}><img className="h-full w-full object-cover transition duration-150 group-hover:scale-105 motion-reduce:transition-none" src={frame.imageDataUrl} alt="" /><span className="number-font absolute bottom-0.5 right-0.5 rounded-[3px] bg-black/75 px-1 py-0.5 text-[8px] text-white/80">{formatDuration(frame.timeSeconds)}</span></button>)}</div> : <div className="mt-3 grid min-h-24 place-items-center border border-dashed border-white/10 text-center text-[10px] text-white/35"><span><Film className="mx-auto mb-1.5" size={18} />No storyboard generated yet</span></div>}
       </div>
+    </div>
+
+    <div className="border-t border-white/10 px-5 py-4">
+      <div className="flex flex-wrap items-center gap-3"><div className="min-w-0 flex-1"><h3 className="flex items-center gap-2 text-xs font-semibold"><WandSparkles className="text-accent" size={13} /> Automatic chapters and highlights</h3><p className="mt-1 text-[9px] leading-4 text-white/40">Uses local transcript pauses, wording, and FFmpeg scene changes. Suggestions are temporary until you explicitly add them.</p></div><Button variant="secondary" className="h-8 text-[10px] text-white/70" disabled={suggestionBusy || safeDuration <= 0} onClick={() => void generateSuggestions()}>{suggestionBusy ? <LoaderCircle className="animate-spin" size={12} /> : <WandSparkles size={12} />} {suggestions.length ? "Regenerate" : "Suggest"}</Button></div>
+      {suggestions.length ? <div className="mt-3 grid gap-2 lg:grid-cols-2">{suggestions.map((suggestion, index) => <article key={`${suggestion.kind}:${suggestion.startSeconds}:${index}`} className="flex min-w-0 items-start gap-3 rounded-[7px] border border-white/10 bg-white/[0.035] p-3"><button className="number-font shrink-0 rounded-[5px] bg-white/5 px-2 py-1 text-[9px] text-accent" onClick={() => onSeek(suggestion.startSeconds)}>{formatDuration(suggestion.startSeconds)}</button><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><strong className="truncate text-[10px] font-semibold text-white/80">{suggestion.label}</strong><span className={`rounded-[4px] px-1.5 py-0.5 text-[8px] font-semibold uppercase ${suggestion.kind === "highlight" ? "bg-amber-400/10 text-amber-200" : "bg-blue-400/10 text-blue-300"}`}>{suggestion.kind}</span><span className="number-font text-[8px] text-white/35">{Math.round(suggestion.confidence * 100)}%</span></div><p className="mt-1 line-clamp-2 text-[9px] leading-4 text-white/35">{suggestion.reason}{suggestion.endSeconds != null ? ` · ${formatDuration(suggestion.startSeconds)}–${formatDuration(suggestion.endSeconds)}` : ""}</p></div><Button className="h-7 shrink-0 px-2 text-[9px]" disabled={addingSuggestion != null} onClick={() => void addSuggestion(suggestion, index)}>{addingSuggestion === index ? <LoaderCircle className="animate-spin" size={10} /> : <BookmarkPlus size={10} />} Add</Button></article>)}</div> : null}
     </div>
 
     <div className="border-t border-white/10 px-5 py-4">

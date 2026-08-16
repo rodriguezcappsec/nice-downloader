@@ -1,8 +1,10 @@
 import {
   Activity,
+  ChevronDown,
   Clock3,
   Clapperboard,
   Download,
+  FileCog,
   Film,
   History,
   House,
@@ -29,7 +31,7 @@ import {
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { useAppStore } from "../stores/app-store";
 import { api } from "../lib/tauri";
-import type { LibraryItem, ViewId } from "../types";
+import type { LibraryItem, LibraryPrivacyStatus, ViewId } from "../types";
 
 interface NavigationItem {
   id: ViewId;
@@ -37,28 +39,29 @@ interface NavigationItem {
   icon: LucideIcon;
 }
 
-const mediaNavigation: NavigationItem[] = [
+const mainNavigation: NavigationItem[] = [
   { id: "library", label: "Media home", icon: House },
-  { id: "compare", label: "Compare videos", icon: LayoutGrid },
-  { id: "imageCompare", label: "Compare images", icon: Images },
-  { id: "curation", label: "Review library", icon: ListChecks },
-  { id: "montages", label: "Build montages", icon: Clapperboard },
-  { id: "similarity", label: "Find similar media", icon: ScanSearch },
-  { id: "themes", label: "Discover video themes", icon: WandSparkles },
-  { id: "health", label: "Media health", icon: HeartPulse },
-];
-
-const downloadNavigation: NavigationItem[] = [
   { id: "new", label: "New download", icon: Plus },
   { id: "downloads", label: "Active downloads", icon: Download },
+];
+
+const activityNavigation: NavigationItem[] = [
   { id: "queue", label: "Queue", icon: ListOrdered },
   { id: "history", label: "Download history", icon: History },
   { id: "subscriptions", label: "Subscriptions", icon: Rss },
 ];
 
-const toolNavigation: NavigationItem[] = [
+const studioNavigation: NavigationItem[] = [
+  { id: "curation", label: "Review library", icon: ListChecks },
+  { id: "compare", label: "Compare videos", icon: LayoutGrid },
+  { id: "imageCompare", label: "Compare images", icon: Images },
+  { id: "similarity", label: "Find similar media", icon: ScanSearch },
+  { id: "themes", label: "Discover video themes", icon: WandSparkles },
+  { id: "montages", label: "Build montages", icon: Clapperboard },
   { id: "transformations", label: "Transform media", icon: WandSparkles },
+  { id: "recipes", label: "Automate downloads", icon: FileCog },
   { id: "sharing", label: "Share temporarily", icon: Share2 },
+  { id: "health", label: "Media health", icon: HeartPulse },
   { id: "presets", label: "Download presets", icon: SlidersHorizontal },
 ];
 
@@ -70,6 +73,8 @@ export function AppShell({ children }: { children: ReactNode }) {
   const [helpOpen, setHelpOpen] = useState(false);
   const [commandQuery, setCommandQuery] = useState("");
   const [commandMedia, setCommandMedia] = useState<LibraryItem[]>([]);
+  const [privacyStatus, setPrivacyStatus] = useState<LibraryPrivacyStatus | null>(null);
+  const privacyStatusRef = useRef<LibraryPrivacyStatus | null>(null);
   const [commandMediaLoading, setCommandMediaLoading] = useState(false);
   const restoreFocus = useRef<HTMLElement | null>(null);
   const view = useAppStore((state) => state.view);
@@ -79,15 +84,67 @@ export function AppShell({ children }: { children: ReactNode }) {
   const imageCompareCount = useAppStore((state) => state.imageCompareItemIds.length);
   const enqueuePlayNext = useAppStore((state) => state.enqueuePlayNext);
   const setNotice = useAppStore((state) => state.setNotice);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    const updatePrivacyStatus = (status: LibraryPrivacyStatus) => {
+      if (disposed) return;
+      const previous = privacyStatusRef.current;
+      privacyStatusRef.current = status;
+      setPrivacyStatus(status);
+      if (previous?.configured && !previous.locked && status.locked) {
+        setCommandMedia([]);
+        window.location.reload();
+      }
+    };
+    void api.getLibraryPrivacyStatus().then(updatePrivacyStatus).catch(() => undefined);
+    void api.onLibraryPrivacyChanged(updatePrivacyStatus).then((stop) => {
+      if (disposed) stop();
+      else unlisten = stop;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!privacyStatus?.configured || privacyStatus.locked) return;
+    let lastPing = 0;
+    const recordActivity = () => {
+      const now = Date.now();
+      if (now - lastPing < 30_000) return;
+      lastPing = now;
+      void api.touchLibraryPrivacy().catch(() => undefined);
+    };
+    const lockWhenHidden = () => {
+      if (document.visibilityState === "hidden") {
+        void api.lockLibraryPrivacy().then((status) => {
+          privacyStatusRef.current = status;
+          setPrivacyStatus(status);
+        }).catch(() => undefined);
+      }
+    };
+    window.addEventListener("pointerdown", recordActivity, { passive: true });
+    window.addEventListener("keydown", recordActivity);
+    document.addEventListener("visibilitychange", lockWhenHidden);
+    recordActivity();
+    return () => {
+      window.removeEventListener("pointerdown", recordActivity);
+      window.removeEventListener("keydown", recordActivity);
+      document.removeEventListener("visibilitychange", lockWhenHidden);
+    };
+  }, [privacyStatus?.configured, privacyStatus?.locked]);
   const jobs = Object.values(jobMap);
   const activeCount = jobs.filter((job) =>
     ["Analyzing", "Preparing", "Downloading", "PostProcessing", "Merging", "Verifying"].includes(job.state),
   ).length;
   const queuedCount = jobs.filter((job) => job.state === "Queued").length;
   const allNavigation = useMemo(() => [
-    ...mediaNavigation,
-    ...downloadNavigation,
-    ...toolNavigation,
+    ...mainNavigation,
+    ...activityNavigation,
+    ...studioNavigation,
     { id: "settings" as ViewId, label: "Settings", icon: Settings },
   ], []);
   const matchingNavigation = allNavigation.filter((item) => item.label.toLocaleLowerCase().includes(commandQuery.trim().toLocaleLowerCase()));
@@ -204,26 +261,26 @@ export function AppShell({ children }: { children: ReactNode }) {
   return (
     <>
       <a className="skip-link" href="#main-content">Skip to main content</a>
-      <div className={`grid h-screen min-h-[680px] overflow-hidden text-ink transition-[grid-template-columns] duration-300 ${collapsed ? "grid-cols-[72px_minmax(0,1fr)]" : "grid-cols-[238px_minmax(0,1fr)]"}`}>
-        <aside className="relative z-30 flex min-h-0 flex-col border-r border-line/60 bg-panel/96 shadow-[12px_0_45px_rgb(3_20_16/0.11)] backdrop-blur-xl">
-          <div className={`flex h-[76px] items-center gap-3 ${collapsed ? "justify-center px-2" : "px-5"}`}>
-            <div className="relative grid size-10 shrink-0 place-items-center overflow-hidden rounded-[11px] bg-accent text-[#081426] shadow-[0_10px_26px_rgb(var(--accent)/0.22)]">
+      <div className={`grid h-screen min-h-[680px] overflow-hidden text-ink transition-[grid-template-columns] duration-300 ${collapsed ? "grid-cols-[76px_minmax(0,1fr)]" : "grid-cols-[264px_minmax(0,1fr)]"}`}>
+        <aside className="cinema-sidebar relative z-30 flex min-h-0 flex-col border-r border-line/45 backdrop-blur-xl">
+          <div className={`flex h-[88px] items-center gap-3.5 ${collapsed ? "justify-center px-2" : "px-5"}`}>
+            <div className="brand-mark relative grid size-11 shrink-0 place-items-center overflow-hidden rounded-[13px] bg-accent text-accentInk">
               <SquarePlay size={20} strokeWidth={2.5} />
-              <span className="absolute inset-x-1 bottom-1 h-px bg-white/35" />
+              <span className="absolute inset-x-2 bottom-1.5 h-px bg-white/35" />
             </div>
             <div className={collapsed ? "hidden" : "min-w-0"}>
-              <div className="truncate text-[15px] font-semibold tracking-[-0.025em]">Nice Downloader</div>
-              <div className="mt-0.5 text-[10px] font-medium tracking-[0.08em] text-muted">Your private media hub</div>
+              <div className="truncate text-[16px] font-semibold tracking-[-0.035em]">Nice Downloader</div>
+              <div className="mt-1 text-[10px] font-medium tracking-[0.035em] text-muted">A private screening room</div>
             </div>
           </div>
 
-          <nav className="min-h-0 flex-1 overflow-y-auto px-3 pb-4 pt-2" aria-label="Primary navigation">
-            <NavigationGroup label="Library" items={mediaNavigation} view={view} collapsed={collapsed} setView={setView} badgeFor={badgeFor} />
-            <NavigationGroup label="Downloads" items={downloadNavigation} view={view} collapsed={collapsed} setView={setView} badgeFor={badgeFor} />
-            <NavigationGroup label="Tools" items={toolNavigation} view={view} collapsed={collapsed} setView={setView} badgeFor={badgeFor} />
+          <nav className="min-h-0 flex-1 overflow-y-auto px-3 pb-5 pt-1" aria-label="Primary navigation">
+            <NavigationGroup label="Main" items={mainNavigation} view={view} collapsed={collapsed} setView={setView} badgeFor={badgeFor} />
+            <NavigationGroup label="Activity" items={activityNavigation} view={view} collapsed={collapsed} setView={setView} badgeFor={badgeFor} />
+            <NavigationGroup label="Studio" items={studioNavigation} view={view} collapsed={collapsed} setView={setView} badgeFor={badgeFor} collapsible />
           </nav>
 
-          <div className="border-t border-line/60 p-3">
+          <div className="border-t border-line/45 bg-canvas/20 p-3">
             <button
               title={collapsed ? "Commands and shortcuts" : undefined}
               onClick={() => { restoreFocus.current = document.activeElement as HTMLElement | null; setHelpOpen(true); }}
@@ -236,7 +293,7 @@ export function AppShell({ children }: { children: ReactNode }) {
             <button
               title={collapsed ? "Settings" : undefined}
               onClick={() => setView("settings")}
-              className={`flex h-10 w-full items-center gap-3 rounded-[8px] px-3 text-left text-[13px] font-medium transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 ${view === "settings" ? "bg-elevated text-ink shadow-[inset_3px_0_0_rgb(var(--accent))]" : "text-muted hover:bg-elevated/60 hover:text-ink"} ${collapsed ? "justify-center" : ""}`}
+              className={`flex h-10 w-full items-center gap-3 rounded-[9px] px-3 text-left text-[13px] font-medium transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 active:scale-[0.985] ${view === "settings" ? "bg-accent/[0.09] text-ink shadow-[inset_3px_0_0_rgb(var(--accent))] ring-1 ring-inset ring-accent/10" : "text-muted hover:bg-elevated/65 hover:text-ink"} ${collapsed ? "justify-center" : ""}`}
             >
               <Settings size={17} strokeWidth={1.8} className={view === "settings" ? "text-accent" : ""} />
               <span className={collapsed ? "hidden" : "flex-1"}>Settings</span>
@@ -260,7 +317,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           </div>
         </aside>
 
-        <main id="main-content" tabIndex={-1} className="relative min-h-0 overflow-y-auto bg-canvas/90 outline-none">
+        <main id="main-content" tabIndex={-1} className="cinema-main relative min-h-0 min-w-0 overflow-y-auto bg-canvas/[0.88] outline-none">
           {children}
         </main>
       </div>
@@ -270,11 +327,23 @@ export function AppShell({ children }: { children: ReactNode }) {
   );
 }
 
-function NavigationGroup({ label, items, view, collapsed, setView, badgeFor }: { label: string; items: NavigationItem[]; view: ViewId; collapsed: boolean; setView: (view: ViewId) => void; badgeFor: (id: ViewId) => number }) {
+function NavigationGroup({ label, items, view, collapsed, setView, badgeFor, collapsible = false }: { label: string; items: NavigationItem[]; view: ViewId; collapsed: boolean; setView: (view: ViewId) => void; badgeFor: (id: ViewId) => number; collapsible?: boolean }) {
+  const containsActiveView = items.some((item) => item.id === view);
+  const [open, setOpen] = useState(() => !collapsible || containsActiveView);
+
+  useEffect(() => {
+    if (containsActiveView) setOpen(true);
+  }, [containsActiveView]);
+
+  const visible = collapsed || !collapsible || open;
   return (
-    <section className="mb-5">
-      <p className={`mb-2 px-3 text-[10px] font-semibold tracking-[0.09em] text-muted/90 ${collapsed ? "sr-only" : ""}`}>{label}</p>
-      <div className="space-y-1">
+    <section className="mb-6">
+      {collapsible && !collapsed ? (
+        <button className="mb-2 flex h-7 w-full items-center justify-between rounded-[7px] px-3 text-[10px] font-medium tracking-[0.045em] text-muted/80 transition hover:bg-elevated/45 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60" onClick={() => setOpen((value) => !value)} aria-expanded={open}>
+          <span>{label}</span><ChevronDown size={13} className={`transition-transform duration-200 ${open ? "rotate-180" : ""}`} />
+        </button>
+      ) : <p className={`mb-2.5 px-3 text-[10px] font-medium tracking-[0.045em] text-muted/80 ${collapsed ? "sr-only" : ""}`}>{label}</p>}
+      <div className={`${visible ? "grid" : "hidden"} gap-1.5`}>
         {items.map((item) => {
           const Icon = item.icon;
           const badge = badgeFor(item.id);
@@ -285,7 +354,7 @@ function NavigationGroup({ label, items, view, collapsed, setView, badgeFor }: {
               title={collapsed ? item.label : undefined}
               onClick={() => setView(item.id)}
               aria-current={active ? "page" : undefined}
-              className={`relative flex h-10 w-full items-center gap-3 rounded-[8px] px-3 text-left text-[13px] font-medium transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 ${active ? "bg-elevated text-ink shadow-[inset_3px_0_0_rgb(var(--accent))]" : "text-muted hover:bg-elevated/60 hover:text-ink"} ${collapsed ? "justify-center" : ""}`}
+              className={`relative flex h-10 w-full items-center gap-3 rounded-[9px] px-3 text-left text-[13px] font-medium transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 active:scale-[0.985] ${active ? "bg-accent/[0.09] text-ink shadow-[inset_3px_0_0_rgb(var(--accent))] ring-1 ring-inset ring-accent/10" : "text-muted hover:bg-elevated/65 hover:text-ink"} ${collapsed ? "justify-center" : ""}`}
             >
               <Icon size={17} strokeWidth={1.8} className={active ? "text-accent" : ""} />
               <span className={`flex-1 ${collapsed ? "hidden" : ""}`}>{item.label}</span>

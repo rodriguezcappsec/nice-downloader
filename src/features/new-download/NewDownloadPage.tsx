@@ -24,6 +24,7 @@ import type {
   DownloadOptions,
   GalleryItem,
   MediaAnalysis,
+  PostDownloadRecipe,
   Preset,
   SitePresetRule,
   SponsorBlockCategory,
@@ -64,6 +65,8 @@ export function NewDownloadPage() {
   const [scheduledFor, setScheduledFor] = useState("");
   const [diskSpace, setDiskSpace] = useState<DiskSpaceInfo | null>(null);
   const [presets, setPresets] = useState<Preset[]>([]);
+  const [recipes, setRecipes] = useState<PostDownloadRecipe[]>([]);
+  const [selectedRecipeIds, setSelectedRecipeIds] = useState<string[]>([]);
   const [presetId, setPresetId] = useState("");
   const [videoCodecPreference, setVideoCodecPreference] = useState<DownloadOptions["videoCodecPreference"]>("any");
   const [audioQuality, setAudioQuality] = useState<DownloadOptions["audioQuality"]>("best");
@@ -86,11 +89,12 @@ export function NewDownloadPage() {
   const [groupCollection, setGroupCollection] = useState(true);
   const [lastBatchSelectionIndex, setLastBatchSelectionIndex] = useState<number | null>(null);
   const isGallery = analysis?.engine === "galleryDl";
-  const isGalleryAlbum = isGallery && analysis?.extractor === "gallery-dl:bunkr";
+  const isGalleryAlbum = isGallery && analysis?.extractor !== "gallery-dl:bunkr:media";
   const isDirect = analysis?.engine === "directHttp";
 
   useEffect(() => {
     void api.listPresets().then(setPresets).catch(() => setPresets([]));
+    void api.listPostDownloadRecipes().then((items) => setRecipes(items.filter((recipe) => recipe.enabled))).catch(() => setRecipes([]));
   }, []);
 
   useEffect(() => {
@@ -335,6 +339,7 @@ export function NewDownloadPage() {
       analysis,
       options,
       scheduledFor: scheduledFor ? new Date(scheduledFor).toISOString() : null,
+      postDownloadRecipeIds: selectedRecipeIds,
     });
     setStarting(false);
   }
@@ -351,6 +356,7 @@ export function NewDownloadPage() {
         analysis: item.analysis,
         options: defaultBatchOptions(item.analysis, batchDestination, outputConflictPolicy),
         scheduledFor: scheduledFor ? new Date(scheduledFor).toISOString() : null,
+        postDownloadRecipeIds: selectedRecipeIds,
       }];
     });
     if (requests.length === 0) return;
@@ -365,7 +371,7 @@ export function NewDownloadPage() {
 
   return (
     <div
-      className={`mx-auto w-full max-w-[1400px] px-8 pb-12 pt-8 xl:px-10 ${dragActive ? "outline outline-2 outline-accent/60 outline-offset-[-8px]" : ""}`}
+      className={`workspace-enter mx-auto w-full max-w-[1440px] px-8 pb-14 pt-10 xl:px-12 ${dragActive ? "outline outline-2 outline-accent/60 outline-offset-[-8px]" : ""}`}
       onDragOver={(event) => { event.preventDefault(); setDragActive(true); }}
       onDragLeave={() => setDragActive(false)}
       onDrop={(event) => {
@@ -375,30 +381,31 @@ export function NewDownloadPage() {
         if (value.trim()) { setUrl(value.trim()); clearAnalysis(); }
       }}
     >
-      <header className="mb-8">
-        <div className="mb-2 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-accent/90"><span className="h-px w-5 bg-accent/70" /> Start here</div>
-        <h1 className="text-[28px] font-semibold leading-[1.08] tracking-[-0.035em]">New download</h1>
-        <p className="mt-2 max-w-[65ch] text-[13px] leading-5 text-muted">Inspect the source, choose an output, and let the local queue handle the rest.</p>
+      <header className="mb-10 max-w-3xl">
+        <div className="mb-3 flex items-center gap-2.5 text-[10px] font-semibold tracking-[0.08em] text-accent/90"><span className="h-px w-7 bg-accent/70" /> Bring media home</div>
+        <h1 className="text-[44px] font-semibold leading-[0.98] tracking-[-0.055em] text-balance">Keep what is worth watching.</h1>
+        <p className="mt-4 max-w-[58ch] text-[14px] leading-6 text-muted text-pretty">Inspect a link, choose the version you want, and hand it to the private local queue. Nothing starts until you approve the details.</p>
       </header>
 
       {engines.some((engine) => engine.required && !engine.installed) ? (
-        <section className="mb-5 flex items-center justify-between rounded-[10px] border border-amber-500/25 bg-amber-500/[0.06] p-4 text-sm shadow-control">
+        <section className="mb-6 flex items-center justify-between rounded-panel border border-amber-500/25 bg-amber-500/[0.06] p-4 text-sm shadow-control">
           <div><h2 className="font-semibold text-amber-300">Required engines need attention</h2><p className="mt-1 text-xs text-muted">Install or activate yt-dlp and FFmpeg before starting media downloads.</p></div>
           <Button variant="secondary" onClick={() => setView("settings")}>Open engine settings</Button>
         </section>
       ) : null}
 
-      <section className="panel-shadow relative overflow-hidden rounded-[12px] border border-line/70 bg-panel/80 p-5">
-        <div className="pointer-events-none absolute right-0 top-0 h-32 w-56 bg-[radial-gradient(circle_at_top_right,rgb(var(--accent)/0.08),transparent_70%)]" />
-        <label className="relative mb-2 block text-[13px] font-semibold" htmlFor="media-url">
-          Paste a link
+      <section className="ingest-card relative overflow-hidden rounded-media border border-line/50 p-7">
+        <div className="pointer-events-none absolute -right-10 -top-24 size-72 rounded-full border border-accent/10" />
+        <div className="pointer-events-none absolute -right-2 -top-12 size-44 rounded-full border border-accent/10" />
+        <label className="relative mb-3 block text-[13px] font-semibold tracking-[-0.01em]" htmlFor="media-url">
+          Source link
         </label>
-        <div className="flex gap-2">
+        <div className="relative flex gap-2.5">
           <div className="relative min-w-0 flex-1">
-            <Link2 className="absolute left-3.5 top-3.5 text-muted" size={17} />
+            <Link2 className="absolute left-4 top-[17px] text-accent" size={18} />
             <Textarea
               id="media-url"
-              className="min-h-11 py-3 pl-10"
+              className="min-h-[52px] resize-none rounded-[11px] bg-canvas/65 py-[15px] pl-11 text-[14px]"
               value={url}
               onChange={(event) => {
                 setUrl(event.target.value);
@@ -410,23 +417,23 @@ export function NewDownloadPage() {
                   void analyze(inputUrls[0]);
                 }
               }}
-              placeholder="YouTube, Reddit, Bunkr album, or another supported URL"
+              placeholder="YouTube, Reddit, Bunkr, Imgur, Flickr, Pinterest, or another supported URL"
               spellCheck={false}
             />
           </div>
-          <Button variant="secondary" onClick={() => void pasteUrl()}>
+          <Button variant="secondary" className="h-[52px]" onClick={() => void pasteUrl()}>
             Paste
           </Button>
-          <Button variant="secondary" disabled={inputUrls.length !== 1 || analyzing} onClick={() => void analyzePlaylist(inputUrls[0])}>
+          <Button variant="secondary" className="h-[52px]" disabled={inputUrls.length !== 1 || analyzing} onClick={() => void analyzePlaylist(inputUrls[0])}>
             <ListOrdered size={17} /> Playlist
           </Button>
-          <Button disabled={inputUrls.length === 0 || analyzing} onClick={() => inputUrls.length > 1 ? void analyzeBatch(inputUrls) : void analyze(inputUrls[0])}>
+          <Button className="h-[52px] px-5" disabled={inputUrls.length === 0 || analyzing} onClick={() => inputUrls.length > 1 ? void analyzeBatch(inputUrls) : void analyze(inputUrls[0])}>
             {analyzing ? <LoaderCircle className="animate-spin" size={17} /> : <Search size={17} />}
             {analyzing ? "Analyzing" : inputUrls.length > 1 ? `Analyze ${inputUrls.length}` : "Analyze"}
           </Button>
         </div>
-        <div className="relative mt-3 flex flex-wrap items-center justify-between gap-3 text-[11px] text-muted">
-          <p>Supports yt-dlp compatible sites and Bunkr albums through gallery-dl. Analysis runs locally.</p>
+        <div className="relative mt-4 flex flex-wrap items-center justify-between gap-3 text-[11px] text-muted">
+          <p className="flex flex-wrap items-center gap-x-4 gap-y-1"><span><strong className="font-semibold text-ink">Local inspection</strong> before download</span><span>yt-dlp and gallery-dl sources</span><span>Batch and playlist ready</span></p>
           <label className="flex items-center gap-2" title="Checks the clipboard only while New Download is open and never starts a download automatically.">
             <input type="checkbox" checked={clipboardWatch} onChange={(event) => setClipboardWatch(event.target.checked)} />
             Detect copied URLs
@@ -443,7 +450,7 @@ export function NewDownloadPage() {
       </section>
 
       {analyzing ? (
-        <section className="panel-shadow mt-5 flex items-center gap-4 rounded-[11px] border border-line/60 bg-panel/70 p-6">
+        <section className="panel-shadow mt-6 flex items-center gap-4 rounded-panel border border-line/50 bg-panel/70 p-6">
           <div className="grid size-10 place-items-center rounded-[9px] bg-accent/10"><LoaderCircle className="animate-spin text-accent" size={21} /></div>
           <div>
             <h2 className="text-sm font-semibold">Inspecting media</h2>
@@ -499,8 +506,8 @@ export function NewDownloadPage() {
               {isGallery ? (
                 <div className="border border-line bg-elevated p-3 text-sm text-muted">
                   <p>{isGalleryAlbum
-                    ? "gallery-dl preserves original album files. Video transcoding and container conversion do not apply."
-                    : "gallery-dl preserves the original Bunkr file. Video transcoding and container conversion do not apply."}</p>
+                    ? "gallery-dl preserves original gallery files. Video transcoding and container conversion do not apply."
+                    : "gallery-dl preserves the original media file. Video transcoding and container conversion do not apply."}</p>
                   {isGalleryAlbum ? !galleryItems ? (
                     <Button
                       variant="secondary"
@@ -509,7 +516,7 @@ export function NewDownloadPage() {
                       onClick={() => void loadGalleryItems(analysis.downloadUrl, true)}
                     >
                       {galleryItemsLoading ? <LoaderCircle className="animate-spin" size={16} /> : <Film size={16} />}
-                      {galleryItemsLoading ? "Loading album files" : "Choose specific files"}
+                      {galleryItemsLoading ? "Loading gallery files" : "Choose specific files"}
                     </Button>
                   ) : (
                     <div className="mt-3">
@@ -523,7 +530,7 @@ export function NewDownloadPage() {
                         className="mt-3"
                         value={gallerySearch}
                         onChange={(event) => setGallerySearch(event.target.value)}
-                        placeholder="Filter album files"
+                        placeholder="Filter gallery files"
                       />
                       <div className="mt-2 flex gap-2">
                         <Button variant="secondary" className="h-8 px-2 text-xs" onClick={() => setSelectedGalleryIndices(galleryItems.items.map((item) => item.index))}>All</Button>
@@ -554,7 +561,7 @@ export function NewDownloadPage() {
                               : indices.filter((index) => index !== item.index))}
                           />
                         ))}
-                        {filteredGalleryItems.length === 0 ? <p className="p-3 text-xs text-muted">No album files match this filter.</p> : null}
+                        {filteredGalleryItems.length === 0 ? <p className="p-3 text-xs text-muted">No gallery files match this filter.</p> : null}
                       </div>
                     </div>
                   ) : null}
@@ -628,7 +635,8 @@ export function NewDownloadPage() {
                   <option value="overwrite">Overwrite existing file</option>
                 </Select>
               </Field>
-              {archiveMatch ? (
+      {recipes.length ? <RecipePicker recipes={recipes} selectedIds={selectedRecipeIds} onChange={setSelectedRecipeIds} onManage={() => setView("recipes")} /> : null}
+      {archiveMatch ? (
                 <div className={`flex items-start gap-3 border p-3 text-xs ${outputConflictPolicy === "skip" ? "border-amber-500/30 bg-amber-500/5" : "border-line bg-canvas"}`}>
                   <Archive size={17} className="mt-0.5 shrink-0 text-amber-400" />
                   <div className="min-w-0 flex-1"><span className="font-medium text-ink">Previously downloaded to this folder</span><p className="mt-0.5 truncate text-muted">{archiveMatch.outputPath || `Recorded ${new Date(archiveMatch.completedAt).toLocaleString()}`}</p></div>
@@ -712,7 +720,7 @@ export function NewDownloadPage() {
               <div className="sticky bottom-0 -mx-5 -mb-5 border-t border-line/70 bg-panel/95 p-5 backdrop-blur-xl">
               <Button className="w-full" disabled={!destination || Boolean(!isGallery && !isDirect && filenameTemplateError) || starting || Boolean(isGalleryAlbum && galleryItemsLoading) || diskSpace?.sufficient === false || Boolean(isGalleryAlbum && galleryItems && selectedGalleryItems.length === 0)} onClick={() => void submitDownload()}>
                 {starting ? <LoaderCircle className="animate-spin" size={17} /> : !isGallery && audioOnly ? <Music2 size={17} /> : <Download size={17} />}
-                {starting ? "Adding to queue" : isGalleryAlbum && galleryItems && (galleryItems.truncated || selectedGalleryItems.length !== galleryItems.items.length) ? `Download ${selectedGalleryItems.length} selected` : isGalleryAlbum ? "Download album" : isGallery ? "Download original" : "Download"}
+                {starting ? "Adding to queue" : isGalleryAlbum && galleryItems && (galleryItems.truncated || selectedGalleryItems.length !== galleryItems.items.length) ? `Download ${selectedGalleryItems.length} selected` : isGalleryAlbum ? "Download gallery" : isGallery ? "Download original" : "Download"}
               </Button>
               <p className="mt-2 text-center text-[11px] text-muted">Cancellation keeps resumable partial data by default.</p>
               </div>
@@ -784,7 +792,8 @@ export function NewDownloadPage() {
             );})}
             {filteredBatchItems.length === 0 ? <div className="p-8 text-center text-sm text-muted">No entries match the current filters.</div> : null}
           </div>
-          <div className="mt-4 grid gap-4 md:grid-cols-[1fr_220px_auto] md:items-end">
+    {recipes.length ? <div className="mt-4"><RecipePicker recipes={recipes} selectedIds={selectedRecipeIds} onChange={setSelectedRecipeIds} onManage={() => setView("recipes")} /></div> : null}
+    <div className="mt-4 grid gap-4 md:grid-cols-[1fr_220px_auto] md:items-end">
             <Field label="Destination">
               <div className="flex gap-2">
                 <Input value={destination} onChange={(event) => setDestination(event.target.value)} spellCheck={false} />
@@ -809,6 +818,10 @@ export function NewDownloadPage() {
       ) : null}
     </div>
   );
+}
+
+function RecipePicker({ recipes, selectedIds, onChange, onManage }: { recipes: PostDownloadRecipe[]; selectedIds: string[]; onChange: (ids: string[]) => void; onManage: () => void }) {
+  return <section className="rounded-[9px] border border-line/60 bg-elevated/25 p-3" aria-label="Post-download automation"><div className="flex items-center gap-3"><div className="min-w-0 flex-1"><p className="text-[10px] font-semibold uppercase tracking-[0.1em] text-muted">After download</p><p className="mt-1 text-[10px] text-muted">Run selected typed recipes after verification.</p></div><button className="text-[10px] font-semibold text-accent hover:text-ink" onClick={onManage}>Manage recipes</button></div><div className="mt-2 flex flex-wrap gap-2">{recipes.map((recipe) => { const selected = selectedIds.includes(recipe.id); return <button key={recipe.id} type="button" className={`rounded-[7px] border px-2.5 py-1.5 text-[10px] font-medium transition ${selected ? "border-accent/30 bg-accent/10 text-accent" : "border-line/60 bg-panel/50 text-muted hover:text-ink"}`} aria-pressed={selected} onClick={() => onChange(selected ? selectedIds.filter((id) => id !== recipe.id) : [...selectedIds, recipe.id].slice(0, 8))}>{recipe.name}<span className="number-font ml-1.5 opacity-60">{recipe.steps.length}</span></button>; })}</div></section>;
 }
 
 function parseInputUrls(value: string): string[] {
@@ -881,7 +894,7 @@ function DownloadCapabilityPreview({
     ["Engine", "gallery-dl"],
     ["File handling", "Original files; no conversion"],
     ["Resume", "Partial transfers are retained"],
-    ["Recovery", isGalleryAlbum ? "Failed album files can be retried separately" : "Single original file"],
+    ["Recovery", isGalleryAlbum ? "Failed gallery files can be retried separately" : "Single original file"],
   ] : direct ? [
     ["Engine", "aria2c or curl fallback"],
     ["File handling", "Transferred unchanged"],

@@ -46,7 +46,7 @@ The frontend never receives a generic command-execution primitive. Tauri capabil
 
 - `commands`: narrow Tauri endpoints for analysis, engines, queue operations, defaults, and history.
 - `models`: serializable application models shared conceptually with TypeScript.
-- `engines`: routing policy and isolated adapters. yt-dlp handles ordinary media URLs; gallery-dl handles supported Bunkr album and single-media page URLs.
+- `engines`: routing policy and isolated adapters. yt-dlp handles ordinary media URLs and explicit HLS/DASH manifests; gallery-dl handles supported Bunkr, Imgur, Flickr, and Pinterest collection URLs.
 - `queue`: authoritative ordered pending queue, dynamic concurrency (default 2), scheduling, queue/job pause, child lifecycle, cancellation tokens, retry lineage, startup recovery, disk preflight, and normalized events.
 - `database`: SQLite connection, embedded migrations, durable job intent/diagnostics, settings, and history repository.
 - `creative`: Rust-owned, serialized, timeout-bounded storyboard generation from validated catalog videos. Clip exports reuse `transformations` for cancellable FFmpeg execution and staged output publication.
@@ -90,6 +90,10 @@ Before analysis, a narrow URL resolver canonicalizes `redd.it/<post-id>` links a
 Batch analysis accepts at most 20 unique URLs and runs three analyzers concurrently. Playlist expansion is a separate structured yt-dlp flat-playlist operation capped at 20 entries; each expanded URL then passes through the ordinary analyzer and typed download-intent path. Bulk enqueue remains a Rust command so queue authority never moves into React.
 
 Exact `bunkr.cr/a/<album-id>` albums and `bunkr.cr/f|v|i|d/<media-id>` single-media pages route to gallery-dl. Initial album analysis is bounded to the album summary and first item; single-media analysis is bounded to one item, and signed CDN media URLs are discarded in both paths. Album browsing lazily resolves paced 12-file pages rather than signing an entire album, returning only sanitized filenames, indices, sizes, extensions, and thumbnails. Rust converts selected album indices into a validated gallery-dl range, while single-media pages reject forged album selections. Downloads preserve original files, albums use a sanitized nested directory, and gallery-dl item and byte progress is normalized into the same `DownloadJob` events as yt-dlp. Migration 0028 persists a bounded per-file gallery lifecycle without media URLs. A failed album exposes only Rust-observed failed numeric indices for retry; completed and skipped files are never included in that retry request.
+
+Explicit Imgur `/a|gallery/<id>`, Flickr `/photos/<user>/albums|galleries/<id>`, and Pinterest `/<user>/<board>` collections use the same bounded gallery-dl workflow. Routing accepts only these tested collection shapes; arbitrary gallery-dl-supported hosts continue through the ordinary analyzer until a typed adapter is added. Bunkr retains its narrower host, route, identifier, and single-media validation.
+
+Manifest classification runs before direct-file classification. Explicit `.m3u8` and `.mpd` paths, plus signed endpoints whose typed query values identify HLS or DASH, route through yt-dlp with their full query preserved. Manifest metadata is rejected with separate typed errors when it reports DRM or a currently live stream; engine diagnostics distinguish unavailable HLS keys/encryption from malformed or unavailable manifests. Diagnostics redact signed-query credentials independently from the URL passed to the engine.
 
 Recognized direct HTTP file URLs route to the direct-transfer adapter. It prefers aria2c and falls back to curl, with resume, redirect following, bounded retry, optional typed proxy configuration, and filesystem-based normalized progress. These transfers bypass extraction and conversion.
 
@@ -223,7 +227,7 @@ Temporary-share QR rendering is lazy-loaded browser code operating only on the e
 
 ## Remaining extension points
 
-The gallery-dl route can expand beyond Bunkr. Release builds stage pinned,
+The gallery-dl route can expand beyond the currently typed collection sites. Release builds stage pinned,
 SHA-256-verified yt-dlp, gallery-dl, FFmpeg, and ffprobe resources. Runtime
 resolution prefers app-managed updates, then the bundled baseline, then host
 installations. Platform packaging, non-Linux pause/notification adapters, and

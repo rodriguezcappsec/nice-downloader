@@ -1,0 +1,4 @@
+[
+  [2, {"album":"Night sky","username":"example","count":2}],
+  [3, "https://cdn.example/one.jpg?token=secret", {"title":"First image","thumbnail":"https://i.example/one.jpg"}]
+]

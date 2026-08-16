@@ -190,6 +190,7 @@ async fn check_inner(
             options: options_from_preset(&analysis, &preset.intent, &subscription.destination)?,
             analysis,
             scheduled_for: None,
+            post_download_recipe_ids: Vec::new(),
         };
         if !database.load_subscription(&subscription.id)?.enabled {
             break;

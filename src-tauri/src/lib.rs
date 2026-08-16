@@ -1,4 +1,5 @@
 mod authentication;
+mod chapter_suggestions;
 mod commands;
 mod creative;
 mod database;
@@ -9,7 +10,9 @@ mod local_share;
 mod media_server;
 mod models;
 mod native_player;
+mod post_download_recipes;
 mod queue;
+mod semantic_transcripts;
 mod subscriptions;
 mod theme_analysis;
 mod transcripts;
@@ -19,10 +22,11 @@ mod visual_similarity;
 
 use crate::{
     creative::CreativeManager, database::Database, engines::managed, library::LibraryManager,
-    local_share::LocalShareManager, queue::QueueManager, theme_analysis::ThemeAnalysisManager,
+    local_share::LocalShareManager, queue::QueueManager,
+    semantic_transcripts::SemanticTranscriptManager, theme_analysis::ThemeAnalysisManager,
     transformations::TransformationManager, visual_similarity::VisualSimilarityManager,
 };
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Clone, Copy)]
@@ -93,6 +97,25 @@ pub fn run() {
             })?;
             managed::initialize(&data_directory, &resource_directory)?;
             let database = Database::open(&data_directory.join("nice-downloader.sqlite3"))?;
+            let privacy_database = database.clone();
+            let privacy_app = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
+                loop {
+                    interval.tick().await;
+                    match privacy_database.expire_library_privacy_if_idle() {
+                        Ok(true) => {
+                            if let Ok(status) = privacy_database.library_privacy_status() {
+                                let _ = privacy_app.emit("library-privacy-changed", status);
+                            }
+                        }
+                        Ok(false) => {}
+                        Err(error) => {
+                            tracing::warn!(%error, "could not evaluate Library privacy auto-lock");
+                        }
+                    }
+                }
+            });
             let playback_cache_directory = app
                 .path()
                 .app_cache_dir()
@@ -113,6 +136,7 @@ pub fn run() {
             let transformations = TransformationManager::new(database.clone())?;
             let visual_similarity = VisualSimilarityManager::new(database.clone());
             let theme_analysis = ThemeAnalysisManager::new(database.clone());
+            let semantic_transcripts = SemanticTranscriptManager::new(database.clone());
             let local_share = LocalShareManager::new(database.clone());
             let creative = CreativeManager::new(
                 database.clone(),
@@ -134,6 +158,7 @@ pub fn run() {
             app.manage(transformations);
             app.manage(visual_similarity);
             app.manage(theme_analysis);
+            app.manage(semantic_transcripts);
             app.manage(local_share);
             app.manage(creative);
             app.manage(library);
@@ -173,6 +198,10 @@ pub fn run() {
             commands::check_disk_space,
             commands::list_history,
             commands::delete_history_entry,
+            commands::list_post_download_recipes,
+            commands::save_post_download_recipe,
+            commands::delete_post_download_recipe,
+            commands::list_post_download_recipe_runs,
             commands::list_presets,
             commands::save_preset,
             commands::delete_preset,
@@ -192,19 +221,29 @@ pub fn run() {
             commands::list_transformation_tasks,
             commands::start_transformation,
             commands::cancel_transformation,
+            commands::suggest_privacy_redactions,
             commands::list_library_items,
             commands::query_library_items,
             commands::get_library_health_summary,
+            commands::get_library_storage_plan,
             commands::get_library_facets,
             commands::get_library_items_by_ids,
             commands::search_library_transcripts,
             commands::get_library_transcript_index_status,
             commands::rebuild_library_transcript_index,
+            commands::get_library_transcription_provider_status,
+            commands::get_library_local_inference_job,
+            commands::start_library_transcription,
+            commands::start_library_semantic_transcript_index,
+            commands::cancel_library_local_inference_job,
+            commands::get_library_semantic_transcript_index_status,
+            commands::search_library_semantic_transcripts,
             commands::get_library_visual_similarity_status,
             commands::get_library_visual_similarity_job,
             commands::start_library_visual_similarity_index,
             commands::cancel_library_visual_similarity_index,
             commands::find_visually_similar_library_items,
+            commands::find_library_near_duplicate_videos,
             commands::get_library_theme_settings,
             commands::save_library_theme_settings,
             commands::get_library_theme_provider_status,
@@ -259,6 +298,7 @@ pub fn run() {
             commands::move_library_playlist_item,
             commands::list_library_playlist_items,
             commands::list_library_moments,
+            commands::suggest_library_chapters,
             commands::save_library_moment,
             commands::delete_library_moment,
             commands::list_library_montages,
@@ -299,6 +339,14 @@ pub fn run() {
             commands::reconcile_library,
             commands::export_library,
             commands::restore_library,
+            commands::get_library_privacy_status,
+            commands::configure_library_privacy,
+            commands::unlock_library_privacy,
+            commands::lock_library_privacy,
+            commands::touch_library_privacy,
+            commands::list_library_privacy_rules,
+            commands::set_library_items_private,
+            commands::set_library_folder_private,
             commands::list_library_sources,
             commands::save_library_source,
             commands::remove_library_source,

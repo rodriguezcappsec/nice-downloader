@@ -1,11 +1,12 @@
-import { ExternalLink, Images, LoaderCircle, RefreshCw, Search, Square, WandSparkles } from "lucide-react";
+import { ExternalLink, GitCompareArrows, Images, LoaderCircle, RefreshCw, Search, ShieldCheck, Square, WandSparkles } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { Button, Input, Select } from "../../components/ui";
-import { formatDuration } from "../../lib/format";
+import { formatBytes, formatDuration } from "../../lib/format";
 import { api, normalizeError } from "../../lib/tauri";
 import { useAppStore } from "../../stores/app-store";
 import type {
   LibraryItem,
+  LibraryNearDuplicateMatch,
   LibraryVisualSimilarityJob,
   LibraryVisualSimilarityMatch,
   LibraryVisualSimilarityStatus,
@@ -23,6 +24,10 @@ export function SimilarityPage() {
   const [matches, setMatches] = useState<LibraryVisualSimilarityMatch[]>([]);
   const [matchLoading, setMatchLoading] = useState(false);
   const [seedIndexed, setSeedIndexed] = useState(true);
+  const [nearMatches, setNearMatches] = useState<LibraryNearDuplicateMatch[]>([]);
+  const [nearThreshold, setNearThreshold] = useState("85");
+  const [durationTolerance, setDurationTolerance] = useState("5");
+  const [nearLoading, setNearLoading] = useState(false);
 
   useEffect(() => {
     let disposed = false;
@@ -151,11 +156,32 @@ export function SimilarityPage() {
     }
   }
 
+  async function findNearDuplicates() {
+    setNearLoading(true);
+    try {
+      setNearMatches(await api.findLibraryNearDuplicateVideos(Number(nearThreshold), Number(durationTolerance), 100));
+    } catch (error) {
+      setError(normalizeError(error));
+    } finally {
+      setNearLoading(false);
+    }
+  }
+
   return <div className="mx-auto w-full max-w-[1500px] px-8 pb-12 pt-8 xl:px-10">
     <header className="mb-7 flex flex-wrap items-end gap-5"><div className="min-w-0 flex-1"><p className="mb-2 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-accent/90"><span className="h-px w-5 bg-accent/70" /> Discovery</p><h1 className="text-[28px] font-semibold tracking-[-0.035em]">Visual similarity explorer</h1><p className="mt-2 max-w-3xl text-[13px] leading-5 text-muted">Find media with a similar overall composition using a small local perceptual fingerprint. Results are approximate and are never presented as exact duplicate evidence.</p></div><div className="flex items-center gap-2"><div className="rounded-[8px] border border-line/60 bg-panel/70 px-4 py-2 text-right"><span className="block text-[9px] uppercase tracking-[0.1em] text-muted">Indexed</span><strong className="number-font text-sm text-ink">{indexedLabel}</strong></div>{indexCurrent ? <Button variant="secondary" onClick={() => void cancelIndex()}><Square size={14} /> Cancel</Button> : <Button onClick={() => void startIndex()}>{status?.indexedItems ? <RefreshCw size={15} /> : <WandSparkles size={15} />} {status?.indexedItems ? "Refresh index" : "Build index"}</Button>}</div></header>
 
     {indexCurrent ? <section className="panel-shadow mb-5 border border-accent/20 bg-panel/80 p-4" aria-live="polite"><div className="flex items-center gap-3 text-xs"><LoaderCircle className="animate-spin text-accent" size={15} /><span className="min-w-0 flex-1 truncate">Indexing {job.currentTitle || "Library media"}</span><span className="number-font text-muted">{job.checkedItems}/{job.totalItems}</span></div><div className="mt-3 h-1.5 overflow-hidden bg-elevated"><div className="h-full bg-accent transition-all" style={{ width: `${progress}%` }} /></div><p className="mt-2 text-[10px] text-muted">{job.indexedItems} indexed · {job.failedItems} skipped</p></section> : null}
     {job?.state === "failed" ? <p className="mb-5 border-l-2 border-red-400 bg-red-400/5 px-3 py-2 text-xs text-red-300">{job.error || "Visual indexing failed."}</p> : null}
+
+    <section className="panel-shadow mb-5 overflow-hidden border border-line/60 bg-panel/75" aria-labelledby="near-duplicate-title">
+      <header className="flex flex-wrap items-end gap-4 border-b border-line/55 px-5 py-4">
+        <div className="min-w-0 flex-1"><p className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-accent"><GitCompareArrows size={13} /> Review candidates</p><h2 id="near-duplicate-title" className="mt-1 text-sm font-semibold">Near-duplicate videos</h2><p className="mt-1 max-w-3xl text-[10px] leading-4 text-muted">Combines visual fingerprints with duration and technical differences. Exact SHA-256 duplicates are excluded, and these suggestions never enter exact-duplicate cleanup.</p></div>
+        <label className="text-[10px] font-semibold uppercase tracking-[0.1em] text-muted">Visual match<Select className="mt-1 h-9 w-32 text-xs" value={nearThreshold} onChange={(event) => setNearThreshold(event.target.value)}><option value="95">95% strict</option><option value="90">90%</option><option value="85">85% balanced</option><option value="80">80%</option><option value="75">75% broad</option></Select></label>
+        <label className="text-[10px] font-semibold uppercase tracking-[0.1em] text-muted">Duration delta<Select className="mt-1 h-9 w-32 text-xs" value={durationTolerance} onChange={(event) => setDurationTolerance(event.target.value)}><option value="1">Within 1 sec</option><option value="5">Within 5 sec</option><option value="15">Within 15 sec</option><option value="60">Within 1 min</option><option value="300">Within 5 min</option></Select></label>
+        <Button disabled={nearLoading || indexCurrent || !status?.indexedItems} onClick={() => void findNearDuplicates()}>{nearLoading ? <LoaderCircle className="animate-spin" size={14} /> : <Search size={14} />} Find candidates</Button>
+      </header>
+      {nearMatches.length ? <div className="grid gap-3 p-4 lg:grid-cols-2">{nearMatches.map((match) => <article key={`${match.left.id}:${match.right.id}`} className="rounded-[9px] border border-line/55 bg-elevated/25 p-3"><div className="grid grid-cols-2 gap-2"><NearDuplicateItem item={match.left} onOpen={() => void api.openLibraryItem(match.left.id).catch((error) => setError(normalizeError(error)))} /><NearDuplicateItem item={match.right} onOpen={() => void api.openLibraryItem(match.right.id).catch((error) => setError(normalizeError(error)))} /></div><div className="mt-3 flex flex-wrap gap-1.5 text-[9px]"><Evidence label={`${match.visualSimilarityPercent.toFixed(1)}% visual`} strong /><Evidence label={`${match.durationDeltaSeconds.toFixed(2)}s duration delta`} /><Evidence label={match.sizeDeltaBytes != null ? `${formatBytes(match.sizeDeltaBytes)} size delta` : "Size unknown"} /><Evidence label={match.sameResolution ? "Same resolution" : "Different resolution"} /><Evidence label={match.sameVideoCodec ? "Same video codec" : "Different video codec"} /><Evidence label={match.sameAudioCodec ? "Same audio codec" : "Different audio codec"} /><Evidence label={match.sameContainer ? "Same container" : "Different container"} /></div><p className="mt-3 flex items-center gap-1.5 text-[9px] leading-4 text-muted"><ShieldCheck size={12} className="text-accent" />{match.exactHashCompared ? "Both exact hashes were available and differ." : "Exact hashes were unavailable for at least one file; review carefully."}</p></article>)}</div> : <p className="px-5 py-8 text-center text-xs text-muted">{nearLoading ? "Comparing indexed videos…" : "Run candidate review after the visual index is current."}</p>}
+    </section>
 
     <div className="grid gap-5 xl:grid-cols-[340px_minmax(0,1fr)]">
       <aside className="panel-shadow min-w-0 border border-line/60 bg-panel/75 p-4"><h2 className="text-sm font-semibold">Choose reference media</h2><p className="mt-1 text-[10px] leading-4 text-muted">Images and videos can be compared together by their representative frame.</p><div className="relative mt-4"><Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted" size={14} /><Input className="pl-9" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search Library" /></div><div className="mt-2 max-h-[62vh] overflow-y-auto border border-line/55">{sourceLoading ? <p className="flex items-center gap-2 p-3 text-xs text-muted"><LoaderCircle className="animate-spin" size={13} /> Searching…</p> : sources.map((item) => <button key={item.id} className={`grid w-full grid-cols-[64px_minmax(0,1fr)] items-center gap-3 border-b border-line/40 p-2 text-left last:border-b-0 ${seed?.id === item.id ? "bg-accent/10" : "hover:bg-elevated/55"}`} onClick={() => setSeed(item)}><Artwork item={item} /><span className="min-w-0"><strong className="block truncate text-[11px] font-semibold">{item.title}</strong><span className="mt-1 block text-[9px] text-muted">{item.mediaKind || "media"}{item.durationSeconds != null ? ` · ${formatDuration(item.durationSeconds)}` : ""}</span></span></button>)}</div></aside>
@@ -165,6 +191,14 @@ export function SimilarityPage() {
       </main>
     </div>
   </div>;
+}
+
+function NearDuplicateItem({ item, onOpen }: { item: LibraryItem; onOpen: () => void }) {
+  return <button className="min-w-0 overflow-hidden rounded-[7px] border border-line/50 bg-panel/50 text-left transition hover:border-accent/30" onClick={onOpen}><Artwork item={item} large /><span className="block p-2"><strong className="block truncate text-[10px] font-semibold">{item.title}</strong><span className="mt-1 block text-[9px] text-muted">{item.durationSeconds != null ? formatDuration(item.durationSeconds) : "Unknown duration"} · {item.width && item.height ? `${item.width}×${item.height}` : "Unknown resolution"}</span></span></button>;
+}
+
+function Evidence({ label, strong = false }: { label: string; strong?: boolean }) {
+  return <span className={`rounded-[5px] px-2 py-1 ${strong ? "bg-accent/10 font-semibold text-accent" : "bg-panel/70 text-muted"}`}>{label}</span>;
 }
 
 function Artwork({ item, large = false }: { item: LibraryItem; large?: boolean }) {

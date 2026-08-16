@@ -6,6 +6,8 @@ import {
   Eraser,
   Globe2,
   HardDrive,
+  KeyRound,
+  Lock,
   MonitorPlay,
   Network,
   RefreshCw,
@@ -29,6 +31,7 @@ import type {
   BrowserProfileInfo,
   DesktopPreferences,
   LibraryPlaybackCacheStatus,
+  LibraryPrivacyStatus,
   NativePlaybackStatus,
   EngineId,
   EngineUpdateCandidate,
@@ -77,7 +80,7 @@ export function SettingsPage() {
   const [managed, setManaged] = useState<ManagedEngineStatus[]>([]);
   const [candidate, setCandidate] = useState<EngineUpdateCandidate | null>(null);
   const [managing, setManaging] = useState<EngineId | null>(null);
-  const [settingsTab, setSettingsTab] = useState<"access" | "profiles" | "desktop" | "engines">("access");
+  const [settingsTab, setSettingsTab] = useState<"access" | "profiles" | "privacy" | "desktop" | "engines">("access");
 
   useEffect(() => {
     void api.listManagedEngines().then(setManaged).catch((error) => setError(normalizeError(error)));
@@ -158,7 +161,7 @@ export function SettingsPage() {
       }
     >
       <div className="mb-7 inline-flex gap-1 rounded-[10px] border border-line/60 bg-panel/55 p-1 shadow-control" role="tablist" aria-label="Settings sections">
-        {([ ["access", "Network & cookies"], ["profiles", "Site profiles"], ["desktop", "Desktop"], ["engines", "Engines & diagnostics"] ] as const).map(([id, label]) => <button key={id} role="tab" aria-selected={settingsTab === id} onClick={() => setSettingsTab(id)} className={`rounded-[7px] px-4 py-2 text-[13px] font-semibold transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 ${settingsTab === id ? "bg-elevated text-ink shadow-control" : "text-muted hover:text-ink"}`}>{label}</button>)}
+        {([ ["access", "Network & cookies"], ["profiles", "Site profiles"], ["privacy", "Library privacy"], ["desktop", "Desktop"], ["engines", "Engines & diagnostics"] ] as const).map(([id, label]) => <button key={id} role="tab" aria-selected={settingsTab === id} onClick={() => setSettingsTab(id)} className={`rounded-[7px] px-4 py-2 text-[13px] font-semibold transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 ${settingsTab === id ? "bg-elevated text-ink shadow-control" : "text-muted hover:text-ink"}`}>{label}</button>)}
       </div>
       {settingsTab === "access" ? (
       <section className="mb-8">
@@ -294,6 +297,7 @@ export function SettingsPage() {
       ) : null}
 
       {settingsTab === "profiles" ? <AuthenticationProfiles /> : null}
+      {settingsTab === "privacy" ? <LibraryPrivacySettings /> : null}
       {settingsTab === "desktop" ? <DesktopSettings /> : null}
 
       {settingsTab === "engines" ? <>
@@ -397,6 +401,118 @@ export function SettingsPage() {
       </section>
       </> : null}
     </Page>
+  );
+}
+
+function LibraryPrivacySettings() {
+  const setError = useAppStore((state) => state.setError);
+  const setNotice = useAppStore((state) => state.setNotice);
+  const [status, setStatus] = useState<LibraryPrivacyStatus | null>(null);
+  const [passphrase, setPassphrase] = useState("");
+  const [confirmation, setConfirmation] = useState("");
+  const [autoLockMinutes, setAutoLockMinutes] = useState(15);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    const update = (next: LibraryPrivacyStatus) => {
+      if (disposed) return;
+      setStatus(next);
+      setAutoLockMinutes(next.autoLockMinutes);
+    };
+    void api.getLibraryPrivacyStatus().then(update).catch((error) => setError(normalizeError(error)));
+    void api.onLibraryPrivacyChanged(update).then((stop) => {
+      if (disposed) stop();
+      else unlisten = stop;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [setError]);
+
+  async function configure() {
+    if (passphrase !== confirmation) {
+      setError({ code: "library_privacy_confirmation", message: "The Library privacy passphrases do not match." });
+      return;
+    }
+    setBusy(true);
+    try {
+      const next = await api.configureLibraryPrivacy({ passphrase, autoLockMinutes });
+      setStatus(next);
+      setPassphrase("");
+      setConfirmation("");
+      setNotice({ message: status?.configured ? "Library privacy settings updated." : "Private Library protection enabled.", view: "settings" });
+    } catch (error) {
+      setError(normalizeError(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function unlock() {
+    setBusy(true);
+    try {
+      const next = await api.unlockLibraryPrivacy(passphrase);
+      setStatus(next);
+      setPassphrase("");
+      setNotice({ message: "Private Library unlocked for this session.", view: "settings" });
+    } catch (error) {
+      setError(normalizeError(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function lock() {
+    setBusy(true);
+    try {
+      setStatus(await api.lockLibraryPrivacy());
+    } catch (error) {
+      setError(normalizeError(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!status) return <div className="p-8 text-sm text-muted">Loading Library privacy…</div>;
+
+  return (
+    <section className="mb-8">
+      <div className="mb-3 flex items-center gap-2"><Lock size={17} className="text-muted" /><h2 className="text-sm font-semibold">Locked private Library</h2></div>
+      <div className="panel-shadow overflow-hidden rounded-[12px] border border-line/60 bg-panel/75">
+        <div className="flex flex-wrap items-start gap-4 border-b border-line/60 p-5">
+          <div className={`grid size-11 shrink-0 place-items-center rounded-[11px] ${status.configured && status.locked ? "bg-accent/12 text-accent" : "bg-elevated text-muted"}`}>
+            {status.configured && status.locked ? <Lock size={20} /> : <KeyRound size={20} />}
+          </div>
+          <div className="min-w-0 flex-1">
+            <h3 className="text-[15px] font-semibold">{!status.configured ? "Set a privacy passphrase" : status.locked ? "Private media is hidden" : "Private media is visible"}</h3>
+            <p className="mt-1 text-xs leading-5 text-muted">
+              {status.configured ? `${status.privateSourceCount} private sources · ${status.privateFolderCount} private folders · ${status.privateItemCount} individual items` : "Protect selected sources, folders, and videos behind an in-memory unlock state."}
+            </p>
+          </div>
+          {status.configured && !status.locked ? <Button variant="secondary" disabled={busy} onClick={() => void lock()}><Lock size={15} /> Lock now</Button> : null}
+        </div>
+
+        <div className="grid gap-5 p-5 md:grid-cols-2">
+          <Field label={status.configured && status.locked ? "Passphrase" : status.configured ? "New passphrase" : "Passphrase"} hint={status.configured && status.locked ? "Unlocks private records only in this running app session." : "Use 6–256 characters. Nice Downloader stores a salted verifier, never the passphrase."}>
+            <Input type="password" autoComplete="off" value={passphrase} onChange={(event) => setPassphrase(event.target.value)} />
+          </Field>
+          {status.configured && status.locked ? null : <Field label="Confirm passphrase"><Input type="password" autoComplete="off" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} /></Field>}
+          {status.configured && status.locked ? null : <Field label="Automatic lock" hint="Activity is checked in Rust; minimizing or hiding the app locks immediately."><Select value={autoLockMinutes} onChange={(event) => setAutoLockMinutes(Number(event.target.value))}>{[1, 5, 15, 30, 60, 120, 240].map((minutes) => <option key={minutes} value={minutes}>{minutes < 60 ? `${minutes} minute${minutes === 1 ? "" : "s"}` : `${minutes / 60} hour${minutes === 60 ? "" : "s"}`}</option>)}</Select></Field>}
+        </div>
+
+        <div className="mx-5 mb-5 rounded-[10px] border border-amber-400/20 bg-amber-400/5 p-4 text-xs leading-5 text-muted">
+          <strong className="text-ink">App-level privacy, not disk encryption.</strong> Locked items are blocked from the UI, playback, search, analysis, backups, and LAN sharing. Original media files and the SQLite database remain readable to someone with filesystem access.
+        </div>
+        <div className="flex justify-end border-t border-line/60 px-5 py-4">
+          {status.configured && status.locked
+            ? <Button disabled={busy || passphrase.length < 6} onClick={() => void unlock()}><KeyRound size={15} /> {busy ? "Unlocking…" : "Unlock private Library"}</Button>
+            : <Button disabled={busy || passphrase.length < 6 || confirmation.length < 6} onClick={() => void configure()}><ShieldCheck size={15} /> {busy ? "Saving…" : status.configured ? "Update protection" : "Enable protection"}</Button>}
+        </div>
+      </div>
+    </section>
   );
 }
 

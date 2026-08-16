@@ -13,6 +13,7 @@ import { SimilarityPage } from "./features/library/SimilarityPage";
 import { SharingPage } from "./features/library/SharingPage";
 import { ThemesPage } from "./features/library/ThemesPage";
 import { NewDownloadPage } from "./features/new-download/NewDownloadPage";
+import { RecipesPage } from "./features/recipes/RecipesPage";
 import { PresetsPage, SettingsPage } from "./features/settings/SettingsPage";
 import { SubscriptionsPage } from "./features/subscriptions/SubscriptionsPage";
 import { TransformationsPage } from "./features/transformations/TransformationsPage";
@@ -184,6 +185,7 @@ export default function App() {
       <div className={view === "themes" ? "" : "hidden"}><ThemesPage /></div>
       <div className={view === "sharing" ? "" : "hidden"}><SharingPage /></div>
       <div className={view === "health" ? "" : "hidden"}><HealthPage /></div>
+      <div className={view === "recipes" ? "" : "hidden"}><RecipesPage /></div>
       <div className={view === "presets" ? "" : "hidden"}><PresetsPage /></div>
       <div className={view === "settings" ? "" : "hidden"}><SettingsPage /></div>
       {notice ? (
