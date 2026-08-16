@@ -40,6 +40,7 @@ const JOB_EVENT: &str = "download-job-updated";
 const JOB_REMOVED_EVENT: &str = "download-job-removed";
 const QUEUE_EVENT: &str = "download-queue-updated";
 const MAX_JOB_DIAGNOSTIC_LINES: usize = 80;
+const GALLERY_PROGRESS_UPDATE_INTERVAL: Duration = Duration::from_millis(500);
 
 #[derive(Clone)]
 pub struct QueueManager {
@@ -1277,6 +1278,7 @@ impl QueueManager {
             }
             tracker.current_size = size;
             tracker.current_name = filename.chars().take(180).collect();
+            tracker.record_boundary(Instant::now());
             self.update_job(app, id, |job| {
                 if job.state == DownloadState::Paused {
                     return;
@@ -1299,6 +1301,9 @@ impl QueueManager {
             let Some(progress) = parse_gallery_progress(value) else {
                 return true;
             };
+            if !tracker.should_publish_progress(Instant::now()) {
+                return true;
+            }
             let current_downloaded = progress.downloaded_bytes.unwrap_or_else(|| {
                 ((tracker.current_size as f64) * progress.item_percent / 100.0) as u64
             });
@@ -1497,6 +1502,23 @@ struct GalleryProgressTracker {
     current_name: String,
     completed_bytes: u64,
     last_completed_index: Option<u32>,
+    last_progress_update: Option<Instant>,
+}
+
+impl GalleryProgressTracker {
+    fn record_boundary(&mut self, now: Instant) {
+        self.last_progress_update = Some(now);
+    }
+
+    fn should_publish_progress(&mut self, now: Instant) -> bool {
+        if self.last_progress_update.is_some_and(|last_update| {
+            now.saturating_duration_since(last_update) < GALLERY_PROGRESS_UPDATE_INTERVAL
+        }) {
+            return false;
+        }
+        self.last_progress_update = Some(now);
+        true
+    }
 }
 
 struct DirectProgressTracker {
@@ -2031,6 +2053,22 @@ mod tests {
             gallery_album_percent(&tracker, 50.0, Some(1_000), 250),
             25.0
         );
+    }
+
+    #[test]
+    fn bounds_gallery_progress_update_frequency() {
+        let start = Instant::now();
+        let mut tracker = GalleryProgressTracker::default();
+
+        assert!(tracker.should_publish_progress(start));
+        assert!(!tracker.should_publish_progress(start + Duration::from_millis(499)));
+        assert!(tracker.should_publish_progress(start + Duration::from_millis(500)));
+        assert!(!tracker.should_publish_progress(start + Duration::from_millis(999)));
+        assert!(tracker.should_publish_progress(start + Duration::from_millis(1_000)));
+
+        tracker.record_boundary(start + Duration::from_millis(1_100));
+        assert!(!tracker.should_publish_progress(start + Duration::from_millis(1_599)));
+        assert!(tracker.should_publish_progress(start + Duration::from_millis(1_600)));
     }
 
     #[test]
