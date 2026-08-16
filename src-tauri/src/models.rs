@@ -1958,6 +1958,7 @@ impl DownloadJob {
     pub fn from_request(id: String, request: &StartDownloadRequest) -> Self {
         let now = Utc::now();
         let gallery_download = request.analysis.engine == DownloadEngineKind::GalleryDl;
+        let gallery_album = gallery_download && request.analysis.extractor == "gallery-dl:bunkr";
         let selected_gallery_total = request
             .options
             .gallery_selection
@@ -1988,8 +1989,10 @@ impl DownloadJob {
             selected_quality: selected_gallery_count
                 .map(|count| format!("{count} selected files"))
                 .unwrap_or_else(|| request.options.quality.label.clone()),
-            output_format: if gallery_download {
+            output_format: if gallery_album {
                 "album".to_owned()
+            } else if gallery_download {
+                "original".to_owned()
             } else {
                 request.options.container.as_str().to_owned()
             },

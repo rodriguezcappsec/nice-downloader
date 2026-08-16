@@ -46,7 +46,7 @@ The frontend never receives a generic command-execution primitive. Tauri capabil
 
 - `commands`: narrow Tauri endpoints for analysis, engines, queue operations, defaults, and history.
 - `models`: serializable application models shared conceptually with TypeScript.
-- `engines`: routing policy and isolated adapters. yt-dlp handles ordinary media URLs; gallery-dl handles supported gallery URLs, initially Bunkr albums.
+- `engines`: routing policy and isolated adapters. yt-dlp handles ordinary media URLs; gallery-dl handles supported Bunkr album and single-media page URLs.
 - `queue`: authoritative ordered pending queue, dynamic concurrency (default 2), scheduling, queue/job pause, child lifecycle, cancellation tokens, retry lineage, startup recovery, disk preflight, and normalized events.
 - `database`: SQLite connection, embedded migrations, durable job intent/diagnostics, settings, and history repository.
 - `creative`: Rust-owned, serialized, timeout-bounded storyboard generation from validated catalog videos. Clip exports reuse `transformations` for cancellable FFmpeg execution and staged output publication.
@@ -89,7 +89,7 @@ Before analysis, a narrow URL resolver canonicalizes `redd.it/<post-id>` links a
 
 Batch analysis accepts at most 20 unique URLs and runs three analyzers concurrently. Playlist expansion is a separate structured yt-dlp flat-playlist operation capped at 20 entries; each expanded URL then passes through the ordinary analyzer and typed download-intent path. Bulk enqueue remains a Rust command so queue authority never moves into React.
 
-Exact `bunkr.cr/a/<album-id>` URLs route to gallery-dl. Initial analysis is bounded to the album summary and first item, and signed CDN media URLs are discarded. Item browsing lazily resolves paced 12-file pages rather than signing an entire album, returning only sanitized filenames, indices, sizes, extensions, and thumbnails. Rust converts selected numeric indices into a validated gallery-dl range. Downloads preserve original files in a sanitized album directory, and gallery-dl item and byte progress is normalized into the same `DownloadJob` events as yt-dlp.
+Exact `bunkr.cr/a/<album-id>` albums and `bunkr.cr/f|v|i|d/<media-id>` single-media pages route to gallery-dl. Initial album analysis is bounded to the album summary and first item; single-media analysis is bounded to one item, and signed CDN media URLs are discarded in both paths. Album browsing lazily resolves paced 12-file pages rather than signing an entire album, returning only sanitized filenames, indices, sizes, extensions, and thumbnails. Rust converts selected album indices into a validated gallery-dl range, while single-media pages reject forged album selections. Downloads preserve original files, albums use a sanitized nested directory, and gallery-dl item and byte progress is normalized into the same `DownloadJob` events as yt-dlp.
 
 Recognized direct HTTP file URLs route to the direct-transfer adapter. It prefers aria2c and falls back to curl, with resume, redirect following, bounded retry, optional typed proxy configuration, and filesystem-based normalized progress. These transfers bypass extraction and conversion.
 

@@ -1,7 +1,7 @@
 use crate::{
     engines::{
         aria2::{analyze_direct, is_direct_download_url, prepare_direct},
-        gallery_dl::{is_bunkr_album_url, GalleryDlEngine},
+        gallery_dl::{is_bunkr_url, GalleryDlEngine},
         ytdlp::YtDlpEngine,
         DownloadEngine,
     },
@@ -35,7 +35,7 @@ pub async fn analyze(
     url: &str,
     preferences: &EnginePreferences,
 ) -> Result<MediaAnalysis, AppError> {
-    if is_bunkr_album_url(url) {
+    if is_bunkr_url(url) {
         GalleryDlEngine::discover()?.analyze(url, preferences).await
     } else if is_direct_download_url(url) {
         analyze_direct(url).await
@@ -48,7 +48,7 @@ pub async fn prepare_download(
     request: &StartDownloadRequest,
     preferences: &EnginePreferences,
 ) -> Result<PreparedDownload, AppError> {
-    let bunkr_url = is_bunkr_album_url(&request.url);
+    let bunkr_url = is_bunkr_url(&request.url);
     match request.analysis.engine {
         DownloadEngineKind::GalleryDl if bunkr_url => {
             let engine = GalleryDlEngine::discover()?;
@@ -127,8 +127,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn selects_gallery_only_for_supported_bunkr_album_shape() {
-        assert!(is_bunkr_album_url("https://bunkr.cr/a/ul3n82nu"));
-        assert!(!is_bunkr_album_url("https://notbunkr.cr/a/ul3n82nu"));
+    fn selects_gallery_only_for_supported_bunkr_shapes() {
+        assert!(is_bunkr_url("https://bunkr.cr/a/ul3n82nu"));
+        assert!(is_bunkr_url("https://bunkr.cr/f/eiK5ATuIv7DIY"));
+        assert!(is_bunkr_url("https://bunkr.cr/v/video_1"));
+        assert!(!is_bunkr_url("https://notbunkr.cr/a/ul3n82nu"));
+        assert!(!is_bunkr_url("https://bunkr.cr/u/unsupported"));
     }
 }

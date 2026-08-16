@@ -18,6 +18,24 @@ const MAX_ITEM_LIST_BYTES: usize = 5_000_000;
 const MAX_SELECTABLE_ITEMS: u32 = 1_000;
 const MAX_GALLERY_PAGE_SIZE: u32 = 24;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BunkrUrlKind {
+    Album { id: String },
+    Media { id: String },
+}
+
+impl BunkrUrlKind {
+    fn is_album(&self) -> bool {
+        matches!(self, Self::Album { .. })
+    }
+
+    fn id(&self) -> &str {
+        match self {
+            Self::Album { id } | Self::Media { id } => id,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct GalleryDlEngine {
     executable: PathBuf,
@@ -49,7 +67,7 @@ impl GalleryDlEngine {
         url: &str,
         preferences: &EnginePreferences,
     ) -> Result<MediaAnalysis, AppError> {
-        let validated = validate_bunkr_album_url(url)?;
+        let (validated, kind) = validate_bunkr_url(url)?;
         let mut command = Command::new(&self.executable);
         crate::utils::process::sanitize_tokio_command(&mut command);
         command.kill_on_drop(true).args([
@@ -74,7 +92,7 @@ impl GalleryDlEngine {
             .map_err(|_| {
                 AppError::new(
                     "analysis_timeout",
-                    "Bunkr album analysis timed out after 60 seconds.",
+                    "Bunkr analysis timed out after 60 seconds.",
                 )
             })?
             .map_err(|error| AppError::internal("could not start gallery-dl", error))?;
@@ -90,12 +108,15 @@ impl GalleryDlEngine {
         if output.stdout.len() > MAX_ANALYSIS_BYTES {
             return Err(AppError::new(
                 "analysis_too_large",
-                "gallery-dl returned more album metadata than the application can safely process.",
+                "gallery-dl returned more Bunkr metadata than the application can safely process.",
             ));
         }
         let value: Value = serde_json::from_slice(&output.stdout)
             .map_err(|error| AppError::internal("gallery-dl returned invalid JSON", error))?;
-        parse_album_metadata(value, validated.as_str())
+        match kind {
+            BunkrUrlKind::Album { .. } => parse_album_metadata(value, validated.as_str()),
+            BunkrUrlKind::Media { .. } => parse_media_metadata(value, validated.as_str()),
+        }
     }
 
     pub async fn list_items(
@@ -171,14 +192,18 @@ impl GalleryDlEngine {
         request: &StartDownloadRequest,
         preferences: &EnginePreferences,
     ) -> Result<GalleryDownload, AppError> {
-        let validated = validate_bunkr_album_url(&request.url)?;
-        let album_id = bunkr_album_id(&validated).ok_or_else(|| {
-            AppError::new(
-                "unsupported_gallery_url",
-                "This is not a supported Bunkr album URL.",
-            )
-        })?;
-        let output_directory = safe_album_directory(&request.analysis.title, album_id);
+        let (validated, kind) = validate_bunkr_url(&request.url)?;
+        if !kind.is_album() && request.options.gallery_selection.is_some() {
+            return Err(AppError::new(
+                "invalid_gallery_selection",
+                "Individual Bunkr media links do not accept an album file selection.",
+            ));
+        }
+        let output_directory = if kind.is_album() {
+            safe_album_directory(&request.analysis.title, kind.id())
+        } else {
+            ".".to_owned()
+        };
         let mut args = vec![
             "--config-ignore".to_owned(),
             "--no-colors".to_owned(),
@@ -208,12 +233,14 @@ impl GalleryDlEngine {
             "--option".to_owned(),
             "downloader.http.retry-codes=[429]".to_owned(),
         ];
-        if let Some(selection) = &request.options.gallery_selection {
-            let range = build_range(
-                selection.iter().map(|item| item.index),
-                request.analysis.item_count,
-            )?;
-            args.extend(["--range".to_owned(), range]);
+        if kind.is_album() {
+            if let Some(selection) = &request.options.gallery_selection {
+                let range = build_range(
+                    selection.iter().map(|item| item.index),
+                    request.analysis.item_count,
+                )?;
+                args.extend(["--range".to_owned(), range]);
+            }
         }
         if request.options.output_conflict_policy == OutputConflictPolicy::Overwrite {
             args.push("--no-skip".to_owned());
@@ -362,42 +389,81 @@ fn is_video_extension(value: &str) -> bool {
     )
 }
 
-pub fn is_bunkr_album_url(value: &str) -> bool {
-    validate_media_url(value)
-        .ok()
-        .is_some_and(|url| bunkr_album_id(&url).is_some())
+pub fn is_bunkr_url(value: &str) -> bool {
+    validate_bunkr_url(value).is_ok()
+}
+
+fn validate_bunkr_url(value: &str) -> Result<(Url, BunkrUrlKind), AppError> {
+    let url = validate_media_url(value)?;
+    let host = url
+        .host_str()
+        .unwrap_or_default()
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    if host != "bunkr.cr" && !host.ends_with(".bunkr.cr") {
+        return Err(unsupported_bunkr_url());
+    }
+
+    let segments = url.path().trim_matches('/').split('/').collect::<Vec<_>>();
+    if segments.len() != 2 || segments.iter().any(|segment| segment.is_empty()) {
+        return Err(unsupported_bunkr_url());
+    }
+    let route = segments[0];
+    let id = segments[1];
+    let max_id_length = if route == "a" { 80 } else { 240 };
+    if !is_safe_bunkr_id(id, max_id_length) {
+        return Err(unsupported_bunkr_url());
+    }
+
+    let kind = match route {
+        "a" => BunkrUrlKind::Album { id: id.to_owned() },
+        "f" | "v" | "i" | "d" => BunkrUrlKind::Media { id: id.to_owned() },
+        _ => return Err(unsupported_bunkr_url()),
+    };
+    Ok((url, kind))
+}
+
+fn is_safe_bunkr_id(id: &str, max_length: usize) -> bool {
+    if id.is_empty() || id.len() > max_length {
+        return false;
+    }
+    let bytes = id.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            if index + 2 >= bytes.len()
+                || !bytes[index + 1].is_ascii_hexdigit()
+                || !bytes[index + 2].is_ascii_hexdigit()
+            {
+                return false;
+            }
+            index += 3;
+            continue;
+        }
+        if !bytes[index].is_ascii_alphanumeric() && !matches!(bytes[index], b'-' | b'_' | b'.') {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+fn unsupported_bunkr_url() -> AppError {
+    AppError::new(
+        "unsupported_gallery_url",
+        "Supported Bunkr links use /a/ for albums or /f/, /v/, /i/, and /d/ for individual media.",
+    )
 }
 
 fn validate_bunkr_album_url(value: &str) -> Result<Url, AppError> {
-    let url = validate_media_url(value)?;
-    if bunkr_album_id(&url).is_none() {
+    let (url, kind) = validate_bunkr_url(value)?;
+    if !kind.is_album() {
         return Err(AppError::new(
             "unsupported_gallery_url",
             "Only Bunkr album URLs in the form https://bunkr.cr/a/album-id are supported by this gallery adapter.",
         ));
     }
     Ok(url)
-}
-
-fn bunkr_album_id(url: &Url) -> Option<&str> {
-    let host = url.host_str()?.trim_end_matches('.').to_ascii_lowercase();
-    if host != "bunkr.cr" && !host.ends_with(".bunkr.cr") {
-        return None;
-    }
-    let segments = url
-        .path_segments()?
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>();
-    if segments.len() != 2 || segments[0] != "a" {
-        return None;
-    }
-    let id = segments[1];
-    (!id.is_empty()
-        && id.len() <= 80
-        && id
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_')))
-    .then_some(id)
 }
 
 fn parse_album_metadata(value: Value, requested_url: &str) -> Result<MediaAnalysis, AppError> {
@@ -466,6 +532,77 @@ fn parse_album_metadata(value: Value, requested_url: &str) -> Result<MediaAnalys
             max_height: None,
         }],
         item_count,
+        total_size_bytes,
+    })
+}
+
+fn parse_media_metadata(value: Value, requested_url: &str) -> Result<MediaAnalysis, AppError> {
+    let events = value.as_array().ok_or_else(|| {
+        AppError::new(
+            "invalid_metadata",
+            "gallery-dl did not return structured Bunkr media metadata.",
+        )
+    })?;
+    let metadata = events
+        .iter()
+        .filter_map(Value::as_array)
+        .find_map(|parts| {
+            (parts.first().and_then(Value::as_u64) == Some(3))
+                .then(|| parts.get(2).and_then(Value::as_object))
+                .flatten()
+        })
+        .ok_or_else(|| {
+            AppError::new(
+                "invalid_metadata",
+                "gallery-dl did not identify an individual Bunkr file.",
+            )
+        })?;
+
+    let mut title = ["filename", "name", "title", "slug", "id"]
+        .iter()
+        .find_map(|key| metadata.get(*key).and_then(Value::as_str))
+        .map(clean_title)
+        .filter(|title| !title.is_empty())
+        .unwrap_or_else(|| "Bunkr file".to_owned());
+    if let Some(extension) = metadata
+        .get("extension")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .and_then(clean_extension)
+    {
+        let suffix = format!(".{extension}");
+        if !title.to_ascii_lowercase().ends_with(&suffix) {
+            title.push_str(&suffix);
+        }
+    }
+    let total_size_bytes = metadata.get("size").and_then(Value::as_u64);
+    let thumbnail = metadata
+        .get("thumbnail")
+        .and_then(Value::as_str)
+        .filter(|url| validate_media_url(url).is_ok())
+        .map(str::to_owned);
+
+    Ok(MediaAnalysis {
+        engine: DownloadEngineKind::GalleryDl,
+        title,
+        uploader: None,
+        duration_seconds: None,
+        thumbnail,
+        webpage_url: requested_url.to_owned(),
+        download_url: requested_url.to_owned(),
+        extractor: "gallery-dl:bunkr:media".to_owned(),
+        site_name: "Bunkr".to_owned(),
+        playlist_title: None,
+        playlist_index: None,
+        formats: Vec::new(),
+        quality_options: vec![QualityOption {
+            id: "original".to_owned(),
+            label: "Original file".to_owned(),
+            description: "Preserve the original Bunkr file".to_owned(),
+            kind: QualityKind::Best,
+            max_height: None,
+        }],
+        item_count: Some(1),
         total_size_bytes,
     })
 }
@@ -563,7 +700,7 @@ fn friendly_error(details: &str) -> String {
     } else if lowercase.contains("403") || lowercase.contains("429") {
         "Bunkr blocked or rate-limited the request. Try again later or configure a proxy in Settings.".to_owned()
     } else {
-        "gallery-dl could not analyze this Bunkr album.".to_owned()
+        "gallery-dl could not analyze this Bunkr link.".to_owned()
     }
 }
 
@@ -575,13 +712,59 @@ mod tests {
     };
     use serde_json::json;
 
+    fn request_for_analysis(
+        analysis: MediaAnalysis,
+        gallery_selection: Option<Vec<GalleryItemSelection>>,
+    ) -> StartDownloadRequest {
+        StartDownloadRequest {
+            url: analysis.download_url.clone(),
+            analysis,
+            options: DownloadOptions {
+                quality: QualityOption {
+                    id: "original".into(),
+                    label: "Original file".into(),
+                    description: String::new(),
+                    kind: QualityKind::Best,
+                    max_height: None,
+                },
+                container: OutputContainer::Mp4,
+                video_codec_preference: VideoCodecPreference::Any,
+                format_strategy: crate::models::FormatStrategy::Recommended,
+                audio_quality: AudioQuality::Best,
+                audio_only: false,
+                subtitles: false,
+                subtitle_languages: vec![],
+                embed_thumbnail: false,
+                embed_metadata: false,
+                chapters: false,
+                sponsorblock: false,
+                sponsorblock_categories: vec![],
+                destination: "/tmp".into(),
+                filename_template: "ignored".into(),
+                output_conflict_policy: OutputConflictPolicy::Skip,
+                gallery_selection,
+            },
+            scheduled_for: None,
+        }
+    }
+
     #[test]
-    fn routes_only_exact_bunkr_album_urls() {
-        assert!(is_bunkr_album_url("https://bunkr.cr/a/ul3n82nu"));
-        assert!(is_bunkr_album_url("https://app.bunkr.cr/a/album_1/"));
-        assert!(!is_bunkr_album_url("https://bunkr.cr.example/a/ul3n82nu"));
-        assert!(!is_bunkr_album_url("https://bunkr.cr/v/ul3n82nu"));
-        assert!(!is_bunkr_album_url("https://bunkr.cr/a/one/extra"));
+    fn routes_only_supported_bunkr_urls() {
+        assert!(is_bunkr_url("https://bunkr.cr/a/ul3n82nu"));
+        assert!(is_bunkr_url("https://app.bunkr.cr/a/album_1/"));
+        assert!(is_bunkr_url("https://bunkr.cr/f/eiK5ATuIv7DIY"));
+        assert!(is_bunkr_url("https://bunkr.cr/v/video-1"));
+        assert!(is_bunkr_url("https://bunkr.cr/i/image.name_1"));
+        assert!(is_bunkr_url("https://bunkr.cr/d/download%20name"));
+        assert!(!is_bunkr_url("https://bunkr.cr.example/a/ul3n82nu"));
+        assert!(!is_bunkr_url("https://bunkr.cr/u/unsupported"));
+        assert!(!is_bunkr_url("https://bunkr.cr/a/one/extra"));
+        assert!(!is_bunkr_url("https://bunkr.cr/f/bad!id"));
+        assert!(!is_bunkr_url("https://bunkr.cr/f/bad%ZZid"));
+        assert!(!is_bunkr_url(&format!(
+            "https://bunkr.cr/f/{}",
+            "x".repeat(241)
+        )));
     }
 
     #[test]
@@ -600,6 +783,35 @@ mod tests {
         assert_eq!(analysis.total_size_bytes, Some(12_590_000_000));
         assert_eq!(analysis.download_url, "https://bunkr.cr/a/ul3n82nu");
         assert!(!serde_json::to_string(&analysis).unwrap().contains("secret"));
+    }
+
+    #[test]
+    fn parses_single_media_without_preserving_signed_download_url() {
+        let signed = "https://cdn.example/video.mp4?token=secret";
+        let analysis = parse_media_metadata(
+            json!([
+                [2, {"category":"bunkr", "subcategory":"media"}],
+                [3, signed, {
+                    "id":"eiK5ATuIv7DIY",
+                    "filename":"Example video\n",
+                    "extension":"mp4",
+                    "size":215914671,
+                    "thumbnail":"https://i.example/thumb.png"
+                }]
+            ]),
+            "https://bunkr.cr/f/eiK5ATuIv7DIY",
+        )
+        .unwrap();
+
+        assert_eq!(analysis.engine, DownloadEngineKind::GalleryDl);
+        assert_eq!(analysis.extractor, "gallery-dl:bunkr:media");
+        assert_eq!(analysis.title, "Example video.mp4");
+        assert_eq!(analysis.item_count, Some(1));
+        assert_eq!(analysis.total_size_bytes, Some(215_914_671));
+        assert_eq!(analysis.webpage_url, "https://bunkr.cr/f/eiK5ATuIv7DIY");
+        assert_eq!(analysis.download_url, "https://bunkr.cr/f/eiK5ATuIv7DIY");
+        assert!(!analysis.download_url.contains("token="));
+        assert!(!analysis.webpage_url.contains("token="));
     }
 
     #[test]
@@ -693,6 +905,63 @@ mod tests {
             .args
             .iter()
             .any(|arg| arg == "downloader.http.retry-codes=[429]"));
+    }
+
+    #[test]
+    fn builds_single_media_download_without_album_range() {
+        let engine = GalleryDlEngine {
+            executable: PathBuf::from("gallery-dl"),
+        };
+        let analysis = parse_media_metadata(
+            json!([[3, "https://cdn.example/file.mp4?token=secret", {
+                "filename":"Example",
+                "extension":"mp4",
+                "size":42
+            }]]),
+            "https://bunkr.cr/f/eiK5ATuIv7DIY",
+        )
+        .unwrap();
+        let request = request_for_analysis(analysis, None);
+
+        let prepared = engine
+            .build_download(&request, &EnginePreferences::default())
+            .unwrap();
+
+        assert_eq!(prepared.output_directory, ".");
+        assert!(!prepared.args.iter().any(|arg| arg == "--range"));
+        assert!(prepared
+            .args
+            .windows(2)
+            .any(|args| args == ["--", "https://bunkr.cr/f/eiK5ATuIv7DIY"]));
+        assert!(prepared
+            .args
+            .iter()
+            .any(|arg| arg == "downloader.http.retries=12"));
+        assert!(!prepared.args.iter().any(|arg| arg.contains("token=secret")));
+    }
+
+    #[test]
+    fn rejects_album_selection_for_single_media() {
+        let engine = GalleryDlEngine {
+            executable: PathBuf::from("gallery-dl"),
+        };
+        let analysis = parse_media_metadata(
+            json!([[3, "https://cdn.example/file.mp4", {"filename":"Example"}]]),
+            "https://bunkr.cr/v/example",
+        )
+        .unwrap();
+        let request = request_for_analysis(
+            analysis,
+            Some(vec![GalleryItemSelection {
+                index: 1,
+                size_bytes: Some(42),
+            }]),
+        );
+
+        let error = engine
+            .build_download(&request, &EnginePreferences::default())
+            .unwrap_err();
+        assert_eq!(error.code, "invalid_gallery_selection");
     }
 
     #[tokio::test]
