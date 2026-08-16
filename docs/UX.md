@@ -42,4 +42,4 @@ History is a reuse surface, not only a log. “Again” loads the persisted type
 
 Color is semantic: blue is active, amber is waiting or retrying, violet is verification, green is completed/verified, and red is failure or destructive action. Animation is limited to active progress and loading indicators. Transfer numbers use tabular figures.
 
-Collection workflows support search, video-only selection, inversion, numeric ranges, incremental loading, selected count, and estimated size without eagerly resolving an entire remote album.
+Collection workflows support search, video-only selection, inversion, numeric ranges, incremental loading, selected count, and estimated size without eagerly resolving an entire remote album. Active gallery jobs expose a bounded expandable file-status list; failed albums offer a failed-files-only retry while preserving completed and skipped results. An analyzed download also shows the selected engine, file handling, resume behavior, access configuration, and important limitations before enqueueing.

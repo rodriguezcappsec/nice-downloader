@@ -163,6 +163,7 @@ pub fn run() {
             commands::dismiss_downloads,
             commands::retry_download,
             commands::repeat_download,
+            commands::retry_failed_gallery_files,
             commands::list_jobs,
             commands::get_queue_snapshot,
             commands::update_queue_settings,

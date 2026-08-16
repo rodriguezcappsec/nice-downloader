@@ -121,7 +121,7 @@ yt-dlp version. Site behavior can change without an application update.
 
 Nice Downloader also provides:
 
-- Bunkr album inspection and individual-file selection through gallery-dl
+- Bunkr album inspection, individual-file selection, durable per-file progress, failed-file retry, and direct `/f`, `/v`, `/i`, and `/d` media-page downloads through gallery-dl
 - Resumable direct HTTP downloads through aria2c, with curl as a fallback
 - HLS/DASH handling when exposed through a supported extraction engine
 - Reddit share-link canonicalization and a limited public-embed fallback when

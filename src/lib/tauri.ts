@@ -137,6 +137,7 @@ export const api = {
   dismissDownloads: (jobIds: string[]) => invoke<string[]>("dismiss_downloads", { jobIds }),
   retryDownload: (jobId: string) => invoke<DownloadJob>("retry_download", { jobId }),
   repeatDownload: (jobId: string) => invoke<DownloadJob>("repeat_download", { jobId }),
+  retryFailedGalleryFiles: (jobId: string) => invoke<DownloadJob>("retry_failed_gallery_files", { jobId }),
   pauseDownload: (jobId: string) => invoke<void>("pause_download", { jobId }),
   resumeDownload: (jobId: string) => invoke<void>("resume_download", { jobId }),
   getQueueSnapshot: () => invoke<QueueSnapshot>("get_queue_snapshot"),

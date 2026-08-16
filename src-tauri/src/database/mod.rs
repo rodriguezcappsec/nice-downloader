@@ -68,6 +68,7 @@ const MIGRATION_0024: &str = include_str!("migrations/0024_library_transcripts.s
 const MIGRATION_0025: &str = include_str!("migrations/0025_library_montages.sql");
 const MIGRATION_0026: &str = include_str!("migrations/0026_library_visual_similarity.sql");
 const MIGRATION_0027: &str = include_str!("migrations/0027_library_themes.sql");
+const MIGRATION_0028: &str = include_str!("migrations/0028_gallery_file_progress.sql");
 const ENGINE_PREFERENCES_KEY: &str = "engine.preferences";
 const QUEUE_SETTINGS_KEY: &str = "queue.settings";
 const DESKTOP_PREFERENCES_KEY: &str = "desktop.preferences";
@@ -153,6 +154,7 @@ impl Database {
             (25, MIGRATION_0025),
             (26, MIGRATION_0026),
             (27, MIGRATION_0027),
+            (28, MIGRATION_0028),
         ] {
             let migrated: bool = transaction.query_row(
                 "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = ?1)",
@@ -187,6 +189,9 @@ impl Database {
             .map_err(|error| AppError::internal("could not serialize download request", error))?;
         let diagnostics_json = serde_json::to_string(&job.diagnostics)
             .map_err(|error| AppError::internal("could not serialize job diagnostics", error))?;
+        let gallery_files_json = serde_json::to_string(&job.gallery_files).map_err(|error| {
+            AppError::internal("could not serialize gallery file progress", error)
+        })?;
         let mut connection = self.connection.lock().map_err(|_| {
             AppError::new(
                 "database_unavailable",
@@ -200,9 +205,10 @@ impl Database {
                 total_bytes, speed_bytes_per_second, eta_seconds, selected_quality,
                 output_format, destination, output_path, current_operation, error,
                 created_at, updated_at, completed_at, options_json, request_json,
-                diagnostics_json, attempt_count, retry_of_id, visible_in_downloads
+                diagnostics_json, attempt_count, retry_of_id, gallery_files_json,
+                visible_in_downloads
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
-                       ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24,
+                ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25,
                        COALESCE((SELECT visible_in_downloads FROM downloads WHERE id = ?1), 1))",
             params![
                 job.id,
@@ -230,6 +236,7 @@ impl Database {
                 diagnostics_json,
                 job.attempt_count,
                 job.retry_of_id,
+                gallery_files_json,
             ],
         )?;
         if job.state == DownloadState::Completed {
@@ -294,15 +301,15 @@ impl Database {
         let mut statement = connection.prepare(
             "SELECT id, url, title, thumbnail, state, progress_percent, downloaded_bytes,
                     total_bytes, speed_bytes_per_second, eta_seconds, selected_quality,
-                    output_format, destination, output_path, current_operation, error,
-                    created_at, updated_at, completed_at, diagnostics_json, attempt_count,
-                    retry_of_id, request_json
+                output_format, destination, output_path, current_operation, error,
+                created_at, updated_at, completed_at, diagnostics_json, attempt_count,
+                retry_of_id, gallery_files_json, request_json
              FROM downloads
              WHERE state != 'Completed' AND request_json IS NOT NULL AND visible_in_downloads = 1
              ORDER BY created_at ASC LIMIT 500",
         )?;
         let rows = statement.query_map([], |row| {
-            let request_json: String = row.get(22)?;
+            let request_json: String = row.get(23)?;
             Ok((job_from_row(row)?, request_json))
         })?;
         let mut jobs = Vec::new();
@@ -524,7 +531,7 @@ impl Database {
                     total_bytes, speed_bytes_per_second, eta_seconds, selected_quality,
                     output_format, destination, output_path, current_operation, error,
                     created_at, updated_at, completed_at, diagnostics_json, attempt_count,
-                    retry_of_id
+                    retry_of_id, gallery_files_json
              FROM downloads WHERE state = 'Completed'
              ORDER BY completed_at DESC LIMIT 500",
         )?;
@@ -619,7 +626,8 @@ impl Database {
                     total_bytes, speed_bytes_per_second, eta_seconds, selected_quality,
                     output_format, destination, output_path, current_operation, error,
                     created_at, updated_at, completed_at, diagnostics_json, attempt_count,
-                    retry_of_id FROM downloads ORDER BY updated_at DESC LIMIT 100",
+                    retry_of_id, gallery_files_json
+             FROM downloads ORDER BY updated_at DESC LIMIT 100",
         )?;
         let rows = statement.query_map([], job_from_row)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
@@ -7467,6 +7475,7 @@ fn job_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DownloadJob> {
     let completed_at: Option<i64> = row.get(18)?;
     let diagnostics_json: String = row.get(19)?;
     let attempt_count: i64 = row.get(20)?;
+    let gallery_files_json: String = row.get(22)?;
     Ok(DownloadJob {
         id: row.get(0)?,
         url: row.get(1)?,
@@ -7485,6 +7494,7 @@ fn job_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DownloadJob> {
         current_operation: row.get(14)?,
         error: row.get(15)?,
         diagnostics: serde_json::from_str(&diagnostics_json).unwrap_or_default(),
+        gallery_files: serde_json::from_str(&gallery_files_json).unwrap_or_default(),
         attempt_count: u32::try_from(attempt_count).unwrap_or(1).max(1),
         retry_of_id: row.get(21)?,
         created_at: timestamp_or_epoch(created_at),
@@ -7614,6 +7624,13 @@ mod tests {
             current_operation: "Download completed".to_owned(),
             error: None,
             diagnostics: vec!["finished".to_owned()],
+            gallery_files: vec![crate::models::GalleryFileProgress {
+                index: 2,
+                filename: "failed.mp4".to_owned(),
+                size_bytes: Some(42),
+                state: crate::models::GalleryFileState::Failed,
+                progress_percent: 50.0,
+            }],
             attempt_count: 2,
             retry_of_id: Some("original".to_owned()),
             created_at: now,
@@ -7678,6 +7695,7 @@ mod tests {
         assert_eq!(history[0].title, "Example");
         assert_eq!(history[0].diagnostics, ["finished"]);
         assert_eq!(history[0].attempt_count, 2);
+        assert_eq!(history[0].gallery_files, job.gallery_files);
         let library = database.list_library_items().expect("auto-indexed library");
         assert_eq!(library.len(), 1);
         assert_eq!(library[0].title, "Example");
@@ -8016,7 +8034,7 @@ mod tests {
                 row.get(0)
             })
             .expect("recovered migration version");
-        assert_eq!(latest_version, 27);
+        assert_eq!(latest_version, 28);
         let has_playback: bool = connection
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'library_playback')",

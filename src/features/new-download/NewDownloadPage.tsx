@@ -45,6 +45,7 @@ export function NewDownloadPage() {
   const startDownload = useAppStore((state) => state.startDownload);
   const startDownloads = useAppStore((state) => state.startDownloads);
   const engines = useAppStore((state) => state.engines);
+  const enginePreferences = useAppStore((state) => state.enginePreferences);
   const setView = useAppStore((state) => state.setView);
   const view = useAppStore((state) => state.view);
   const [url, setUrl] = useState("");
@@ -85,6 +86,7 @@ export function NewDownloadPage() {
   const [groupCollection, setGroupCollection] = useState(true);
   const [lastBatchSelectionIndex, setLastBatchSelectionIndex] = useState<number | null>(null);
   const isGallery = analysis?.engine === "galleryDl";
+  const isGalleryAlbum = isGallery && analysis?.extractor === "gallery-dl:bunkr";
   const isDirect = analysis?.engine === "directHttp";
 
   useEffect(() => {
@@ -324,7 +326,7 @@ export function NewDownloadPage() {
       destination,
       filenameTemplate,
       outputConflictPolicy,
-      gallerySelection: isGallery && galleryItems
+      gallerySelection: isGalleryAlbum && galleryItems
         ? selectedGalleryItems.map((item) => ({ index: item.index, sizeBytes: item.sizeBytes }))
         : null,
     };
@@ -470,8 +472,10 @@ export function NewDownloadPage() {
               <h2 className="line-clamp-2 text-[18px] font-semibold leading-6 tracking-[-0.025em]">{analysis.title}</h2>
               <p className="mt-2 text-sm text-muted">{analysis.uploader || analysis.extractor}</p>
               <div className="mt-4 flex flex-wrap gap-2 text-xs text-muted">
-                {isGallery ? (
+                {isGalleryAlbum ? (
                   <span className="border border-line bg-elevated px-2 py-1">{analysis.itemCount ?? "Multiple"} original files</span>
+                ) : isGallery ? (
+                  <span className="border border-line bg-elevated px-2 py-1">1 original file</span>
                 ) : (
                   <span className="border border-line bg-elevated px-2 py-1">{analysis.formats.length} streams detected</span>
                 )}
@@ -487,10 +491,17 @@ export function NewDownloadPage() {
           <section className="panel-shadow sticky top-5 self-start overflow-hidden rounded-[12px] border border-line/70 bg-panel/90 p-5 backdrop-blur-xl">
             <div className="mb-5 flex items-center justify-between"><h2 className="text-[15px] font-semibold tracking-[-0.02em]">Download options</h2><span className="rounded-[5px] bg-accent/10 px-2 py-1 text-[9px] font-semibold uppercase tracking-[0.12em] text-accent">Local</span></div>
             <div className="grid gap-4">
+              <DownloadCapabilityPreview
+                analysis={analysis}
+                isGalleryAlbum={isGalleryAlbum}
+                accessConfigured={enginePreferences.browserCookieSource !== "none" || Boolean(enginePreferences.proxyUrl)}
+              />
               {isGallery ? (
                 <div className="border border-line bg-elevated p-3 text-sm text-muted">
-                  <p>gallery-dl preserves original album files. Video transcoding and container conversion do not apply.</p>
-                  {!galleryItems ? (
+                  <p>{isGalleryAlbum
+                    ? "gallery-dl preserves original album files. Video transcoding and container conversion do not apply."
+                    : "gallery-dl preserves the original Bunkr file. Video transcoding and container conversion do not apply."}</p>
+                  {isGalleryAlbum ? !galleryItems ? (
                     <Button
                       variant="secondary"
                       className="mt-3 w-full"
@@ -546,7 +557,7 @@ export function NewDownloadPage() {
                         {filteredGalleryItems.length === 0 ? <p className="p-3 text-xs text-muted">No album files match this filter.</p> : null}
                       </div>
                     </div>
-                  )}
+                  ) : null}
                 </div>
               ) : isDirect ? (
                 <div className="border border-line bg-elevated p-3 text-sm text-muted">
@@ -699,9 +710,9 @@ export function NewDownloadPage() {
 
               {!isGallery && !isDirect ? <div className="border border-line bg-canvas p-3 text-xs text-muted"><span className="font-semibold text-ink">{selectedQuality?.label}</span> · {container.toUpperCase()} · {videoCodecPreference === "any" ? "automatic codec" : videoCodecPreference.toUpperCase()} {estimatedBytes ? `· approximately ${formatBytes(estimatedBytes)}` : "· size estimated during download"}<p className="mt-1">{selectedQuality?.description}{formatStrategy === "compatibility" ? " with broadly compatible codecs" : formatStrategy === "smallest" ? " prioritizing smaller streams" : ""}.</p></div> : null}
               <div className="sticky bottom-0 -mx-5 -mb-5 border-t border-line/70 bg-panel/95 p-5 backdrop-blur-xl">
-              <Button className="w-full" disabled={!destination || Boolean(!isGallery && !isDirect && filenameTemplateError) || starting || galleryItemsLoading || diskSpace?.sufficient === false || Boolean(isGallery && galleryItems && selectedGalleryItems.length === 0)} onClick={() => void submitDownload()}>
+              <Button className="w-full" disabled={!destination || Boolean(!isGallery && !isDirect && filenameTemplateError) || starting || Boolean(isGalleryAlbum && galleryItemsLoading) || diskSpace?.sufficient === false || Boolean(isGalleryAlbum && galleryItems && selectedGalleryItems.length === 0)} onClick={() => void submitDownload()}>
                 {starting ? <LoaderCircle className="animate-spin" size={17} /> : !isGallery && audioOnly ? <Music2 size={17} /> : <Download size={17} />}
-                {starting ? "Adding to queue" : isGallery && galleryItems && (galleryItems.truncated || selectedGalleryItems.length !== galleryItems.items.length) ? `Download ${selectedGalleryItems.length} selected` : isGallery ? "Download album" : "Download"}
+                {starting ? "Adding to queue" : isGalleryAlbum && galleryItems && (galleryItems.truncated || selectedGalleryItems.length !== galleryItems.items.length) ? `Download ${selectedGalleryItems.length} selected` : isGalleryAlbum ? "Download album" : isGallery ? "Download original" : "Download"}
               </Button>
               <p className="mt-2 text-center text-[11px] text-muted">Cancellation keeps resumable partial data by default.</p>
               </div>
@@ -853,6 +864,54 @@ function defaultBatchOptions(
     outputConflictPolicy,
     gallerySelection: null,
   };
+}
+
+function DownloadCapabilityPreview({
+  analysis,
+  isGalleryAlbum,
+  accessConfigured,
+}: {
+  analysis: MediaAnalysis;
+  isGalleryAlbum: boolean;
+  accessConfigured: boolean;
+}) {
+  const gallery = analysis.engine === "galleryDl";
+  const direct = analysis.engine === "directHttp";
+  const rows = gallery ? [
+    ["Engine", "gallery-dl"],
+    ["File handling", "Original files; no conversion"],
+    ["Resume", "Partial transfers are retained"],
+    ["Recovery", isGalleryAlbum ? "Failed album files can be retried separately" : "Single original file"],
+  ] : direct ? [
+    ["Engine", "aria2c or curl fallback"],
+    ["File handling", "Transferred unchanged"],
+    ["Resume", "HTTP range resume when supported"],
+    ["Limitation", "No extraction or conversion"],
+  ] : [
+    ["Engine", "yt-dlp with FFmpeg"],
+    ["File handling", "Selected streams may be merged or converted"],
+    ["Resume", "Engine-managed partial downloads"],
+    ["Limitation", "Availability depends on the site extractor"],
+  ];
+  rows.push([
+    "Access",
+    accessConfigured
+      ? "Configured cookies or proxy will be applied when supported"
+      : "Public access only; protected media may require Settings configuration",
+  ]);
+  return (
+    <div className="rounded-[8px] border border-line/70 bg-canvas/50 p-3">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-ink">Compatibility preview</span>
+        <span className={`text-[10px] font-medium ${accessConfigured ? "text-emerald-400" : "text-muted"}`}>
+          {accessConfigured ? "Site access configured" : "No cookies or proxy configured"}
+        </span>
+      </div>
+      <dl className="grid gap-1.5 text-xs">
+        {rows.map(([label, value]) => <div key={label} className="grid grid-cols-[92px_1fr] gap-2"><dt className="text-muted">{label}</dt><dd className="text-ink">{value}</dd></div>)}
+      </dl>
+    </div>
+  );
 }
 
 const SPONSORBLOCK_CATEGORIES: { id: SponsorBlockCategory; label: string }[] = [

@@ -15,6 +15,7 @@ export function DownloadsPage({ queueOnly = false }: { queueOnly?: boolean }) {
   const cancel = useAppStore((state) => state.cancelDownload);
   const dismissDownloads = useAppStore((state) => state.dismissDownloads);
   const retry = useAppStore((state) => state.retryDownload);
+  const retryFailedGalleryFiles = useAppStore((state) => state.retryFailedGalleryFiles);
   const pause = useAppStore((state) => state.pauseDownload);
   const resume = useAppStore((state) => state.resumeDownload);
   const queue = useAppStore((state) => state.queue);
@@ -114,6 +115,7 @@ export function DownloadsPage({ queueOnly = false }: { queueOnly?: boolean }) {
             job={job}
             onCancel={() => void cancel(job.id)}
             onRetry={() => void retry(job.id)}
+            onRetryFailedGalleryFiles={() => void retryFailedGalleryFiles(job.id)}
             onPause={() => void pause(job.id)}
             onResume={() => void resume(job.id)}
             pauseSupported={queue.pauseSupported || !queue.activeJobIds.includes(job.id)}
@@ -137,10 +139,11 @@ export function DownloadsPage({ queueOnly = false }: { queueOnly?: boolean }) {
   );
 }
 
-function DownloadRow({ job, onCancel, onRetry, onPause, onResume, onReveal, onDismiss, selected, onSelect, pauseSupported, queueControls }: {
+function DownloadRow({ job, onCancel, onRetry, onRetryFailedGalleryFiles, onPause, onResume, onReveal, onDismiss, selected, onSelect, pauseSupported, queueControls }: {
   job: DownloadJob;
   onCancel: () => void;
   onRetry: () => void;
+  onRetryFailedGalleryFiles: () => void;
   onPause: () => void;
   onResume: () => void;
   pauseSupported: boolean;
@@ -151,6 +154,7 @@ function DownloadRow({ job, onCancel, onRetry, onPause, onResume, onReveal, onDi
   queueControls?: { canMoveUp: boolean; canMoveDown: boolean; moveUp: () => void; moveDown: () => void; moveTo: (jobId: string, targetIndex: number) => void; targetIndex: number };
 }) {
   const retryScheduled = job.currentOperation.toLocaleLowerCase().includes("automatic retry");
+  const failedGalleryFiles = job.galleryFiles.filter((file) => file.state === "failed");
   const canCancel = !terminalStates.has(job.state) || retryScheduled;
   const progressTone = job.state === "Failed" ? "red" : job.state === "Completed" ? "green" : job.currentOperation.toLocaleLowerCase().includes("retry") ? "amber" : "blue";
   return (
@@ -198,12 +202,13 @@ function DownloadRow({ job, onCancel, onRetry, onPause, onResume, onReveal, onDi
               <Button variant="danger" className="h-8 px-2" onClick={onCancel} aria-label="Stop and keep partial file"><Ban size={14} /></Button>
             </>
           ) : job.state === "Failed" || job.state === "Cancelled" ? (
-            <><Button variant="ghost" className="h-8 px-2.5" onClick={onRetry}><RotateCcw size={14} /> Retry</Button><Button variant="danger" className="h-8 px-2" onClick={onDismiss} aria-label="Remove download record"><Trash2 size={14} /></Button></>
+            <><Button variant="ghost" className="h-8 px-2.5" onClick={failedGalleryFiles.length > 0 ? onRetryFailedGalleryFiles : onRetry}><RotateCcw size={14} /> {failedGalleryFiles.length > 0 ? `Retry ${failedGalleryFiles.length} failed` : "Retry"}</Button><Button variant="danger" className="h-8 px-2" onClick={onDismiss} aria-label="Remove download record"><Trash2 size={14} /></Button></>
           ) : job.state === "Completed" ? (
             <><Button variant="ghost" className="h-8 px-2.5" onClick={onReveal}><FolderOpen size={14} /> Reveal</Button><Button variant="danger" className="h-8 px-2" onClick={onDismiss} aria-label="Remove download record"><Trash2 size={14} /></Button></>
           ) : null}
       </div>
       <div className="col-span-5">
+        {job.galleryFiles.length > 0 ? <GalleryFileProgressList job={job} /> : null}
         {job.diagnostics.length > 0 ? (
           <details className="text-xs text-muted">
             <summary className="cursor-pointer select-none font-medium text-muted hover:text-ink">Engine log ({job.diagnostics.length})</summary>
@@ -212,6 +217,33 @@ function DownloadRow({ job, onCancel, onRetry, onPause, onResume, onReveal, onDi
         ) : null}
       </div>
     </article>
+  );
+}
+
+function GalleryFileProgressList({ job }: { job: DownloadJob }) {
+  const completed = job.galleryFiles.filter((file) => file.state === "completed").length;
+  const skipped = job.galleryFiles.filter((file) => file.state === "skipped").length;
+  const failed = job.galleryFiles.filter((file) => file.state === "failed").length;
+  return (
+    <details className="mb-2 text-xs text-muted">
+      <summary className="cursor-pointer select-none font-medium text-muted hover:text-ink">
+        File progress ({completed} completed{skipped > 0 ? `, ${skipped} skipped` : ""}{failed > 0 ? `, ${failed} failed` : ""})
+      </summary>
+      <div className="mt-2 max-h-52 divide-y divide-line/60 overflow-auto rounded-[7px] border border-line/70 bg-canvas/55">
+        {job.galleryFiles.map((file) => (
+          <div key={file.index} className="grid grid-cols-[36px_minmax(0,1fr)_90px] items-center gap-2 px-3 py-2">
+            <span className="number-font text-[10px] text-muted">#{file.index}</span>
+            <div className="min-w-0">
+              <p className="truncate text-ink">{file.filename}</p>
+              <p className="mt-0.5 text-[10px]">{file.sizeBytes ? formatBytes(file.sizeBytes) : "Size unknown"}</p>
+            </div>
+            <span className={`text-right text-[10px] font-semibold uppercase tracking-[0.04em] ${file.state === "failed" ? "text-red-400" : file.state === "completed" ? "text-emerald-400" : file.state === "downloading" ? "text-accent" : "text-muted"}`}>
+              {file.state === "downloading" ? `${file.progressPercent.toFixed(0)}%` : file.state}
+            </span>
+          </div>
+        ))}
+      </div>
+    </details>
   );
 }
 
