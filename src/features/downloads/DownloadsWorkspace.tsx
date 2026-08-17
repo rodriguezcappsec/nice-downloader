@@ -25,8 +25,9 @@ function tabForView(view: ViewId): WorkspaceTab {
 export function DownloadsWorkspace({ sourceView }: { sourceView: ViewId }) {
   const [tab, setTab] = useState<WorkspaceTab>(() => tabForView(sourceView));
   const setView = useAppStore((state) => state.setView);
-  const jobs = useAppStore((state) => Object.values(state.jobs));
+  const jobMap = useAppStore((state) => state.jobs);
   const historyCount = useAppStore((state) => state.history.length);
+  const jobs = useMemo(() => Object.values(jobMap), [jobMap]);
 
   useEffect(() => {
     if (sourceView === "queue" || sourceView === "history") setTab(tabForView(sourceView));
