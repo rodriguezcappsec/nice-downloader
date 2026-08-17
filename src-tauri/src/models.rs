@@ -2282,6 +2282,8 @@ pub struct DownloadJob {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub scheduled_for: Option<DateTime<Utc>>,
 }
 
 impl DownloadJob {
@@ -2351,6 +2353,7 @@ impl DownloadJob {
             created_at: now,
             updated_at: now,
             completed_at: None,
+            scheduled_for: request.scheduled_for,
         }
     }
 }

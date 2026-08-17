@@ -589,14 +589,15 @@ export function NewDownloadPage() {
                   <Field label="Quality">
                     <div className="flex flex-wrap gap-1 rounded-[8px] border border-line/50 bg-canvas/70 p-1">
                       {analysis.qualityOptions.map((quality) => (
-                        <button key={quality.id} type="button" onClick={() => setQualityId(quality.id)} className={`h-9 rounded-[6px] px-3 text-xs font-semibold transition ${quality.id === qualityId ? "bg-accent text-[#081426] shadow-control" : "text-muted hover:bg-elevated hover:text-ink"}`}>{quality.label}</button>
+                        <button key={quality.id} type="button" onClick={() => setQualityId(quality.id)} className={`h-9 rounded-[6px] px-3 text-xs font-semibold transition ${quality.id === qualityId ? "bg-accent text-accentInk shadow-control" : "text-muted hover:bg-elevated hover:text-ink"}`}>{quality.label}</button>
                       ))}
                     </div>
                   </Field>
 
-                  <Field label="Recommendation">
-                    <div className="grid grid-cols-2 gap-1 rounded-[8px] border border-line/50 bg-canvas/70 p-1">
-                      {(["recommended", "compatibility", "quality", "smallest"] as const).map((strategy) => <button key={strategy} type="button" onClick={() => setFormatStrategy(strategy)} className={`h-9 rounded px-2 text-xs font-medium capitalize ${formatStrategy === strategy ? "bg-elevated text-ink shadow-sm" : "text-muted hover:text-ink"}`}>{strategy === "compatibility" ? "Best compatibility" : strategy === "quality" ? "Best quality" : strategy === "smallest" ? "Smallest file" : "Recommended"}</button>)}
+                  <Field label="Download intention" hint="Start with the outcome you want. Codec and container controls remain available below.">
+                    <div className="grid grid-cols-2 gap-1 rounded-[10px] border border-line/50 bg-canvas/70 p-1 sm:grid-cols-3">
+                      {(["recommended", "quality", "compatibility", "smallest"] as const).map((strategy) => <button key={strategy} type="button" onClick={() => { const videoChoice = analysis.qualityOptions.find((option) => option.kind !== "audioOnly"); if (videoChoice) setQualityId(videoChoice.id); setFormatStrategy(strategy); }} className={`min-h-11 rounded-[7px] px-2 text-xs font-semibold ${!audioOnly && formatStrategy === strategy ? "bg-elevated text-ink shadow-control" : "text-muted hover:bg-elevated/60 hover:text-ink"}`}>{strategy === "compatibility" ? "Compatibility" : strategy === "quality" ? "Best Quality" : strategy === "smallest" ? "Smallest" : "Recommended"}</button>)}
+                      <button type="button" onClick={() => { const audioChoice = analysis.qualityOptions.find((option) => option.kind === "audioOnly"); if (audioChoice) setQualityId(audioChoice.id); }} className={`min-h-11 rounded-[7px] px-2 text-xs font-semibold ${audioOnly ? "bg-elevated text-ink shadow-control" : "text-muted hover:bg-elevated/60 hover:text-ink"}`}>Audio Only</button>
                     </div>
                   </Field>
 

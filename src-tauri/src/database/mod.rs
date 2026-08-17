@@ -394,10 +394,12 @@ impl Database {
         })?;
         let mut jobs = Vec::new();
         for row in rows {
-            let (job, request_json) = row?;
-            let request = serde_json::from_str(&request_json).map_err(|error| {
-                AppError::internal("could not deserialize a persisted download request", error)
-            })?;
+            let (mut job, request_json) = row?;
+            let request: StartDownloadRequest =
+                serde_json::from_str(&request_json).map_err(|error| {
+                    AppError::internal("could not deserialize a persisted download request", error)
+                })?;
+            job.scheduled_for = request.scheduled_for;
             jobs.push((job, request));
         }
         Ok(jobs)
@@ -1034,10 +1036,18 @@ impl Database {
                     total_bytes, speed_bytes_per_second, eta_seconds, selected_quality,
                     output_format, destination, output_path, current_operation, error,
                     created_at, updated_at, completed_at, diagnostics_json, attempt_count,
-                    retry_of_id, gallery_files_json
+                retry_of_id, gallery_files_json, request_json
              FROM downloads ORDER BY updated_at DESC LIMIT 100",
         )?;
-        let rows = statement.query_map([], job_from_row)?;
+        let rows = statement.query_map([], |row| {
+            let mut job = job_from_row(row)?;
+            let request_json: Option<String> = row.get(23)?;
+            job.scheduled_for = request_json
+                .as_deref()
+                .and_then(|value| serde_json::from_str::<StartDownloadRequest>(value).ok())
+                .and_then(|request| request.scheduled_for);
+            Ok(job)
+        })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
     }
 
@@ -9291,6 +9301,7 @@ fn job_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DownloadJob> {
         created_at: timestamp_or_epoch(created_at),
         updated_at: timestamp_or_epoch(updated_at),
         completed_at: completed_at.map(timestamp_or_epoch),
+        scheduled_for: None,
     })
 }
 
@@ -9602,6 +9613,7 @@ mod tests {
             created_at: now,
             updated_at: now,
             completed_at: Some(now),
+            scheduled_for: None,
         };
         std::fs::write(directory.path().join("video.mp4"), b"fixture").expect("media fixture");
         let options = DownloadOptions {

@@ -31,6 +31,7 @@ import {
   Library,
   LoaderCircle,
   MonitorPlay,
+  MoreHorizontal,
   Pause,
   Play,
   Database,
@@ -42,6 +43,8 @@ import {
   RotateCw,
   Save,
   Search,
+  ScanSearch,
+  Share2,
   Square,
   CheckSquare2,
   Star,
@@ -125,7 +128,9 @@ const EMPTY_LIBRARY_FACETS: LibraryFacets = { totalItems: 0, availableItems: 0, 
 type LiveAnnouncement = { signature: string; message: string; assertive?: boolean };
 type TranscriptSeekRequest = { id: number; itemId: string; seconds: number };
 
-export function LibraryPage({ active = true }: { active?: boolean }) {
+type LibraryWorkspaceSection = "home" | "all" | "videos" | "images" | "playlists" | "watchLater" | "private";
+
+export function LibraryPage({ active = true, workspace = "library" }: { active?: boolean; workspace?: "home" | "library" }) {
   const setError = useAppStore((state) => state.setError);
   const setNotice = useAppStore((state) => state.setNotice);
   const currentView = useAppStore((state) => state.view);
@@ -203,6 +208,7 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
   const [collectionFilter, setCollectionFilter] = useState(initialWorkspace.collectionFilter);
   const [favoriteOnly, setFavoriteOnly] = useState(initialWorkspace.favoriteOnly);
   const [moreFiltersOpen, setMoreFiltersOpen] = useState(false);
+  const [workspaceSection, setWorkspaceSection] = useState<LibraryWorkspaceSection>(workspace === "home" ? "home" : "all");
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
   const [bulkMoveOpen, setBulkMoveOpen] = useState(false);
@@ -947,7 +953,7 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
       api.queryLibraryItems(homeRequest("video")),
       api.queryLibraryItems(homeRequest("image")),
       api.listContinueWatching(12),
-      api.listLibraryWatchLater(12),
+      api.listLibraryWatchLater(24),
       api.listRecentlyWatched(12),
     ]).then(([recent, videos, images, continuing, savedForLater, watched]) => {
       if (!disposed) {
@@ -1022,7 +1028,7 @@ const privateMediaIds = useMemo(() => {
   const sites = facets.sites;
   const themes = facets.themes;
   const folderOptions = useMemo(() => buildFolderOptions(facets.folders, sources, sourceFilter), [facets.folders, sourceFilter, sources]);
-  const featured = recentResult.items[0];
+  const featured = continueWatching[0]?.item || watchLater[0] || recentResult.items[0];
   const videos = videoResult.items;
   const images = imageResult.items;
   const resultPageCount = queryResult.totalPages;
@@ -1430,6 +1436,30 @@ const resultTitle = search.trim()
     setPrivacyOnly(false);
     setSort("recent");
   }
+
+  function openWorkspaceSection(section: LibraryWorkspaceSection) {
+    setWorkspaceSection(section);
+    setActivePlaylist(null);
+    setActivePlaylistItems([]);
+    setSearch("");
+    resetFilters();
+    setResultPage(1);
+    if (section === "home") {
+      setView("home");
+      return;
+    }
+    setView("library");
+    if (section === "videos") setMediaFilter("video");
+    if (section === "images") setMediaFilter("image");
+    if (section === "private") setPrivacyOnly(true);
+  }
+
+  const previousWorkspace = useRef(workspace);
+  useEffect(() => {
+    if (!active || previousWorkspace.current === workspace) return;
+    previousWorkspace.current = workspace;
+    openWorkspaceSection(workspace === "home" ? "home" : "all");
+  }, [active, workspace]);
 
   function applySmartView(view: LibrarySmartView) {
     const query = view.query;
@@ -1896,10 +1926,20 @@ const resultTitle = search.trim()
       <><div className={`${active && !viewImage && (!watchItem || compactPlayer) ? "" : "hidden"} workspace-enter mx-auto w-full max-w-[1560px] px-8 pb-16 pt-7 xl:px-11`}>
       <LibraryLiveRegions polite={libraryAnnouncement} assertive={libraryAlert} />
         <header className="sticky top-0 z-10 -mx-3 flex items-center gap-6 border-b border-line/30 bg-canvas/[0.88] px-3 py-4 backdrop-blur-xl">
-          <div className="min-w-fit"><p className="mb-1 text-[9px] font-semibold tracking-[0.1em] text-accent">Screening room</p><h1 className="text-[30px] font-semibold leading-none tracking-[-0.05em]">Your library</h1><p className="mt-1.5 text-[11px] text-muted">{availableItemCount} available item{availableItemCount === 1 ? "" : "s"} across {sources.length} source{sources.length === 1 ? "" : "s"}{missingItemCount > 0 ? <button className="ml-1 font-medium text-amber-300/85 hover:text-amber-200" onClick={() => { resetFilters(); setAvailabilityFilter("missing"); }}>· {missingItemCount} missing</button> : null}</p></div>
-        <label className="relative mx-auto w-full max-w-2xl"><span className="sr-only">Search library</span><Search className="absolute left-4 top-3.5 text-muted" size={17} /><Input id="library-search" className="h-12 rounded-[12px] bg-panel/85 pl-11 pr-4 text-sm shadow-control" value={search} onChange={(event) => { setActivePlaylist(null); setSearch(event.target.value); }} placeholder="Search your videos, images, tags, and folders" /></label>
+          <div className="min-w-fit"><p className="mb-1 text-[11px] font-semibold tracking-[0.1em] text-accent">Screening room</p><h1 className="text-[30px] font-semibold leading-none tracking-[-0.05em]">Your library</h1><p className="mt-1.5 text-[12px] text-muted">{availableItemCount} available item{availableItemCount === 1 ? "" : "s"} across {sources.length} source{sources.length === 1 ? "" : "s"}{missingItemCount > 0 ? <button className="ml-1 font-medium text-amber-300/85 hover:text-amber-200" onClick={() => { resetFilters(); setAvailabilityFilter("missing"); }}>· {missingItemCount} missing</button> : null}</p></div>
+        <label className="relative mx-auto w-full max-w-2xl"><span className="sr-only">Search library</span><Search className="absolute left-4 top-3.5 text-muted" size={17} /><Input id="library-search" className="h-12 rounded-[12px] bg-panel/85 pl-11 pr-4 text-sm shadow-control" value={search} onChange={(event) => { setActivePlaylist(null); setWorkspaceSection("all"); setView("library"); setSearch(event.target.value); }} placeholder="Search titles, creators, tags, transcripts, and folders" /></label>
         <div className="flex shrink-0 items-center gap-1"><div className="flex rounded-[8px] bg-elevated/70 p-0.5" role="group" aria-label="Library view"><button className={`grid size-8 place-items-center rounded-[6px] transition ${viewMode === "grid" ? "bg-panel text-ink shadow-control" : "text-muted hover:text-ink"}`} onClick={() => changeViewMode("grid")} aria-pressed={viewMode === "grid"} aria-label="Grid view"><LayoutGrid size={15} /></button><button className={`grid size-8 place-items-center rounded-[6px] transition ${viewMode === "list" ? "bg-panel text-ink shadow-control" : "text-muted hover:text-ink"}`} onClick={() => changeViewMode("list")} aria-pressed={viewMode === "list"} aria-label="List view"><List size={15} /></button></div><Button variant={selectionMode ? "secondary" : "ghost"} onClick={() => selectionMode ? closeSelectionMode() : setSelectionMode(true)}>{selectionMode ? <X size={16} /> : <CheckSquare2 size={16} />} {selectionMode ? "Done" : "Select"}</Button><Button variant={changes.length > 0 ? "secondary" : "ghost"} onClick={() => { setManageOpen(true); void api.listLibraryFileOperations().then(setFileOperations).catch((error) => setError(normalizeError(error))); }}><Settings2 size={16} /> Manage{changes.length > 0 ? <span className="number-font rounded bg-accent/15 px-1.5 py-0.5 text-[10px] text-accent">{changes.length}</span> : null}</Button></div>
       </header>
+
+      <nav className="library-tabs mt-4 flex min-w-0 items-center gap-1 overflow-x-auto border-b border-line/50 pb-2" aria-label="Library sections">
+        <LibraryTab active={workspaceSection === "home"} onClick={() => openWorkspaceSection("home")}>Home</LibraryTab>
+        <LibraryTab active={workspaceSection === "all"} onClick={() => openWorkspaceSection("all")}>All Media</LibraryTab>
+        <LibraryTab active={workspaceSection === "videos"} onClick={() => openWorkspaceSection("videos")}><Film size={14} /> Videos</LibraryTab>
+        <LibraryTab active={workspaceSection === "images"} onClick={() => openWorkspaceSection("images")}><ImageIcon size={14} /> Images</LibraryTab>
+        <LibraryTab active={workspaceSection === "playlists"} onClick={() => openWorkspaceSection("playlists")}><ListPlus size={14} /> Playlists</LibraryTab>
+        <LibraryTab active={workspaceSection === "watchLater"} onClick={() => openWorkspaceSection("watchLater")}><Bookmark size={14} /> Watch Later</LibraryTab>
+        {privacyStatus?.configured && !privacyStatus.locked ? <LibraryTab active={workspaceSection === "private"} onClick={() => openWorkspaceSection("private")}><Lock size={14} /> Private</LibraryTab> : null}
+      </nav>
 
       <div className="mt-3 flex items-center justify-end gap-2">
         <Button variant={privacyStatus?.configured ? "secondary" : "ghost"} onClick={() => { if (privacyStatus?.configured && !privacyStatus.locked) void api.lockLibraryPrivacy().then(setPrivacyStatus).catch((error) => setError(normalizeError(error))); else setView("settings"); }} title={privacyStatus?.locked ? "Unlock in Settings" : privacyStatus?.configured ? "Lock private media now" : "Set up Library privacy"}>
@@ -1909,6 +1949,7 @@ const resultTitle = search.trim()
         {folderFilter !== "all" && privacyStatus?.configured && !privacyStatus.locked ? <><Button variant="ghost" disabled={busy} onClick={() => void setCurrentFolderPrivacy(true)}><Lock size={14} /> Make current folder private</Button><Button variant="ghost" disabled={busy} onClick={() => void setCurrentFolderPrivacy(false)}>Remove folder privacy rule</Button></> : null}
       </div>
 
+      <div className={workspaceSection === "home" ? "hidden" : ""}>
       <section className="mt-3 flex flex-wrap items-center gap-2 border-y border-line/45 py-2.5" aria-label="Automatic collections">
         <span className="mr-1 inline-flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-muted"><Bookmark size={13} /> Automatic collections</span>
         {smartViews.length === 0 ? <span className="text-[11px] text-muted">Save the current filters as a collection that updates itself.</span> : smartViews.map((view) => <span key={view.id} className={`inline-flex items-center overflow-hidden rounded-[7px] border ${activeSmartViewId === view.id ? "border-accent/35 bg-accent/12 text-accent" : "border-line/70 bg-elevated/50 text-muted"}`}><button className="h-7 max-w-[220px] truncate px-2.5 text-[11px] font-medium hover:text-ink" onClick={() => applySmartView(view)} title={`Open ${view.name}`}>{view.name}</button><button className={`grid size-7 place-items-center border-l transition ${confirmDeleteSmartViewId === view.id ? "border-red-400/30 bg-red-400/10 text-red-300" : "border-line/60 hover:bg-panel hover:text-ink"}`} disabled={smartViewBusy} onClick={() => void deleteSmartView(view.id)} aria-label={confirmDeleteSmartViewId === view.id ? `Confirm removing ${view.name}` : `Remove ${view.name}`} title={confirmDeleteSmartViewId === view.id ? "Click again to confirm" : "Remove automatic collection"}>{confirmDeleteSmartViewId === view.id ? <Trash2 size={12} /> : <X size={12} />}</button></span>)}
@@ -1918,11 +1959,7 @@ const resultTitle = search.trim()
       {searchStatus && !searchStatus.consistent ? <div className="mt-3 flex items-center gap-3 border-l-2 border-amber-400/60 bg-amber-400/5 px-3 py-2 text-xs text-amber-100" role="alert"><span>Search index has {searchStatus.indexedItems.toLocaleString()} of {searchStatus.catalogItems.toLocaleString()} Library items.</span><Button variant="secondary" className="ml-auto h-8 text-xs" disabled={smartViewBusy} onClick={() => void rebuildSearchIndex()}>{smartViewBusy ? <LoaderCircle className="animate-spin" size={13} /> : <RotateCcw size={13} />} Rebuild search</Button></div> : null}
 
  <nav className="mt-5 flex flex-wrap items-center gap-2 rounded-panel bg-panel/55 p-2.5 shadow-control" aria-label="Library filters">
-        <FilterChip active={!isFiltered && !activePlaylist} onClick={() => { setActivePlaylist(null); setActivePlaylistItems([]); resetFilters(); }}>Home</FilterChip>
-        <FilterChip active={mediaFilter === "video"} onClick={() => setMediaFilter("video")}><Film size={14} /> Videos</FilterChip>
-      <FilterChip active={mediaFilter === "image"} onClick={() => setMediaFilter("image")}><ImageIcon size={14} /> Images</FilterChip>
       <FilterChip active={favoriteOnly} onClick={() => setFavoriteOnly((value) => !value)}><Heart size={14} fill={favoriteOnly ? "currentColor" : "none"} /> Favorites</FilterChip>
-      {privacyStatus?.configured && !privacyStatus.locked ? <FilterChip active={privacyOnly} onClick={() => { setActivePlaylist(null); setActivePlaylistItems([]); setPrivacyOnly((value) => !value); }}><Lock size={14} /> Private</FilterChip> : null}
       <span className="mx-1 h-6 w-px shrink-0 bg-line/70" />
         {sources.map((source) => <FilterChip key={source.id} active={sourceFilter === source.id} onClick={() => { const next = sourceFilter === source.id ? "all" : source.id; setSourceFilter(next); const selectedFolder = parseFolderFilter(folderFilter); if (next === "all" || selectedFolder?.sourceId !== next) { setFolderFilter("all"); setFolderScope("tree"); } }}><span className="grid size-5 place-items-center rounded-[5px] bg-accent/12 text-[10px] font-bold text-accent">{source.name.charAt(0).toLocaleUpperCase()}</span>{source.name}</FilterChip>)}
         {collections.map((collection) => <FilterChip key={collection.id} active={collectionFilter === collection.id} onClick={() => setCollectionFilter(collectionFilter === collection.id ? "all" : collection.id)}><ListPlus size={14} />{collection.name}</FilterChip>)}
@@ -1963,7 +2000,7 @@ const resultTitle = search.trim()
  }}
  />
 
- {debouncedSearch.length >= 2 ? <TranscriptSearchResults
+      {debouncedSearch.length >= 2 ? <TranscriptSearchResults
           query={debouncedSearch}
           matches={transcriptMatches}
           items={transcriptItems}
@@ -1975,9 +2012,10 @@ const resultTitle = search.trim()
             setSelectedItem(null);
             startWatching(item, null, match.startSeconds);
           }}
-        /> : null}
+      /> : null}
+      </div>
 
-        {activeMediaStack ? (
+      {activeMediaStack ? (
         <MediaStackWorkspace stack={activeMediaStack} items={activeMediaStackItems} loading={mediaStackLoading} onBack={closeMediaStack} onSelect={openDetails} onOpen={(item) => item.mediaKind === "video" ? startWatching(item, activeMediaStackItems.filter((candidate) => candidate.mediaKind === "video" && !candidate.missing)) : startViewingImage(item)} />
       ) : activePlaylist ? (
         <PlaylistWorkspace
@@ -1996,19 +2034,25 @@ const resultTitle = search.trim()
         <div className="mt-16 flex items-center justify-center gap-2 text-sm text-muted" role="status"><LoaderCircle className="animate-spin text-accent" size={17} /> Loading your library…</div>
       ) : facets.totalItems === 0 ? (
         <EmptyLibrary onAdd={() => { setManageOpen(true); openSourceForm(); }} />
-      ) : isFiltered || selectionMode ? (
+        ) : workspaceSection === "playlists" ? (
+          <PlaylistShelf playlists={playlists} onOpen={(playlist) => void openPlaylist(playlist)} onChanged={setPlaylists} />
+        ) : workspaceSection === "watchLater" ? (
+          <MediaSection title="Watch Later" subtitle={`${watchLater.length} saved video${watchLater.length === 1 ? "" : "s"}`} items={watchLater} sourceNames={sourceNames} onSelect={openDetails} privateItemIds={privateMediaIds} viewMode={viewMode} />
+        ) : workspaceSection !== "home" || isFiltered || selectionMode ? (
         <>{discoveryContext && !selectionMode ? <DiscoveryHeader kind={discoveryContext.kind} value={discoveryContext.value} totalItems={queryResult.totalItems} representative={queryResult.items[0]} onClear={() => discoveryContext.kind === "creator" ? setCreatorFilters([]) : setSeriesFilters([])} /> : null}<div id="library-results" className={`scroll-mt-24 transition-opacity ${queryLoading ? "opacity-55" : "opacity-100"}`} aria-busy={queryLoading}><MediaSection title={selectionMode ? "Select media" : resultTitle} subtitle={queryLoading ? "Updating results…" : queryResult.totalItems === 0 ? "No matching items" : selectionMode ? `${selectedIds.size} selected · showing ${resultStart + 1}–${resultEnd} of ${queryResult.totalItems}` : `Showing ${resultStart + 1}–${resultEnd} of ${queryResult.totalItems} matching item${queryResult.totalItems === 1 ? "" : "s"}`} items={items} sourceNames={sourceNames} onSelect={openDetails} selectionMode={selectionMode} selectedIds={selectedIds} onToggleSelection={toggleSelection} privateItemIds={privateMediaIds} viewMode={viewMode} /></div><LibraryPagination currentPage={currentResultPage} pageCount={resultPageCount} totalItems={queryResult.totalItems} onPageChange={changeResultPage} /></>
       ) : (
         <>
-          <MediaStackShelf stacks={mediaStacks} onOpen={(stack) => void openMediaStack(stack)} onChanged={setMediaStacks} />
-          <PlaylistShelf playlists={playlists} onOpen={(playlist) => void openPlaylist(playlist)} onChanged={setPlaylists} />
-          {featured ? <FeaturedMedia item={featured} sourceName={sourceLabel(featured, sourceNames)} privateMedia={privateMediaIds.has(featured.id)} onSelect={() => openDetails(featured)} onWatch={() => featured.mediaKind === "video" ? startWatching(featured) : startViewingImage(featured)} /> : null}
-          {continueWatching.length > 0 ? <MediaSection title="Continue watching" subtitle="Pick up where you left off" items={continueWatching.map((entry) => entry.item)} progress={continueProgress} sourceNames={sourceNames} onSelect={startWatching} privateItemIds={privateMediaIds} viewMode={viewMode} /> : null}
-          {watchLater.length > 0 ? <MediaSection title="Watch later" subtitle="Videos you saved for another time" items={watchLater} sourceNames={sourceNames} onSelect={startWatching} privateItemIds={privateMediaIds} viewMode={viewMode} /> : null}
-          {recentlyWatched.length > 0 ? <MediaSection title="Recently watched" subtitle="Your private playback history on this device" items={recentlyWatched.map((entry) => entry.item)} sourceNames={sourceNames} onSelect={startWatching} privateItemIds={privateMediaIds} viewMode={viewMode} /> : null}
-          <MediaSection title="Recently added" subtitle="The newest media across your folders" items={recentResult.items} sourceNames={sourceNames} onSelect={openDetails} privateItemIds={privateMediaIds} viewMode={viewMode} />
-          {videos.length > 0 ? <MediaSection title="Videos" subtitle={`${videoResult.totalItems} video${videoResult.totalItems === 1 ? "" : "s"} ready to watch`} items={videos} sourceNames={sourceNames} onSelect={openDetails} privateItemIds={privateMediaIds} viewMode={viewMode} /> : null}
-          {images.length > 0 ? <MediaSection title="Images" subtitle={`${imageResult.totalItems} image${imageResult.totalItems === 1 ? "" : "s"} in your catalog`} items={images} sourceNames={sourceNames} onSelect={openDetails} privateItemIds={privateMediaIds} viewMode={viewMode} /> : null}
+          {mediaStacks.length > 0 ? <MediaStackShelf stacks={mediaStacks} onOpen={(stack) => void openMediaStack(stack)} onChanged={setMediaStacks} /> : null}
+          {playlists.length > 0 ? <PlaylistShelf playlists={playlists} onOpen={(playlist) => void openPlaylist(playlist)} onChanged={setPlaylists} /> : null}
+
+          {!featured && mediaStacks.length === 0 && playlists.length === 0 && continueWatching.length === 0 && watchLater.length === 0 && recentlyWatched.length === 0 && recentResult.items.length === 0 && videos.length === 0 && images.length === 0 ? <HomeLibraryEmpty privateLocked={Boolean(privacyStatus?.configured && privacyStatus.locked)} onAction={() => privacyStatus?.configured && privacyStatus.locked ? setView("settings") : openWorkspaceSection("all")} /> : null}
+        {featured ? <FeaturedMedia item={featured} sourceName={sourceLabel(featured, sourceNames)} privateMedia={privateMediaIds.has(featured.id)} resumeProgress={continueProgress.get(featured.id)} initialWatchLater={watchLater.some((item) => item.id === featured.id)} onSelect={() => openDetails(featured)} onWatch={() => featured.mediaKind === "video" ? startWatching(featured) : startViewingImage(featured)} /> : null}
+          {continueWatching.length > 0 ? <MediaSection horizontal title="Continue watching" subtitle="Pick up where you left off" items={continueWatching.map((entry) => entry.item)} progress={continueProgress} sourceNames={sourceNames} onSelect={startWatching} onSeeAll={() => openWorkspaceSection("all")} privateItemIds={privateMediaIds} viewMode={viewMode} /> : null}
+          {watchLater.length > 0 ? <MediaSection horizontal title="Watch later" subtitle="Videos you saved for another time" items={watchLater} sourceNames={sourceNames} onSelect={startWatching} onSeeAll={() => openWorkspaceSection("watchLater")} privateItemIds={privateMediaIds} viewMode={viewMode} /> : null}
+          {recentlyWatched.length > 0 ? <MediaSection horizontal title="Recently watched" subtitle="Your private playback history on this device" items={recentlyWatched.map((entry) => entry.item)} sourceNames={sourceNames} onSelect={startWatching} privateItemIds={privateMediaIds} viewMode={viewMode} /> : null}
+          {recentResult.items.length > 0 ? <MediaSection horizontal title="Recently added" subtitle="The newest media across your folders" items={recentResult.items} sourceNames={sourceNames} onSelect={openDetails} onSeeAll={() => openWorkspaceSection("all")} privateItemIds={privateMediaIds} viewMode={viewMode} /> : null}
+          {videos.length > 0 ? <MediaSection horizontal title="Videos" subtitle={`${videoResult.totalItems} video${videoResult.totalItems === 1 ? "" : "s"} ready to watch`} items={videos} sourceNames={sourceNames} onSelect={openDetails} onSeeAll={() => openWorkspaceSection("videos")} privateItemIds={privateMediaIds} viewMode={viewMode} /> : null}
+          {images.length > 0 ? <MediaSection horizontal title="Images" subtitle={`${imageResult.totalItems} image${imageResult.totalItems === 1 ? "" : "s"} in your catalog`} items={images} sourceNames={sourceNames} onSelect={openDetails} onSeeAll={() => openWorkspaceSection("images")} privateItemIds={privateMediaIds} viewMode={viewMode} /> : null}
         </>
       )}
 
@@ -2088,6 +2132,10 @@ function FilterChip({ active, onClick, children }: { active: boolean; onClick: (
   return <button onClick={onClick} className={`flex h-9 shrink-0 items-center gap-2 rounded-[8px] px-3.5 text-xs font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70 ${active ? "bg-ink text-canvas" : "bg-elevated/70 text-muted hover:bg-elevated hover:text-ink"}`} aria-pressed={active}>{children}</button>;
 }
 
+function LibraryTab({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
+  return <button className={`relative flex h-10 shrink-0 items-center gap-2 rounded-[9px] px-3 text-[13px] font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70 ${active ? "bg-elevated/80 text-ink after:absolute after:inset-x-3 after:-bottom-[9px] after:h-0.5 after:rounded-full after:bg-accent" : "text-muted hover:bg-elevated/45 hover:text-ink"}`} onClick={onClick} aria-current={active ? "page" : undefined}>{children}</button>;
+}
+
 function ActiveFilterChip({ label, onRemove }: { label: string; onRemove: () => void }) {
   return <button className="inline-flex h-7 max-w-[260px] items-center gap-1.5 rounded-[7px] border border-accent/20 bg-accent/10 px-2.5 text-[11px] font-medium text-accent transition hover:border-accent/40 hover:bg-accent/15" onClick={onRemove} title={`Remove ${label}`}><span className="truncate">{label}</span><X size={12} aria-hidden="true" /><span className="sr-only">Remove filter</span></button>;
 }
@@ -2122,6 +2170,10 @@ function EmptyLibrary({ onAdd }: { onAdd: () => void }) {
   return <section className="ingest-card relative mt-8 min-h-[480px] overflow-hidden rounded-media border border-line/40 px-10 py-16"><div className="absolute -right-24 -top-28 size-[32rem] rounded-full bg-accent/8 blur-3xl" /><div className="relative max-w-xl"><div className="brand-mark relative mb-8 grid size-16 place-items-center rounded-[17px] bg-accent text-accentInk"><Play size={27} fill="currentColor" /></div><p className="text-[11px] font-semibold tracking-[0.08em] text-accent">Your private screening room</p><h2 className="mt-4 text-[44px] font-semibold leading-[1.01] tracking-[-0.06em] text-balance">Bring every video and image into one library.</h2><p className="mt-5 max-w-lg text-[14px] leading-6 text-muted">Add folders from this computer or an external drive. Nice Downloader indexes them in place, so your originals stay exactly where they are.</p><Button className="mt-8 h-11" onClick={onAdd}><FolderPlus size={17} /> Add your first folder</Button></div></section>;
 }
 
+function HomeLibraryEmpty({ privateLocked, onAction }: { privateLocked: boolean; onAction: () => void }) {
+  return <section className="ingest-card relative mt-7 min-h-[310px] overflow-hidden rounded-media border border-line/40 px-8 py-12"><div className="absolute -right-24 -top-36 size-[28rem] rounded-full bg-accent/8 blur-3xl" /><div className="relative max-w-xl"><div className="brand-mark mb-6 grid size-12 place-items-center rounded-[14px] bg-accent/12 text-accent">{privateLocked ? <Lock size={21} /> : <Library size={21} />}</div><p className="eyebrow">Your private media room</p><h2 className="mt-3 text-[32px] font-semibold leading-[1.08] tracking-[-0.045em] text-balance">{privateLocked ? "Your private shelves are locked." : "Your shelves are ready for something worth watching."}</h2><p className="mt-4 max-w-lg text-[13px] leading-6 text-muted">{privateLocked ? "Unlock the private library in Settings to restore its artwork, activity, search results, and recommendations." : "No available media matches the current library state. Browse the complete catalog to review filters, missing files, and indexed sources."}</p><Button className="mt-6 h-10" variant={privateLocked ? "secondary" : "primary"} onClick={onAction}>{privateLocked ? <Lock size={15} /> : <Library size={15} />} {privateLocked ? "Open privacy settings" : "Browse all media"}</Button></div></section>;
+}
+
 function TranscriptSearchResults({ query, matches, items, loading, status, rebuilding, onRebuild, onSelect }: { query: string; matches: LibraryTranscriptMatch[]; items: Map<string, LibraryItem>; loading: boolean; status: LibraryTranscriptIndexStatus | null; rebuilding: boolean; onRebuild: () => void; onSelect: (match: LibraryTranscriptMatch, item: LibraryItem) => void }) {
   return <section className="mt-5 overflow-hidden rounded-[11px] border border-line/60 bg-panel/45" aria-labelledby="transcript-results-title" aria-busy={loading || rebuilding}>
     <header className="flex flex-wrap items-center gap-3 border-b border-line/55 px-4 py-3"><span className="grid size-8 place-items-center rounded-[7px] bg-accent/10 text-accent"><Captions size={16} /></span><span className="min-w-0 flex-1"><h2 id="transcript-results-title" className="text-xs font-semibold">Spoken in your videos</h2><p className="mt-0.5 text-[10px] text-muted">Searches trusted local WebVTT subtitles · {status ? `${status.cueCount.toLocaleString()} cues in ${status.indexedItems.toLocaleString()} videos` : "index status unavailable"}</p></span><Button variant="ghost" className="h-8 text-xs" disabled={rebuilding} onClick={onRebuild}>{rebuilding ? <LoaderCircle className="animate-spin" size={13} /> : <RotateCcw size={13} />} {status?.cueCount ? "Refresh subtitles" : "Index subtitles"}</Button></header>
@@ -2129,8 +2181,25 @@ function TranscriptSearchResults({ query, matches, items, loading, status, rebui
   </section>;
 }
 
-function FeaturedMedia({ item, sourceName, privateMedia, onSelect, onWatch }: { item: LibraryItem; sourceName: string; privateMedia: boolean; onSelect: () => void; onWatch: () => void }) {
-  return <section className="panel-shadow relative mt-7 grid min-h-[350px] overflow-hidden rounded-media border border-line/35 bg-panel lg:grid-cols-[1.4fr_1fr]"><div className="absolute inset-0 scale-105 opacity-25 blur-[2px]"><MediaArtwork item={item} eager /></div><div className="absolute inset-0 bg-gradient-to-r from-canvas via-canvas/95 to-canvas/20" /><div className="relative z-[1] flex flex-col justify-end px-8 py-10 lg:px-11"><p className="text-[10px] font-semibold tracking-[0.09em] text-accent">Recently added</p>{privateMedia ? <p className="mt-3 inline-flex w-fit items-center gap-1 rounded-[5px] bg-elevated/85 px-2 py-1 text-[9px] font-semibold text-muted"><Lock size={11} /> Private</p> : null}<h2 className="mt-3 max-w-2xl text-[38px] font-semibold leading-[1.04] tracking-[-0.052em] text-balance">{item.title}</h2><p className="mt-3 text-sm text-muted">{sourceName}{item.durationSeconds != null ? ` · ${formatDuration(item.durationSeconds)}` : ""} · {new Date(item.addedAt).toLocaleDateString()}</p>{item.mediaKind === "video" ? <div className="mt-4"><EmbeddedCompatibilityLabel item={item} variant="badge" /></div> : null}<div className="mt-7 flex gap-2"><Button onClick={onWatch}><Play size={16} fill="currentColor" /> {item.mediaKind === "image" ? "View image" : "Watch"}</Button><Button variant="secondary" onClick={onSelect}>Details</Button></div></div><button className="group relative z-[1] m-7 hidden overflow-hidden rounded-[15px] border border-white/10 bg-elevated shadow-[0_30px_80px_rgb(0_0_0/0.4)] lg:block" onClick={onWatch} aria-label={`Open ${item.title}`}><MediaArtwork item={item} eager /><span className="absolute inset-0 grid place-items-center bg-black/0 transition duration-300 group-hover:bg-black/25"><span className="grid size-14 scale-90 place-items-center rounded-full bg-white/90 text-black opacity-0 shadow-xl transition duration-300 group-hover:scale-100 group-hover:opacity-100"><Play size={22} fill="currentColor" /></span></span></button></section>;
+function FeaturedMedia({ item, sourceName, privateMedia, resumeProgress, initialWatchLater, onSelect, onWatch }: { item: LibraryItem; sourceName: string; privateMedia: boolean; resumeProgress?: number; initialWatchLater: boolean; onSelect: () => void; onWatch: () => void }) {
+  const setError = useAppStore((state) => state.setError);
+  const [watchLater, setWatchLater] = useState(initialWatchLater);
+  const [saving, setSaving] = useState(false);
+  async function toggleWatchLater() {
+    if (saving || item.mediaKind !== "video") return;
+    setSaving(true);
+    try {
+      const state = await api.setLibraryWatchLater(item.id, !watchLater);
+      setWatchLater(state.watchLater);
+      window.dispatchEvent(new Event("nice-downloader:library-watch-state"));
+    } catch (error) {
+      setError(normalizeError(error));
+    } finally {
+      setSaving(false);
+    }
+  }
+  const resumable = item.mediaKind === "video" && resumeProgress != null && resumeProgress > 0;
+  return <section className="featured-media panel-shadow relative mt-6 grid min-h-[330px] max-h-[420px] overflow-hidden rounded-media border border-line/35 bg-panel lg:grid-cols-[1.35fr_1fr]"><div className="absolute inset-0 scale-105 opacity-30 blur-[2px]"><MediaArtwork item={item} eager /></div><div className="absolute inset-0 bg-gradient-to-r from-canvas via-canvas/95 to-canvas/25" /><div className="relative z-[1] flex flex-col justify-end px-8 py-8 lg:px-10"><p className="eyebrow">{resumable ? "Continue watching" : watchLater ? "From Watch Later" : "Featured from your library"}</p><div className="mt-3 flex flex-wrap items-center gap-2">{privateMedia ? <span className="inline-flex h-6 items-center gap-1 rounded-[6px] bg-elevated/85 px-2 text-[11px] font-semibold text-muted"><Lock size={11} /> Private</span> : null}<span className="rounded-[6px] bg-elevated/75 px-2 py-1 text-[11px] text-muted">{item.mediaKind === "image" ? "Image" : "Video"}</span></div><h2 className="mt-3 max-w-2xl text-[clamp(1.8rem,3.1vw,2.75rem)] font-semibold leading-[1.03] tracking-[-0.052em] text-balance">{item.title}</h2><p className="mt-3 text-[13px] text-muted">{sourceName}{item.durationSeconds != null ? ` · ${formatDuration(item.durationSeconds)}` : ""} · {new Date(item.addedAt).toLocaleDateString()}</p>{item.mediaKind === "video" ? <div className="mt-3 opacity-80"><EmbeddedCompatibilityLabel item={item} variant="badge" /></div> : null}{resumable ? <div className="mt-4 max-w-xl"><div className="mb-1.5 flex items-center justify-between text-[11px] text-muted"><span>Resume progress</span><span className="number-font">{Math.round(resumeProgress)}%</span></div><div className="h-1.5 overflow-hidden rounded-full bg-elevated"><div className="h-full rounded-full bg-accent" style={{ width: `${resumeProgress}%` }} /></div></div> : null}<div className="mt-6 flex flex-wrap gap-2"><Button onClick={onWatch}><Play size={16} fill="currentColor" /> {item.mediaKind === "image" ? "View" : resumable ? "Resume" : "Watch"}</Button><Button variant="secondary" onClick={onSelect}>Details</Button>{item.mediaKind === "video" ? <Button variant="ghost" disabled={saving} onClick={() => void toggleWatchLater()}><Bookmark size={15} fill={watchLater ? "currentColor" : "none"} /> {watchLater ? "Saved" : "Watch Later"}</Button> : null}</div></div><button className="group relative z-[1] m-6 hidden overflow-hidden rounded-[16px] border border-white/10 bg-elevated shadow-[0_30px_80px_rgb(0_0_0/0.4)] lg:block" onClick={onWatch} aria-label={`Open ${item.title}`}><MediaArtwork item={item} eager /><span className="absolute inset-0 grid place-items-center bg-black/0 transition duration-300 group-hover:bg-black/25 group-focus-visible:bg-black/25"><span className="grid size-14 scale-90 place-items-center rounded-full bg-white/90 text-black opacity-0 shadow-xl transition duration-300 group-hover:scale-100 group-hover:opacity-100 group-focus-visible:scale-100 group-focus-visible:opacity-100"><Play size={22} fill="currentColor" /></span></span></button></section>;
 }
 
 function MediaStackShelf({ stacks, onOpen, onChanged }: { stacks: LibraryMediaStack[]; onOpen: (stack: LibraryMediaStack) => void; onChanged: (stacks: LibraryMediaStack[]) => void }) {
@@ -2279,13 +2348,23 @@ function PlaylistWorkspace({ playlist, items, loading, busy, sourceNames, onBack
   </section>;
 }
 
-function MediaSection({ title, subtitle, items, sourceNames, onSelect, progress, selectionMode = false, selectedIds = new Set(), onToggleSelection, privateItemIds = new Set(), viewMode = "grid" }: { title: string; subtitle: string; items: LibraryItem[]; sourceNames: Map<string, string>; onSelect: (item: LibraryItem) => void; progress?: Map<string, number>; selectionMode?: boolean; selectedIds?: Set<string>; onToggleSelection?: (id: string) => void; privateItemIds?: Set<string>; viewMode?: "grid" | "list" }) {
-  return <section className="mt-10" aria-labelledby={`library-${title.replace(/\W+/g, "-").toLocaleLowerCase()}`}><div className="mb-4 flex items-end justify-between gap-4"><div><h2 id={`library-${title.replace(/\W+/g, "-").toLocaleLowerCase()}`} className="text-[20px] font-semibold tracking-[-0.03em]">{title}</h2><p className="mt-1 text-[12px] text-muted">{subtitle}</p></div></div>{items.length > 0 ? <div className={viewMode === "grid" ? "grid gap-x-4 gap-y-7 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4" : "grid gap-2"}>{items.map((item) => <MediaCard key={item.id} item={item} sourceName={sourceLabel(item, sourceNames)} progress={progress?.get(item.id)} selected={selectedIds.has(item.id)} selectionMode={selectionMode} privateMedia={privateItemIds.has(item.id)} initialWatchLater={title === "Watch later"} viewMode={viewMode} onSelect={() => selectionMode ? onToggleSelection?.(item.id) : onSelect(item)} />)}</div> : <div className="border border-dashed border-line/70 px-6 py-12 text-center text-sm text-muted">Nothing matches these filters.</div>}</section>;
+function MediaSection({ title, subtitle, items, sourceNames, onSelect, onSeeAll, progress, horizontal = false, selectionMode = false, selectedIds = new Set(), onToggleSelection, privateItemIds = new Set(), viewMode = "grid" }: { title: string; subtitle: string; items: LibraryItem[]; sourceNames: Map<string, string>; onSelect: (item: LibraryItem) => void; onSeeAll?: () => void; progress?: Map<string, number>; horizontal?: boolean; selectionMode?: boolean; selectedIds?: Set<string>; onToggleSelection?: (id: string) => void; privateItemIds?: Set<string>; viewMode?: "grid" | "list" }) {
+  const shelfRef = useRef<HTMLDivElement | null>(null);
+  const shelf = horizontal && viewMode === "grid" && !selectionMode;
+  function moveShelf(direction: -1 | 1) {
+    const element = shelfRef.current;
+    if (!element) return;
+    const reduced = document.documentElement.classList.contains("reduce-motion") || window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    element.scrollBy({ left: direction * Math.max(320, element.clientWidth * 0.72), behavior: reduced ? "auto" : "smooth" });
+  }
+  const headingId = `library-${title.replace(/\W+/g, "-").toLocaleLowerCase()}`;
+  return <section className="mt-10" aria-labelledby={headingId}><div className="mb-4 flex items-end justify-between gap-4"><div><h2 id={headingId} className="text-[21px] font-semibold tracking-[-0.035em]">{title}</h2><p className="mt-1 text-[12px] text-muted">{subtitle}</p></div><div className="flex items-center gap-2">{onSeeAll ? <button className="h-9 rounded-control px-3 text-[12px] font-semibold text-muted transition hover:bg-elevated hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70" onClick={onSeeAll}>See all</button> : null}{shelf && items.length > 1 ? <div className="flex gap-1"><button className="grid size-9 place-items-center rounded-full bg-elevated/70 text-muted hover:bg-elevated hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70" onClick={() => moveShelf(-1)} aria-label={`Scroll ${title} left`}><ChevronRight className="rotate-180" size={16} /></button><button className="grid size-9 place-items-center rounded-full bg-elevated/70 text-muted hover:bg-elevated hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70" onClick={() => moveShelf(1)} aria-label={`Scroll ${title} right`}><ChevronRight size={16} /></button></div> : null}</div></div>{items.length > 0 ? <div ref={shelfRef} tabIndex={shelf ? 0 : undefined} onKeyDown={shelf ? (event) => { if (event.key === "ArrowLeft") { event.preventDefault(); moveShelf(-1); } else if (event.key === "ArrowRight") { event.preventDefault(); moveShelf(1); } } : undefined} className={shelf ? "media-shelf flex snap-x snap-mandatory gap-4 overflow-x-auto pb-3 outline-none focus-visible:ring-2 focus-visible:ring-accent/60" : viewMode === "grid" ? "grid gap-x-4 gap-y-7 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4" : "grid gap-2"} aria-label={shelf ? `${title} media shelf. Use Left and Right Arrow keys to scroll.` : undefined}>{items.map((item) => <div key={item.id} className={shelf ? "w-[clamp(220px,24vw,330px)] shrink-0 snap-start" : ""}><MediaCard item={item} sourceName={sourceLabel(item, sourceNames)} progress={progress?.get(item.id)} selected={selectedIds.has(item.id)} selectionMode={selectionMode} privateMedia={privateItemIds.has(item.id)} initialWatchLater={title.toLocaleLowerCase() === "watch later"} viewMode={viewMode} onSelect={() => selectionMode ? onToggleSelection?.(item.id) : onSelect(item)} /></div>)}</div> : <div className="border border-dashed border-line/70 px-6 py-12 text-center text-sm text-muted">Nothing matches these filters.</div>}</section>;
 }
 
 function MediaCard({ item, sourceName, onSelect, progress, selectionMode = false, selected = false, privateMedia = false, initialWatchLater = false, viewMode = "grid" }: { item: LibraryItem; sourceName: string; onSelect: () => void; progress?: number; selectionMode?: boolean; selected?: boolean; privateMedia?: boolean; initialWatchLater?: boolean; viewMode?: "grid" | "list" }) {
   const setError = useAppStore((state) => state.setError);
   const setNotice = useAppStore((state) => state.setNotice);
+  const setView = useAppStore((state) => state.setView);
   const quality = resolutionLabel(item);
   const listView = viewMode === "list";
   const [watchLater, setWatchLater] = useState<boolean | null>(initialWatchLater ? true : null);
@@ -2323,6 +2402,7 @@ function MediaCard({ item, sourceName, onSelect, progress, selectionMode = false
         <div className={`${listView ? "mt-0" : "mt-3"} flex min-w-0 gap-3`}><div className="grid size-8 shrink-0 place-items-center rounded-[7px] bg-elevated text-[11px] font-bold text-accent">{sourceName.charAt(0).toLocaleUpperCase()}</div><div className="min-w-0"><h3 className={`${listView ? "truncate text-sm" : "line-clamp-2 text-[13px]"} font-semibold leading-[1.35] text-ink`}>{item.title}</h3><p className="mt-1 truncate text-[11px] text-muted">{sourceName}{item.rating ? ` · ${item.rating} ★` : ""}{item.container ? ` · ${item.container.toLocaleUpperCase()}` : ""}{listView && item.width && item.height ? ` · ${item.width} × ${item.height}` : ""}{listView ? ` · ${new Date(item.addedAt).toLocaleDateString()}` : ""}</p>{listView && item.tags.length > 0 ? <p className="mt-2 truncate text-[10px] text-muted/80">{item.tags.map((tag) => `#${tag}`).join("  ")}</p> : null}</div></div>
       </button>
       {!selectionMode && item.mediaKind === "video" ? <button className={`mt-2 flex h-8 items-center gap-1.5 rounded-[7px] px-2 text-[10px] font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70 ${watchLater ? "bg-accent/10 text-accent" : "text-muted hover:bg-elevated hover:text-ink"}`} disabled={watchLaterBusy} onClick={() => void toggleWatchLater()} aria-pressed={watchLater ?? undefined} aria-label={`${watchLater ? "Remove" : "Add"} ${item.title} ${watchLater ? "from" : "to"} Watch Later`}>{watchLaterBusy ? <LoaderCircle className="animate-spin" size={12} /> : <ListPlus size={12} />}{watchLater ? "Saved for later" : "Watch later"}</button> : null}
+      {!selectionMode ? <details className="relative mt-1 inline-block"><summary className="flex h-8 cursor-pointer list-none items-center gap-1.5 rounded-[7px] px-2 text-[11px] font-semibold text-muted hover:bg-elevated hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70"><MoreHorizontal size={14} /> More</summary><div className="panel-shadow absolute bottom-9 left-0 z-20 grid w-48 gap-1 rounded-control border border-line/70 bg-panel/95 p-1.5 backdrop-blur-xl"><button className="flex items-center gap-2 rounded-[7px] px-2.5 py-2 text-left text-[12px] text-muted hover:bg-elevated hover:text-ink" onClick={() => { setView("similarity"); window.setTimeout(() => window.dispatchEvent(new CustomEvent("nice-downloader:similarity-reference", { detail: { itemId: item.id } })), 0); }}><ScanSearch size={14} /> Find similar</button><button className="flex items-center gap-2 rounded-[7px] px-2.5 py-2 text-left text-[12px] text-muted hover:bg-elevated hover:text-ink" onClick={() => { setView("sharing"); window.setTimeout(() => window.dispatchEvent(new CustomEvent("nice-downloader:sharing-select", { detail: { itemId: item.id } })), 0); }}><Share2 size={14} /> Share temporarily</button></div></details> : null}
     </article>
   );
 }
@@ -3404,6 +3484,7 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
 function MediaDetails({ item, sourceName, onClose, onWatch, onChanged, onMetadataChanged, onBrowseCreator, onBrowseSeries, onBrowseSite, onSelectRelated, onRemoved, onOperation }: { item: LibraryItem; sourceName: string; onClose: () => void; onWatch: () => void; onChanged: (item: LibraryItem) => void; onMetadataChanged: () => void; onBrowseCreator: (creator: string) => void; onBrowseSeries: (series: string) => void; onBrowseSite: (site: string) => void; onSelectRelated: (item: LibraryItem) => void; onRemoved: () => void; onOperation: (result: LibraryFileOperationResult) => void }) {
   const setError = useAppStore((state) => state.setError);
   const setNotice = useAppStore((state) => state.setNotice);
+  const setView = useAppStore((state) => state.setView);
   const [editing, setEditing] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [title, setTitle] = useState(item.title);
@@ -3412,6 +3493,8 @@ function MediaDetails({ item, sourceName, onClose, onWatch, onChanged, onMetadat
   const [relatedItems, setRelatedItems] = useState<LibraryItem[]>([]);
   const [relatedLoading, setRelatedLoading] = useState(false);
   const [playbackPreflight, setPlaybackPreflight] = useState<LibraryPlaybackPreflight | null>(null);
+  const [watchLaterSaved, setWatchLaterSaved] = useState<boolean | null>(null);
+  const [watchLaterBusy, setWatchLaterBusy] = useState(false);
   const [relatedRevision, setRelatedRevision] = useState(0);
   const [metadataEditing, setMetadataEditing] = useState(false);
   const [metadataBusy, setMetadataBusy] = useState(false);
@@ -3449,6 +3532,7 @@ function MediaDetails({ item, sourceName, onClose, onWatch, onChanged, onMetadat
     setRelatedItems([]);
     setRelatedLoading(true);
     setPlaybackPreflight(null);
+    setWatchLaterSaved(null);
     setMetadataEditing(false);
     let disposed = false;
     void api.getLibraryRichMetadata(item.id)
@@ -3463,6 +3547,9 @@ function MediaDetails({ item, sourceName, onClose, onWatch, onChanged, onMetadat
       .catch(() => { if (!disposed) setRelatedItems([]); })
       .finally(() => { if (!disposed) setRelatedLoading(false); });
     if (item.mediaKind === "video" && !item.missing) {
+      void api.getLibraryWatchState(item.id)
+        .then((state) => { if (!disposed) setWatchLaterSaved(state.watchLater); })
+        .catch(() => { if (!disposed) setWatchLaterSaved(false); });
       void api.inspectLibraryPlayback(item.id)
         .then((preflight) => { if (!disposed) setPlaybackPreflight(preflight); })
         .catch(() => { if (!disposed) setPlaybackPreflight(null); });
@@ -3578,6 +3665,28 @@ function MediaDetails({ item, sourceName, onClose, onWatch, onChanged, onMetadat
     } catch (error) { setError(normalizeError(error)); }
   }
 
+  async function toggleWatchLater() {
+    if (watchLaterBusy || item.mediaKind !== "video") return;
+    setWatchLaterBusy(true);
+    try {
+      const state = await api.setLibraryWatchLater(item.id, !watchLaterSaved);
+      setWatchLaterSaved(state.watchLater);
+      setNotice({ message: state.watchLater ? "Saved to Watch Later." : "Removed from Watch Later.", view: "library" });
+    } catch (error) {
+      setError(normalizeError(error));
+    } finally {
+      setWatchLaterBusy(false);
+    }
+  }
+
+  function openContextualTool(view: "similarity" | "sharing", eventName: "nice-downloader:similarity-reference" | "nice-downloader:sharing-select") {
+    const itemId = item.id;
+    onClose();
+    setView(view);
+    window.setTimeout(() => window.dispatchEvent(new CustomEvent(eventName, { detail: { itemId } })), 0);
+  }
+
+
   async function chooseOperationFolder() {
     const selected = await open({ multiple: false, directory: true, title: operationKind === "copy" ? "Choose copy destination" : "Choose move destination" });
     if (selected) {
@@ -3634,13 +3743,14 @@ function MediaDetails({ item, sourceName, onClose, onWatch, onChanged, onMetadat
     }
   }
 
-  return <aside className="panel-shadow fixed bottom-3 right-3 top-3 z-50 w-[min(520px,calc(100vw-24px))] overflow-y-auto rounded-media border border-line/70 bg-panel/98 backdrop-blur-xl" role="dialog" aria-modal="true" aria-label={`${item.title} details`} onKeyDown={trapFocus}><div className="sticky top-0 z-[1] flex items-center justify-between rounded-t-media border-b border-line/60 bg-panel/90 px-5 py-4 backdrop-blur-xl"><div><p className="text-xs font-semibold">Media details</p><p className="mt-0.5 text-[10px] text-muted">Use ← → to browse · Esc to close</p></div><button ref={closeButtonRef} className="grid size-9 place-items-center rounded-control text-muted transition hover:bg-elevated hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70" onClick={onClose} aria-label="Close media details"><X size={17} /></button></div><div className="p-4 sm:p-5"><div className="media-shadow aspect-video overflow-hidden rounded-media bg-elevated"><MediaArtwork item={item} eager /></div>{editing ? <div className="mt-5 space-y-3"><Field label="Title"><Input value={title} onChange={(event) => setTitle(event.target.value)} /></Field><Field label="Tags"><Input value={tags} onChange={(event) => setTags(event.target.value)} placeholder="Comma-separated tags" /></Field><div className="flex gap-2"><Button onClick={() => void update()}>Save changes</Button><Button variant="secondary" onClick={() => setEditing(false)}>Cancel</Button></div></div> : <><h2 className="mt-5 text-[24px] font-semibold leading-[1.2] tracking-[-0.035em] text-balance">{item.title}</h2><p className="mt-2 text-xs text-muted">{sourceName}{item.durationSeconds != null ? ` · ${formatDuration(item.durationSeconds)}` : ""}</p>{item.mediaKind === "video" ? <EmbeddedCompatibilityLabel item={item} preflight={playbackPreflight} /> : null}<div className="mt-5 flex flex-wrap gap-2 rounded-panel bg-elevated/35 p-2">{item.mediaKind === "video" ? <Button className="h-11 min-w-40 flex-1" disabled={item.missing} onClick={onWatch}><Play size={16} fill="currentColor" /> Watch here</Button> : <Button className="h-11 min-w-40 flex-1" disabled={item.missing} onClick={onWatch}><FileImage size={16} /> View image</Button>}<Button variant="secondary" className="h-11" disabled={item.missing} onClick={() => void openItem()}><ExternalLink size={15} /> {item.mediaKind === "image" ? "System viewer" : "System player"}</Button><Button variant="ghost" className="h-11 px-3" onClick={() => setEditing(true)}><Settings2 size={14} /> Edit</Button></div></>}
-      <div className="mt-3 flex items-center gap-2 rounded-panel border border-line/45 bg-canvas/35 p-2"><Button variant="secondary" className={item.favorite ? "text-rose-300" : ""} onClick={() => void updateCuration(!item.favorite, item.rating)}><Heart size={15} fill={item.favorite ? "currentColor" : "none"} /> {item.favorite ? "Favorited" : "Favorite"}</Button><label className="flex flex-1 items-center gap-2 text-xs text-muted"><Star size={15} /><span className="sr-only">Rating</span><Select className="h-10" value={item.rating ?? ""} onChange={(event) => void updateCuration(item.favorite, event.target.value ? Number(event.target.value) : null)}><option value="">Not rated</option>{[5, 4, 3, 2, 1].map((rating) => <option key={rating} value={rating}>{rating} star{rating === 1 ? "" : "s"}</option>)}</Select></label></div>
+  return <aside className="panel-shadow fixed bottom-3 right-3 top-3 z-50 w-[min(680px,calc(100vw-24px))] overflow-y-auto rounded-media border border-line/70 bg-panel/98 backdrop-blur-xl" role="dialog" aria-modal="true" aria-label={`${item.title} details`} onKeyDown={trapFocus}><div className="sticky top-0 z-[1] flex items-center justify-between rounded-t-media border-b border-line/60 bg-panel/90 px-5 py-4 backdrop-blur-xl"><div><p className="text-xs font-semibold">Media details</p><p className="mt-0.5 text-[10px] text-muted">Use ← → to browse · Esc to close</p></div><button ref={closeButtonRef} className="grid size-9 place-items-center rounded-control text-muted transition hover:bg-elevated hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70" onClick={onClose} aria-label="Close media details"><X size={17} /></button></div><div className="p-4 sm:p-5"><div className="media-shadow aspect-video overflow-hidden rounded-media bg-elevated"><MediaArtwork item={item} eager /></div>{editing ? <div className="mt-5 space-y-3"><Field label="Title"><Input value={title} onChange={(event) => setTitle(event.target.value)} /></Field><Field label="Tags"><Input value={tags} onChange={(event) => setTags(event.target.value)} placeholder="Comma-separated tags" /></Field><div className="flex gap-2"><Button onClick={() => void update()}>Save changes</Button><Button variant="secondary" onClick={() => setEditing(false)}>Cancel</Button></div></div> : <><h2 className="mt-5 text-[24px] font-semibold leading-[1.2] tracking-[-0.035em] text-balance">{item.title}</h2><p className="mt-2 text-xs text-muted">{sourceName}{item.durationSeconds != null ? ` · ${formatDuration(item.durationSeconds)}` : ""}</p>{item.mediaKind === "video" ? <details className="mt-3 rounded-control bg-elevated/35 px-3 py-2"><summary className="cursor-pointer text-[11px] font-medium text-muted">Embedded playback compatibility</summary><div className="mt-2"><EmbeddedCompatibilityLabel item={item} preflight={playbackPreflight} /></div></details> : null}<div className="mt-5 flex flex-wrap gap-2 rounded-panel bg-elevated/35 p-2">{item.mediaKind === "video" ? <Button className="h-11 min-w-40 flex-1" disabled={item.missing} onClick={onWatch}><Play size={16} fill="currentColor" /> Watch here</Button> : <Button className="h-11 min-w-40 flex-1" disabled={item.missing} onClick={onWatch}><FileImage size={16} /> View image</Button>}<Button variant="secondary" className="h-11" disabled={item.missing} onClick={() => void openItem()}><ExternalLink size={15} /> {item.mediaKind === "image" ? "System viewer" : "System player"}</Button><Button variant="ghost" className="h-11 px-3" onClick={() => setEditing(true)}><Settings2 size={14} /> Edit</Button></div></>}
+      <div className="mt-3 flex flex-wrap items-center gap-2 rounded-panel border border-line/45 bg-canvas/35 p-2">{item.mediaKind === "video" ? <Button variant="secondary" disabled={watchLaterBusy || watchLaterSaved == null} onClick={() => void toggleWatchLater()} aria-pressed={watchLaterSaved ?? undefined}>{watchLaterBusy ? <LoaderCircle className="animate-spin" size={15} /> : <Bookmark size={15} fill={watchLaterSaved ? "currentColor" : "none"} />} {watchLaterSaved ? "Saved for later" : "Watch later"}</Button> : null}<Button variant="secondary" className={item.favorite ? "text-rose-300" : ""} onClick={() => void updateCuration(!item.favorite, item.rating)}><Heart size={15} fill={item.favorite ? "currentColor" : "none"} /> {item.favorite ? "Favorited" : "Favorite"}</Button><label className="flex min-w-40 flex-1 items-center gap-2 text-xs text-muted"><Star size={15} /><span className="sr-only">Rating</span><Select className="h-10" value={item.rating ?? ""} onChange={(event) => void updateCuration(item.favorite, event.target.value ? Number(event.target.value) : null)}><option value="">Not rated</option>{[5, 4, 3, 2, 1].map((rating) => <option key={rating} value={rating}>{rating} star{rating === 1 ? "" : "s"}</option>)}</Select></label></div>
       <section className="mt-4 rounded-panel border border-line/45 bg-elevated/25 p-4" aria-labelledby="rich-metadata-title">
         <div className="flex items-start justify-between gap-3"><div><h3 id="rich-metadata-title" className="text-sm font-semibold">Media information</h3><p className="mt-1 text-[11px] leading-5 text-muted">Imported from yt-dlp sidecars. Your edits stay in Nice Downloader and survive rescans.</p></div><Button variant="ghost" className="h-8 text-xs" disabled={!richMetadata || metadataBusy} onClick={() => { if (richMetadata) loadMetadataForm(richMetadata); setMetadataEditing((value) => !value); }}>{metadataEditing ? "Cancel" : "Edit metadata"}</Button></div>
         {metadataEditing ? <div className="mt-4 space-y-3"><Field label="Creator or channel"><Input value={creator} maxLength={200} onChange={(event) => setCreator(event.target.value)} /></Field><Field label="Description"><Textarea className="min-h-28" value={description} maxLength={10000} onChange={(event) => setDescription(event.target.value)} /></Field><div className="grid gap-3 sm:grid-cols-2"><Field label="Upload date"><Input type="date" value={uploadDate} onChange={(event) => setUploadDate(event.target.value)} /></Field><Field label="Series"><Input value={series} maxLength={200} onChange={(event) => setSeries(event.target.value)} /></Field><Field label="Episode"><Input value={episode} maxLength={200} onChange={(event) => setEpisode(event.target.value)} /></Field><Field label="Original URL"><Input type="url" value={originalUrl} maxLength={2000} onChange={(event) => setOriginalUrl(event.target.value)} /></Field></div><div className="flex flex-wrap gap-2"><Button disabled={metadataBusy} onClick={() => void saveRichMetadata()}>{metadataBusy ? <LoaderCircle className="animate-spin" size={14} /> : <Save size={14} />} Save metadata</Button>{richMetadata && richMetadata.overriddenFields.length > 0 ? <Button variant="secondary" disabled={metadataBusy} onClick={() => void resetRichMetadata()}><RotateCcw size={14} /> Use extracted values</Button> : null}</div></div> : richMetadata ? <div className="mt-4"><dl className="grid grid-cols-[92px_1fr] gap-x-3 gap-y-2 text-xs">{richMetadata.effective.creator ? <><dt className="text-muted">Creator</dt><dd><button className="font-medium text-accent hover:underline" onClick={() => onBrowseCreator(richMetadata.effective.creator!)}>{richMetadata.effective.creator}</button></dd></> : null}{richMetadata.effective.uploadDate ? <><dt className="text-muted">Published</dt><dd>{new Date(`${richMetadata.effective.uploadDate}T00:00:00`).toLocaleDateString()}</dd></> : null}{richMetadata.effective.series ? <><dt className="text-muted">Series</dt><dd><button className="font-medium text-accent hover:underline" onClick={() => onBrowseSeries(richMetadata.effective.series!)}>{richMetadata.effective.series}</button>{richMetadata.effective.episode ? ` · ${richMetadata.effective.episode}` : ""}</dd></> : richMetadata.effective.episode ? <><dt className="text-muted">Episode</dt><dd>{richMetadata.effective.episode}</dd></> : null}{richMetadata.effective.originalUrl ? <><dt className="text-muted">Original</dt><dd className="break-all text-muted" title={richMetadata.effective.originalUrl}>{richMetadata.effective.originalUrl}</dd></> : null}</dl>{richMetadata.effective.description ? <p className="mt-4 whitespace-pre-wrap text-xs leading-5 text-muted">{richMetadata.effective.description}</p> : null}{richMetadata.overriddenFields.length > 0 ? <p className="mt-3 text-[10px] text-accent">User overrides: {richMetadata.overriddenFields.join(", ")}</p> : <p className="mt-3 text-[10px] text-muted">Extracted metadata · no user overrides</p>}</div> : <p className="mt-4 flex items-center gap-2 text-xs text-muted" role="status"><LoaderCircle className="animate-spin" size={13} /> Loading metadata…</p>}
         <div className="mt-5 flex flex-wrap gap-2 border-t border-line/50 pt-4"><Button variant="secondary" className="h-8 text-xs" onClick={() => void chooseArtwork()}><ImageIcon size={13} /> Choose artwork</Button>{item.thumbnail ? <Button variant="ghost" className="h-8 text-xs" onClick={() => void clearArtwork()}><RotateCcw size={13} /> Use generated artwork</Button> : null}</div>
       </section>
+      <details className="mt-4 rounded-panel border border-line/45 bg-elevated/20 p-4"><summary className="cursor-pointer text-sm font-semibold">More ways to use this media</summary><p className="mt-2 text-[12px] leading-5 text-muted">Open a specialized local tool with this item already selected.</p><div className="mt-3 flex flex-wrap gap-2"><Button variant="secondary" className="h-9 text-xs" onClick={() => openContextualTool("similarity", "nice-downloader:similarity-reference")}><ScanSearch size={14} /> Find similar</Button><Button variant="secondary" className="h-9 text-xs" onClick={() => openContextualTool("sharing", "nice-downloader:sharing-select")}><Share2 size={14} /> Share temporarily</Button></div></details>
       {relatedLoading || relatedItems.length > 0 ? <section className="mt-4 rounded-panel border border-line/45 bg-elevated/25 p-4" aria-labelledby="related-media-title"><div className="flex items-center justify-between"><h3 id="related-media-title" className="text-sm font-semibold">Related media</h3>{relatedLoading ? <LoaderCircle className="animate-spin text-muted" size={14} /> : <span className="text-[10px] text-muted">Same series, creator, or site</span>}</div>{relatedItems.length > 0 ? <div className="mt-3 grid gap-2">{relatedItems.map((related) => <button key={related.id} className="group flex min-w-0 items-center gap-3 rounded-control bg-canvas/45 p-2 text-left transition hover:bg-elevated" onClick={() => onSelectRelated(related)}><div className="aspect-video w-24 shrink-0 overflow-hidden rounded-control bg-canvas"><MediaArtwork item={related} /></div><span className="min-w-0"><span className="line-clamp-2 block text-xs font-medium leading-4 text-ink group-hover:text-accent">{related.title}</span><span className="mt-1 block truncate text-[10px] text-muted">{related.site || related.container?.toLocaleUpperCase() || (related.mediaKind === "video" ? "Video" : "Image")}</span></span></button>)}</div> : null}</section> : null}
       <dl className="mt-4 grid grid-cols-[100px_1fr] gap-x-4 gap-y-3 rounded-panel border border-line/45 bg-canvas/35 p-4 text-xs"><dt className="text-muted">Type</dt><dd>{item.mediaKind === "image" ? "Image" : "Video"}{item.container ? ` · ${item.container.toLocaleUpperCase()}` : ""}</dd>{item.width && item.height ? <><dt className="text-muted">Dimensions</dt><dd className="number-font">{item.width} × {item.height}{item.fps ? ` · ${formatFps(item.fps)} fps` : ""}{item.dynamicRange ? ` · ${item.dynamicRange}` : ""}</dd></> : null}{item.videoCodec || item.audioCodec ? <><dt className="text-muted">Codecs</dt><dd>{[formatCodec(item.videoCodec), formatCodec(item.audioCodec)].filter(Boolean).join(" + ")}</dd></> : null}{item.fileSizeBytes != null ? <><dt className="text-muted">File size</dt><dd className="number-font">{formatBytes(item.fileSizeBytes)}</dd></> : null}<dt className="text-muted">Added</dt><dd>{new Date(item.addedAt).toLocaleString()}</dd>{item.modifiedAtMs ? <><dt className="text-muted">Modified</dt><dd>{new Date(item.modifiedAtMs).toLocaleString()}</dd></> : null}<dt className="text-muted">Location</dt><dd className="break-all text-muted" title={item.path}>{item.relativePath || item.path}</dd>{item.site ? <><dt className="text-muted">Origin</dt><dd><button className="font-medium text-accent hover:underline" onClick={() => onBrowseSite(item.site!)}>{item.site}</button></dd></> : null}</dl>
       {item.metadataState === "pending" ? <p className="mt-5 flex items-center gap-2 text-[11px] text-muted" role="status"><LoaderCircle className="animate-spin text-accent" size={13} /> Inspecting resolution, codecs, and duration…</p> : null}

@@ -4,8 +4,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { AppShell } from "./components/AppShell";
 import { OnboardingDialog } from "./components/OnboardingDialog";
-import { DownloadsPage } from "./features/downloads/DownloadsPage";
-import { HistoryPage } from "./features/history/HistoryPage";
+import { DownloadsWorkspace } from "./features/downloads/DownloadsWorkspace";
 import { LibraryPage } from "./features/library/LibraryPage";
 import { HealthPage } from "./features/library/HealthPage";
 import { MontagePage } from "./features/library/MontagePage";
@@ -17,6 +16,7 @@ import { RecipesPage } from "./features/recipes/RecipesPage";
 import { PresetsPage, SettingsPage } from "./features/settings/SettingsPage";
 import { SubscriptionsPage } from "./features/subscriptions/SubscriptionsPage";
 import { TransformationsPage } from "./features/transformations/TransformationsPage";
+import { ToolsPage } from "./features/tools/ToolsPage";
 import { useAppStore } from "./stores/app-store";
 import { api, normalizeError } from "./lib/tauri";
 import type { DesktopPreferences, OnboardingStatus } from "./types";
@@ -153,7 +153,7 @@ export default function App() {
   return (
     <AppShell>
       {error ? (
-        <div className="sticky top-0 z-20 border-b border-red-500/25 bg-[#36181c]/95 px-8 py-3.5 text-[13px] text-red-100 shadow-[0_12px_28px_rgb(0_0_0/0.16)] backdrop-blur-xl" role="alert" aria-live="assertive">
+        <div className="sticky top-0 z-20 border-b border-danger/35 bg-danger/20 px-8 py-3.5 text-[13px] text-ink shadow-[0_12px_28px_rgb(0_0_0/0.16)] backdrop-blur-xl" role="alert" aria-live="assertive">
           <div className="mx-auto flex max-w-[1340px] items-start gap-3">
             <div className="grid size-8 shrink-0 place-items-center rounded-[7px] bg-red-400/10 text-red-300"><AlertTriangle size={16} /></div>
             <div className="min-w-0 flex-1">
@@ -171,12 +171,10 @@ export default function App() {
         </div>
       ) : null}
       <div className={view === "new" ? "" : "hidden"}><NewDownloadPage /></div>
-      <div className={view === "downloads" ? "" : "hidden"}><DownloadsPage /></div>
-      <div className={view === "queue" ? "" : "hidden"}><DownloadsPage queueOnly /></div>
-      <div className={view === "history" ? "" : "hidden"}><HistoryPage /></div>
+      {view === "downloads" || view === "queue" || view === "history" ? <DownloadsWorkspace sourceView={view} /> : null}
       <div className={view === "subscriptions" ? "" : "hidden"}><SubscriptionsPage /></div>
       <div className={view === "transformations" ? "" : "hidden"}><TransformationsPage /></div>
-      <LibraryPage active={view === "library"} />
+      <LibraryPage active={view === "home" || view === "library"} workspace={view === "home" ? "home" : "library"} />
       {view === "compare" ? <Suspense fallback={<div className="grid min-h-[60vh] place-items-center text-sm text-muted" role="status">Opening comparison workspace…</div>}><ComparePage /></Suspense> : null}
       {view === "imageCompare" ? <Suspense fallback={<div className="grid min-h-[60vh] place-items-center text-sm text-muted" role="status">Opening image studio…</div>}><ImageComparePage /></Suspense> : null}
       {view === "curation" ? <Suspense fallback={<div className="grid min-h-[60vh] place-items-center text-sm text-muted" role="status">Opening curation workspace…</div>}><CurationPage /></Suspense> : null}
@@ -187,6 +185,7 @@ export default function App() {
       <div className={view === "health" ? "" : "hidden"}><HealthPage /></div>
       <div className={view === "recipes" ? "" : "hidden"}><RecipesPage /></div>
       <div className={view === "presets" ? "" : "hidden"}><PresetsPage /></div>
+      <div className={view === "tools" ? "" : "hidden"}><ToolsPage /></div>
       <div className={view === "settings" ? "" : "hidden"}><SettingsPage /></div>
       {notice ? (
         <div className="panel-shadow fixed bottom-6 right-6 z-40 flex min-w-80 items-center gap-3 rounded-[10px] border border-line/70 bg-panel/95 p-3.5 backdrop-blur-xl" role="status" aria-live="polite">

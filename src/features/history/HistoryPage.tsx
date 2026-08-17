@@ -6,7 +6,7 @@ import { formatBytes } from "../../lib/format";
 import { api, normalizeError } from "../../lib/tauri";
 import { useAppStore } from "../../stores/app-store";
 
-export function HistoryPage() {
+export function HistoryPage({ embedded = false }: { embedded?: boolean }) {
   const history = useAppStore((state) => state.history);
   const loading = useAppStore((state) => state.historyLoading);
   const loadHistory = useAppStore((state) => state.loadHistory);
@@ -26,6 +26,7 @@ export function HistoryPage() {
       title="History"
       description="Completed downloads persisted on this device."
       actions={<Button variant="secondary" disabled={loading} onClick={() => void loadHistory()}><RefreshCw className={loading ? "animate-spin" : ""} size={15} /> Refresh</Button>}
+      embedded={embedded}
     >
       <section className="ingest-card relative mb-5 overflow-hidden rounded-media border border-line/45 px-6 py-6 sm:px-8" aria-label="Download history overview">
         <div className="pointer-events-none absolute -right-10 -top-24 size-72 rounded-full bg-accent/[0.08] blur-3xl" />
