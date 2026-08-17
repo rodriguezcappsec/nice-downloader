@@ -9,7 +9,9 @@ import type { DownloadJob } from "../../types";
 
 const terminalStates = new Set(["Completed", "Failed", "Cancelled"]);
 
-export function DownloadsPage({ queueOnly = false }: { queueOnly?: boolean }) {
+export type DownloadWorkspaceTab = "active" | "queue" | "scheduled" | "failed";
+
+export function DownloadsPage({ queueOnly = false, embedded = false, tab = queueOnly ? "queue" : "active" }: { queueOnly?: boolean; embedded?: boolean; tab?: DownloadWorkspaceTab }) {
   const jobMap = useAppStore((state) => state.jobs);
   const jobs = Object.values(jobMap);
   const cancel = useAppStore((state) => state.cancelDownload);
@@ -24,9 +26,16 @@ export function DownloadsPage({ queueOnly = false }: { queueOnly?: boolean }) {
   const setView = useAppStore((state) => state.setView);
   const setError = useAppStore((state) => state.setError);
   const [selectedJobIds, setSelectedJobIds] = useState<string[]>([]);
+  const isQueue = tab === "queue";
   const visible = jobs
-    .filter((job) => (queueOnly ? ["Queued", "Paused"].includes(job.state) && queue.orderedJobIds.includes(job.id) : true))
-    .sort((a, b) => queueOnly
+    .filter((job) => {
+      const scheduled = Boolean(job.scheduledFor && Date.parse(job.scheduledFor) > Date.now());
+      if (tab === "active") return ["Analyzing", "Preparing", "Downloading", "PostProcessing", "Merging", "Verifying"].includes(job.state);
+      if (tab === "scheduled") return ["Queued", "Paused"].includes(job.state) && scheduled;
+      if (tab === "failed") return job.state === "Failed" || job.state === "Cancelled";
+      return ["Queued", "Paused"].includes(job.state) && queue.orderedJobIds.includes(job.id) && !scheduled;
+    })
+    .sort((a, b) => isQueue || tab === "scheduled"
       ? queue.orderedJobIds.indexOf(a.id) - queue.orderedJobIds.indexOf(b.id)
       : b.createdAt.localeCompare(a.createdAt));
   const removable = visible.filter((job) => terminalStates.has(job.state));
@@ -46,14 +55,15 @@ export function DownloadsPage({ queueOnly = false }: { queueOnly?: boolean }) {
 
   return (
     <Page
-      title={queueOnly ? "Queue" : "Downloads"}
-      description={queueOnly ? "Shape what downloads next and how many transfers run together." : "Follow every transfer from first byte to finished file."}
+      title={isQueue ? "Queue" : tab === "scheduled" ? "Scheduled" : tab === "failed" ? "Failed" : "Downloads"}
+      description={isQueue ? "Shape what downloads next and how many transfers run together." : tab === "scheduled" ? "Downloads waiting for their locally scheduled start time." : tab === "failed" ? "Review interrupted work and choose what should be retried." : "Follow every transfer from first byte to finished file."}
       actions={
         <Button onClick={() => setView("new")}><Download size={16} /> New download</Button>
       }
+      embedded={embedded}
     >
       <DownloadOverview
-        queueOnly={queueOnly}
+        queueOnly={isQueue}
         activeCount={activeCount}
         waitingCount={waitingCount}
         completedCount={completedCount}
@@ -61,7 +71,7 @@ export function DownloadsPage({ queueOnly = false }: { queueOnly?: boolean }) {
         paused={queue.settings.paused}
         workerLimit={queue.settings.concurrentDownloads}
       />
-      {queueOnly ? (
+      {isQueue ? (
         <div className="panel-shadow mb-6 flex flex-wrap items-center gap-x-5 gap-y-3 rounded-panel border border-line/45 bg-panel/70 p-5 text-sm">
           <label className="flex items-center gap-2 text-muted">
             Concurrent downloads
@@ -99,7 +109,7 @@ export function DownloadsPage({ queueOnly = false }: { queueOnly?: boolean }) {
           <span className="number-font ml-auto rounded-control bg-canvas/60 px-3 py-2 text-[10px] text-muted">{queue.activeJobIds.length} active · {queue.orderedJobIds.length} waiting</span>
         </div>
       ) : null}
-      {!queueOnly && removable.length > 0 ? (
+      {!isQueue && removable.length > 0 ? (
         <div className="mb-5 flex flex-wrap items-center gap-2 rounded-panel border border-line/45 bg-panel/55 p-3.5 shadow-control">
           <span className="mr-2 text-xs text-muted">{selectedRemovable.length > 0 ? `${selectedRemovable.length} selected` : `${removable.length} finished records`}</span>
           <Button variant="secondary" className="h-8 px-2.5 text-xs" onClick={() => setSelectedJobIds(removable.map((job) => job.id))}>Select finished</Button>
@@ -113,14 +123,14 @@ export function DownloadsPage({ queueOnly = false }: { queueOnly?: boolean }) {
       ) : null}
       {visible.length === 0 ? (
         <EmptyState
-          icon={queueOnly ? <ListOrdered size={20} /> : <Download size={20} />}
-          title={queueOnly ? "The queue is empty" : "No downloads yet"}
-          description={queueOnly ? "Queued jobs appear here while the configured workers are busy." : "Analyze a URL and start a download to see live progress here."}
+          icon={isQueue ? <ListOrdered size={20} /> : <Download size={20} />}
+          title={isQueue ? "The queue is empty" : tab === "scheduled" ? "Nothing is scheduled" : tab === "failed" ? "No downloads need attention" : "No active downloads"}
+          description={isQueue ? "Queued jobs appear here while the configured workers are busy." : tab === "scheduled" ? "Choose a future start time in New Download and it will appear here." : tab === "failed" ? "Failed and cancelled transfers stay here until you retry or remove them." : "New transfers appear here as soon as they begin."}
         />
       ) : (
         <div className="panel-shadow overflow-hidden rounded-media border border-line/45 bg-panel/70">
           <div className="grid grid-cols-[28px_minmax(180px,1fr)_minmax(120px,.65fr)_96px_174px] gap-3 border-b border-line/45 bg-elevated/35 px-5 py-3 text-[10px] font-semibold tracking-[0.045em] text-muted">
-            <span>{!queueOnly && removable.length > 0 ? <input type="checkbox" aria-label="Select all finished downloads" checked={selectedRemovable.length === removable.length} onChange={(event) => setSelectedJobIds(event.target.checked ? removable.map((job) => job.id) : [])} /> : null}</span><span>Download</span><span>Status</span><span className="text-right">Transfer</span><span className="text-right">Actions</span>
+            <span>{!isQueue && removable.length > 0 ? <input type="checkbox" aria-label="Select all finished downloads" checked={selectedRemovable.length === removable.length} onChange={(event) => setSelectedJobIds(event.target.checked ? removable.map((job) => job.id) : [])} /> : null}</span><span>Download</span><span>Status</span><span className="text-right">Transfer</span><span className="text-right">Actions</span>
           </div>
           <div className="divide-y divide-line/65">
           {visible.map((job, index) => <DownloadRow
@@ -136,7 +146,7 @@ export function DownloadsPage({ queueOnly = false }: { queueOnly?: boolean }) {
             selected={selectedJobIds.includes(job.id)}
             onSelect={(selected) => setSelectedJobIds((current) => selected ? [...new Set([...current, job.id])] : current.filter((id) => id !== job.id))}
             onDismiss={() => void removeRecords([job.id])}
-            queueControls={queueOnly ? {
+            queueControls={isQueue || tab === "scheduled" ? {
               canMoveUp: index > 0,
               canMoveDown: index < visible.length - 1,
               moveUp: () => void moveQueued(job.id, index - 1),

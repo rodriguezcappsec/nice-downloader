@@ -5,12 +5,15 @@ export function Page({
   description,
   actions,
   children,
+  embedded = false,
 }: {
   title: string;
   description: string;
   actions?: ReactNode;
   children: ReactNode;
+  embedded?: boolean;
 }) {
+  if (embedded) return <>{children}</>;
   return (
     <div className="workspace-enter mx-auto w-full max-w-[1440px] px-8 pb-14 pt-10 xl:px-12">
       <header className="mb-10 flex min-h-20 items-start justify-between gap-10">

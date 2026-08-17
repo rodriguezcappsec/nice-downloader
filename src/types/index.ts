@@ -1,4 +1,5 @@
 export type ViewId =
+  | "home"
   | "new"
   | "downloads"
   | "queue"
@@ -16,6 +17,7 @@ export type ViewId =
   | "health"
   | "recipes"
   | "presets"
+  | "tools"
   | "settings";
 
 export interface AppError {
@@ -279,6 +281,7 @@ export interface DownloadJob {
   createdAt: string;
   updatedAt: string;
   completedAt?: string | null;
+  scheduledFor?: string | null;
 }
 
 export interface StartDownloadRequest {

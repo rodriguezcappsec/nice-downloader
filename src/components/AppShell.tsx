@@ -1,73 +1,26 @@
 import {
   Activity,
-  ChevronDown,
   Clock3,
-  Clapperboard,
-  Download,
-  FileCog,
   Film,
-  History,
-  House,
-  HeartPulse,
-  Images,
   Keyboard,
-  LayoutGrid,
   LoaderCircle,
   ListOrdered,
-  ListChecks,
   PanelLeftClose,
   PanelLeftOpen,
-  Plus,
-  Rss,
   Search,
   ScanSearch,
-  Settings,
-  SlidersHorizontal,
   SquarePlay,
   Share2,
-  WandSparkles,
-  type LucideIcon,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { useAppStore } from "../stores/app-store";
 import { api } from "../lib/tauri";
+import { allCommandNavigation, primaryNavigation, primaryViewFor, type NavigationItem } from "../lib/navigation";
 import type { LibraryItem, LibraryPrivacyStatus, ViewId } from "../types";
-
-interface NavigationItem {
-  id: ViewId;
-  label: string;
-  icon: LucideIcon;
-}
-
-const mainNavigation: NavigationItem[] = [
-  { id: "library", label: "Media home", icon: House },
-  { id: "new", label: "New download", icon: Plus },
-  { id: "downloads", label: "Active downloads", icon: Download },
-];
-
-const activityNavigation: NavigationItem[] = [
-  { id: "queue", label: "Queue", icon: ListOrdered },
-  { id: "history", label: "Download history", icon: History },
-  { id: "subscriptions", label: "Subscriptions", icon: Rss },
-];
-
-const studioNavigation: NavigationItem[] = [
-  { id: "curation", label: "Review library", icon: ListChecks },
-  { id: "compare", label: "Compare videos", icon: LayoutGrid },
-  { id: "imageCompare", label: "Compare images", icon: Images },
-  { id: "similarity", label: "Find similar media", icon: ScanSearch },
-  { id: "themes", label: "Discover video themes", icon: WandSparkles },
-  { id: "montages", label: "Build montages", icon: Clapperboard },
-  { id: "transformations", label: "Transform media", icon: WandSparkles },
-  { id: "recipes", label: "Automate downloads", icon: FileCog },
-  { id: "sharing", label: "Share temporarily", icon: Share2 },
-  { id: "health", label: "Media health", icon: HeartPulse },
-  { id: "presets", label: "Download presets", icon: SlidersHorizontal },
-];
 
 export function AppShell({ children }: { children: ReactNode }) {
   const [collapsed, setCollapsed] = useState(
-    () => window.localStorage.getItem("nice-downloader.sidebar") === "collapsed",
+    () => window.localStorage.getItem("nice-downloader.sidebar") === "collapsed" || window.matchMedia("(max-width: 1120px)").matches,
   );
   const [commandOpen, setCommandOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
@@ -84,6 +37,13 @@ export function AppShell({ children }: { children: ReactNode }) {
   const imageCompareCount = useAppStore((state) => state.imageCompareItemIds.length);
   const enqueuePlayNext = useAppStore((state) => state.enqueuePlayNext);
   const setNotice = useAppStore((state) => state.setNotice);
+
+  useEffect(() => {
+    const media = window.matchMedia("(max-width: 1120px)");
+    const adapt = (event: MediaQueryListEvent) => { if (event.matches) setCollapsed(true); };
+    media.addEventListener("change", adapt);
+    return () => media.removeEventListener("change", adapt);
+  }, []);
 
   useEffect(() => {
     let disposed = false;
@@ -141,13 +101,11 @@ export function AppShell({ children }: { children: ReactNode }) {
     ["Analyzing", "Preparing", "Downloading", "PostProcessing", "Merging", "Verifying"].includes(job.state),
   ).length;
   const queuedCount = jobs.filter((job) => job.state === "Queued").length;
-  const allNavigation = useMemo(() => [
-    ...mainNavigation,
-    ...activityNavigation,
-    ...studioNavigation,
-    { id: "settings" as ViewId, label: "Settings", icon: Settings },
-  ], []);
+  const allNavigation = useMemo(() => allCommandNavigation(), []);
   const matchingNavigation = allNavigation.filter((item) => item.label.toLocaleLowerCase().includes(commandQuery.trim().toLocaleLowerCase()));
+  const primaryView = primaryViewFor(view);
+  const activeJobs = jobs.filter((job) => ["Analyzing", "Preparing", "Downloading", "PostProcessing", "Merging", "Verifying"].includes(job.state));
+  const activeProgress = activeJobs.length > 0 ? activeJobs.reduce((total, job) => total + job.progressPercent, 0) / activeJobs.length : 0;
 
   useEffect(() => {
     let disposed = false;
@@ -263,24 +221,32 @@ export function AppShell({ children }: { children: ReactNode }) {
       <a className="skip-link" href="#main-content">Skip to main content</a>
       <div className={`grid h-screen min-h-[680px] overflow-hidden text-ink transition-[grid-template-columns] duration-300 ${collapsed ? "grid-cols-[76px_minmax(0,1fr)]" : "grid-cols-[264px_minmax(0,1fr)]"}`}>
         <aside className="cinema-sidebar relative z-30 flex min-h-0 flex-col border-r border-line/45 backdrop-blur-xl">
-          <div className={`flex h-[88px] items-center gap-3.5 ${collapsed ? "justify-center px-2" : "px-5"}`}>
+          <div className={`flex h-[82px] items-center gap-3.5 ${collapsed ? "justify-center px-2" : "px-5"}`}>
             <div className="brand-mark relative grid size-11 shrink-0 place-items-center overflow-hidden rounded-[13px] bg-accent text-accentInk">
               <SquarePlay size={20} strokeWidth={2.5} />
               <span className="absolute inset-x-2 bottom-1.5 h-px bg-white/35" />
             </div>
             <div className={collapsed ? "hidden" : "min-w-0"}>
               <div className="truncate text-[16px] font-semibold tracking-[-0.035em]">Nice Downloader</div>
-              <div className="mt-1 text-[10px] font-medium tracking-[0.035em] text-muted">A private screening room</div>
+              <div className="mt-1 text-[11px] font-medium tracking-[0.02em] text-muted">Your private media room</div>
             </div>
           </div>
 
-          <nav className="min-h-0 flex-1 overflow-y-auto px-3 pb-5 pt-1" aria-label="Primary navigation">
-            <NavigationGroup label="Main" items={mainNavigation} view={view} collapsed={collapsed} setView={setView} badgeFor={badgeFor} />
-            <NavigationGroup label="Activity" items={activityNavigation} view={view} collapsed={collapsed} setView={setView} badgeFor={badgeFor} />
-            <NavigationGroup label="Studio" items={studioNavigation} view={view} collapsed={collapsed} setView={setView} badgeFor={badgeFor} collapsible />
+          <nav className="min-h-0 flex-1 overflow-y-auto px-3 pb-3 pt-1" aria-label="Primary navigation">
+            <NavigationGroup label="Navigate" items={primaryNavigation} view={primaryView} collapsed={collapsed} setView={setView} badgeFor={badgeFor} />
           </nav>
 
           <div className="border-t border-line/45 bg-canvas/20 p-3">
+            <button
+              title={collapsed ? "Search media and commands" : undefined}
+              onClick={() => { restoreFocus.current = document.activeElement as HTMLElement | null; setCommandQuery(""); setCommandOpen(true); }}
+              className={`mb-1 flex h-9 w-full items-center gap-3 rounded-[8px] px-3 text-left text-[12px] font-medium text-muted transition hover:bg-elevated/60 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 ${collapsed ? "justify-center" : ""}`}
+              aria-label={collapsed ? "Search media and commands" : undefined}
+            >
+              <Search size={16} strokeWidth={1.8} />
+              <span className={collapsed ? "hidden" : "flex-1"}>Search</span>
+              {!collapsed ? <kbd className="text-[10px] font-medium text-muted">Ctrl K</kbd> : null}
+            </button>
             <button
               title={collapsed ? "Commands and shortcuts" : undefined}
               onClick={() => { restoreFocus.current = document.activeElement as HTMLElement | null; setHelpOpen(true); }}
@@ -290,26 +256,19 @@ export function AppShell({ children }: { children: ReactNode }) {
               <span className={collapsed ? "hidden" : "flex-1"}>Shortcuts</span>
               {!collapsed ? <kbd className="text-[10px] font-medium text-muted">?</kbd> : null}
             </button>
-            <button
-              title={collapsed ? "Settings" : undefined}
-              onClick={() => setView("settings")}
-              className={`flex h-10 w-full items-center gap-3 rounded-[9px] px-3 text-left text-[13px] font-medium transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 active:scale-[0.985] ${view === "settings" ? "bg-accent/[0.09] text-ink shadow-[inset_3px_0_0_rgb(var(--accent))] ring-1 ring-inset ring-accent/10" : "text-muted hover:bg-elevated/65 hover:text-ink"} ${collapsed ? "justify-center" : ""}`}
-            >
-              <Settings size={17} strokeWidth={1.8} className={view === "settings" ? "text-accent" : ""} />
-              <span className={collapsed ? "hidden" : "flex-1"}>Settings</span>
-              {!collapsed ? <kbd className="text-[10px] font-medium text-muted">Ctrl ,</kbd> : null}
-            </button>
-
-            <div className={`mx-2 my-3 h-px bg-line/60 ${collapsed ? "mx-1" : ""}`} />
-            <div className={`flex items-center gap-3 px-2 ${collapsed ? "justify-center" : ""}`}>
+            <div className={`mx-2 my-2.5 h-px bg-line/60 ${collapsed ? "mx-1" : ""}`} />
+            <button className={`relative flex w-full items-center gap-3 rounded-[10px] px-2 py-2 text-left transition hover:bg-elevated/55 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 ${collapsed ? "justify-center" : ""}`} onClick={() => setView("downloads")} aria-label={`${activeCount} active and ${queuedCount} queued downloads`} title={collapsed ? "Download status" : undefined}>
               <div className={`relative grid size-8 shrink-0 place-items-center rounded-[8px] ${activeCount > 0 ? "bg-accent/12 text-accent" : "bg-elevated text-muted"}`}>
                 {activeCount > 0 ? <Activity size={15} /> : <Clock3 size={15} />}
                 {activeCount > 0 ? <span className="absolute right-0.5 top-0.5 size-1.5 rounded-full bg-accent shadow-[0_0_0_3px_rgb(var(--panel))]" /> : null}
               </div>
               <div className={collapsed ? "hidden" : "min-w-0 flex-1"}>
                 <div className="text-[11px] font-semibold text-ink">{activeCount > 0 ? `${activeCount} downloading` : "Media hub ready"}</div>
-                <div className="mt-0.5 truncate text-[10px] text-muted">{queuedCount > 0 ? `${queuedCount} waiting in queue` : "Downloads run in the background"}</div>
+                <div className="mt-0.5 truncate text-[11px] text-muted">{queuedCount > 0 ? `${queuedCount} waiting in queue` : "Background queue is clear"}</div>
+                {activeCount > 0 ? <span className="mt-2 block h-1 overflow-hidden rounded-full bg-elevated"><span className="block h-full bg-accent transition-[width]" style={{ width: `${activeProgress}%` }} /></span> : null}
               </div>
+            </button>
+            <div className={`mt-1 flex items-center px-2 ${collapsed ? "justify-center" : "justify-end"}`}>
               <button className={`grid size-8 shrink-0 place-items-center rounded-[7px] text-muted transition hover:bg-elevated hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 ${collapsed ? "absolute bottom-[76px] right-[-16px] border border-line bg-panel shadow-control" : ""}`} onClick={toggleSidebar} aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}>
                 {collapsed ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}
               </button>
@@ -327,23 +286,11 @@ export function AppShell({ children }: { children: ReactNode }) {
   );
 }
 
-function NavigationGroup({ label, items, view, collapsed, setView, badgeFor, collapsible = false }: { label: string; items: NavigationItem[]; view: ViewId; collapsed: boolean; setView: (view: ViewId) => void; badgeFor: (id: ViewId) => number; collapsible?: boolean }) {
-  const containsActiveView = items.some((item) => item.id === view);
-  const [open, setOpen] = useState(() => !collapsible || containsActiveView);
-
-  useEffect(() => {
-    if (containsActiveView) setOpen(true);
-  }, [containsActiveView]);
-
-  const visible = collapsed || !collapsible || open;
+function NavigationGroup({ label, items, view, collapsed, setView, badgeFor }: { label: string; items: NavigationItem[]; view: ViewId; collapsed: boolean; setView: (view: ViewId) => void; badgeFor: (id: ViewId) => number }) {
   return (
-    <section className="mb-6">
-      {collapsible && !collapsed ? (
-        <button className="mb-2 flex h-7 w-full items-center justify-between rounded-[7px] px-3 text-[10px] font-medium tracking-[0.045em] text-muted/80 transition hover:bg-elevated/45 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60" onClick={() => setOpen((value) => !value)} aria-expanded={open}>
-          <span>{label}</span><ChevronDown size={13} className={`transition-transform duration-200 ${open ? "rotate-180" : ""}`} />
-        </button>
-      ) : <p className={`mb-2.5 px-3 text-[10px] font-medium tracking-[0.045em] text-muted/80 ${collapsed ? "sr-only" : ""}`}>{label}</p>}
-      <div className={`${visible ? "grid" : "hidden"} gap-1.5`}>
+    <section>
+      <p className={`mb-2.5 px-3 text-[11px] font-medium tracking-[0.04em] text-muted/80 ${collapsed ? "sr-only" : ""}`}>{label}</p>
+      <div className="grid gap-1">
         {items.map((item) => {
           const Icon = item.icon;
           const badge = badgeFor(item.id);
@@ -352,9 +299,10 @@ function NavigationGroup({ label, items, view, collapsed, setView, badgeFor, col
             <button
               key={item.id}
               title={collapsed ? item.label : undefined}
+              aria-label={collapsed ? item.label : undefined}
               onClick={() => setView(item.id)}
               aria-current={active ? "page" : undefined}
-              className={`relative flex h-10 w-full items-center gap-3 rounded-[9px] px-3 text-left text-[13px] font-medium transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 active:scale-[0.985] ${active ? "bg-accent/[0.09] text-ink shadow-[inset_3px_0_0_rgb(var(--accent))] ring-1 ring-inset ring-accent/10" : "text-muted hover:bg-elevated/65 hover:text-ink"} ${collapsed ? "justify-center" : ""}`}
+              className={`relative flex h-11 w-full items-center gap-3 rounded-[10px] px-3 text-left text-[14px] font-medium transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 active:scale-[0.985] ${active ? "bg-accent/[0.10] text-ink shadow-[inset_3px_0_0_rgb(var(--accent))] ring-1 ring-inset ring-accent/10" : "text-muted hover:bg-elevated/65 hover:text-ink"} ${collapsed ? "justify-center" : ""}`}
             >
               <Icon size={17} strokeWidth={1.8} className={active ? "text-accent" : ""} />
               <span className={`flex-1 ${collapsed ? "hidden" : ""}`}>{item.label}</span>

@@ -8,12 +8,16 @@ export default {
         canvas: "rgb(var(--canvas) / <alpha-value>)",
         panel: "rgb(var(--panel) / <alpha-value>)",
         elevated: "rgb(var(--elevated) / <alpha-value>)",
+        subtle: "rgb(var(--subtle) / <alpha-value>)",
         line: "rgb(var(--line) / <alpha-value>)",
         ink: "rgb(var(--ink) / <alpha-value>)",
         muted: "rgb(var(--muted) / <alpha-value>)",
         accent: "rgb(var(--accent) / <alpha-value>)",
         accentInk: "rgb(var(--accent-ink) / <alpha-value>)",
-        danger: "rgb(var(--danger) / <alpha-value>)"
+        danger: "rgb(var(--danger) / <alpha-value>)",
+        success: "rgb(var(--success) / <alpha-value>)",
+        warning: "rgb(var(--warning) / <alpha-value>)",
+        focus: "rgb(var(--focus) / <alpha-value>)"
       },
       boxShadow: {
         panel: "0 24px 70px rgb(17 12 5 / 0.22), inset 0 1px 0 rgb(255 248 229 / 0.035)",
