@@ -12,7 +12,10 @@ use tauri::WebviewWindow;
 mod linux {
     use super::*;
     use crate::models::{EmbeddedMpvControl, SaveLibraryPlaybackRequest};
-    use gtk::{glib, prelude::*};
+    use gtk::{
+        glib::{self, gobject_ffi, translate::IntoGlib},
+        prelude::*,
+    };
     use libloading::Library;
     use std::{
         cell::RefCell,
@@ -34,6 +37,7 @@ mod linux {
     const MPV_RENDER_PARAM_OPENGL_FBO: c_int = 3;
     const MPV_RENDER_PARAM_FLIP_Y: c_int = 4;
     const MPV_RENDER_UPDATE_FRAME: u64 = 1;
+    const GL_FRAMEBUFFER_BINDING: u32 = 0x8CA6;
     const ACTION_TIMEOUT: Duration = Duration::from_secs(4);
 
     #[derive(Clone)]
@@ -299,6 +303,17 @@ mod linux {
             .parent()
             .and_then(|parent| parent.downcast::<gtk::Box>().ok())
             .ok_or_else(|| "The Tauri WebView is not inside its expected GTK box.".to_owned())?;
+        let window = parent
+            .parent()
+            .and_then(|parent| parent.downcast::<gtk::Window>().ok())
+            .ok_or_else(|| "The Tauri WebView is not inside its expected GTK window.".to_owned())?;
+        if !window.is_decorated() {
+            return Err(
+                "Embedded libmpv is unavailable for borderless GTK windows because native resize handling must remain attached."
+                    .to_owned(),
+            );
+        }
+        detach_tauri_resize_handlers(widget)?;
         let position = parent
             .children()
             .iter()
@@ -331,19 +346,28 @@ mod linux {
             player: None,
             bounds: None,
             last_status_update: Instant::now(),
+            render_callbacks: 0,
+            rendered_frames: 0,
+            render_diagnostic_at: None,
         }));
 
         let render_runtime = Rc::clone(&runtime);
         area.connect_render(move |area, _| {
             let scale = area.scale_factor().max(1);
-            let result = render_runtime.borrow_mut().player.as_mut().map(|player| {
+            let mut runtime = render_runtime.borrow_mut();
+            runtime.render_callbacks = runtime.render_callbacks.saturating_add(1);
+            let result = runtime.player.as_mut().map(|player| {
                 player.render(
                     area.allocated_width().saturating_mul(scale),
                     area.allocated_height().saturating_mul(scale),
                 )
             });
-            if let Some(Err(error)) = result {
-                render_runtime.borrow_mut().finish(area, false, Some(error));
+            match result {
+                Some(Ok(true)) => {
+                    runtime.rendered_frames = runtime.rendered_frames.saturating_add(1);
+                }
+                Some(Err(error)) => runtime.finish(area, false, Some(error)),
+                _ => {}
             }
             glib::Propagation::Stop
         });
@@ -375,12 +399,74 @@ mod linux {
         Ok(())
     }
 
+    fn detach_tauri_resize_handlers(widget: &gtk::Widget) -> Result<(), String> {
+        // Tauri installs one instance handler for each signal immediately after creating the
+        // WebView. Both callbacks assume WebView -> GtkBox -> GtkWindow and use an unchecked
+        // downcast. The libmpv GtkOverlay intentionally adds one level to that hierarchy, so
+        // leaving those no-op handlers connected on a decorated window turns any pointer press
+        // into a non-unwinding GTK callback panic. Class handlers used by WebKit input are not
+        // instance handlers and are unaffected.
+        let instance = widget.as_ptr() as *mut gobject_ffi::GObject;
+        let detach_last_handler = |signal_name: &str| -> Result<(), String> {
+            let signal_name = CString::new(signal_name)
+                .map_err(|_| "The GTK signal name is invalid.".to_owned())?;
+            let signal_id = unsafe {
+                gobject_ffi::g_signal_lookup(
+                    signal_name.as_ptr(),
+                    gtk::Widget::static_type().into_glib(),
+                )
+            };
+            if signal_id == 0 {
+                return Err("The expected GTK input signal is unavailable.".to_owned());
+            }
+            let mut handler_ids = Vec::new();
+            loop {
+                let handler_id = unsafe {
+                    gobject_ffi::g_signal_handler_find(
+                        instance,
+                        gobject_ffi::G_SIGNAL_MATCH_ID | gobject_ffi::G_SIGNAL_MATCH_UNBLOCKED,
+                        signal_id,
+                        0,
+                        ptr::null_mut(),
+                        ptr::null_mut(),
+                        ptr::null_mut(),
+                    )
+                };
+                if handler_id == 0 {
+                    break;
+                }
+                unsafe { gobject_ffi::g_signal_handler_block(instance, handler_id) };
+                handler_ids.push(handler_id);
+            }
+            let Some(tauri_handler) = handler_ids.pop() else {
+                return Err(format!(
+                    "Tauri's GTK {signal_name:?} resize handler was not found."
+                ));
+            };
+            // WebKit may register its own instance handlers while constructing the WebView.
+            // Tauri attaches its resize handler afterwards, making it the final handler before
+            // application setup installs this overlay. Preserve and unblock every earlier one.
+            for handler_id in handler_ids {
+                unsafe { gobject_ffi::g_signal_handler_unblock(instance, handler_id) };
+            }
+            unsafe { gobject_ffi::g_signal_handler_disconnect(instance, tauri_handler) };
+            Ok(())
+        };
+
+        detach_last_handler("button-press-event")?;
+        detach_last_handler("touch-event")?;
+        Ok(())
+    }
+
     struct OverlayRuntime {
         shared: Arc<Shared>,
         database: Database,
         player: Option<Player>,
         bounds: Option<EmbeddedMpvBounds>,
         last_status_update: Instant,
+        render_callbacks: u64,
+        rendered_frames: u64,
+        render_diagnostic_at: Option<Instant>,
     }
 
     impl OverlayRuntime {
@@ -420,6 +506,9 @@ mod linux {
         ) -> Result<EmbeddedMpvSession, AppError> {
             self.finish(area, false, None);
             self.bounds = Some(request.bounds);
+            self.render_callbacks = 0;
+            self.rendered_frames = 0;
+            self.render_diagnostic_at = Some(Instant::now() + Duration::from_secs(2));
             apply_bounds(fixed, area, request.bounds, true);
             area.realize();
             area.make_current();
@@ -489,6 +578,22 @@ mod linux {
                 return;
             }
             area.queue_render();
+            if self
+                .render_diagnostic_at
+                .is_some_and(|deadline| Instant::now() >= deadline)
+            {
+                tracing::info!(
+                    render_callbacks = self.render_callbacks,
+                    rendered_frames = self.rendered_frames,
+                    width = area.allocated_width(),
+                    height = area.allocated_height(),
+                    visible = area.is_visible(),
+                    mapped = area.is_mapped(),
+                    realized = area.is_realized(),
+                    "embedded libmpv render diagnostic"
+                );
+                self.render_diagnostic_at = None;
+            }
             if self.last_status_update.elapsed() < Duration::from_millis(200) {
                 return;
             }
@@ -567,12 +672,15 @@ mod linux {
         bounds: EmbeddedMpvBounds,
         active: bool,
     ) {
-        let gtk_scale = area.scale_factor().max(1) as f64;
-        let factor = bounds.device_pixel_ratio / gtk_scale;
-        let x = (bounds.x * factor).round() as i32;
-        let y = (bounds.y * factor).round() as i32;
-        let width = (bounds.width * factor).round().max(1.0) as i32;
-        let height = (bounds.height * factor).round().max(1.0) as i32;
+        // DOM client rectangles and GTK widget allocations both use logical window
+        // coordinates. devicePixelRatio belongs only to backing-buffer resolution;
+        // applying it here makes the native surface oversized under fractional display
+        // scaling or WebView zoom. GLArea applies its own integer framebuffer scale when
+        // render dimensions are calculated.
+        let x = bounds.x.round() as i32;
+        let y = bounds.y.round() as i32;
+        let width = bounds.width.round().max(1.0) as i32;
+        let height = bounds.height.round().max(1.0) as i32;
         fixed.move_(area, x, y);
         area.set_size_request(width, height);
         area.set_visible(active && bounds.visible && bounds.width >= 2.0 && bounds.height >= 2.0);
@@ -641,6 +749,7 @@ mod linux {
     type MpvRender = unsafe extern "C" fn(*mut MpvRenderContext, *mut MpvRenderParam) -> c_int;
     type MpvRenderFree = unsafe extern "C" fn(*mut MpvRenderContext);
     type GlGetProcAddress = unsafe extern "C" fn(*const c_char) -> *const c_void;
+    type GlGetIntegerV = unsafe extern "C" fn(u32, *mut c_int);
 
     struct MpvApi {
         _library: Library,
@@ -705,6 +814,7 @@ mod linux {
         _gl: Option<Library>,
         egl_get_proc_address: Option<GlGetProcAddress>,
         glx_get_proc_address: Option<GlGetProcAddress>,
+        get_integer_v: GlGetIntegerV,
     }
 
     impl GlResolver {
@@ -721,6 +831,11 @@ mod linux {
                 gl.as_ref()
                     .and_then(|library| load_symbol(library, b"glXGetProcAddress\0").ok())
             };
+            let get_integer_v = unsafe {
+                gl.as_ref()
+                    .and_then(|library| load_symbol(library, b"glGetIntegerv\0").ok())
+            }
+            .ok_or_else(|| "OpenGL does not expose glGetIntegerv.".to_owned())?;
             if egl_get_proc_address.is_none() && glx_get_proc_address.is_none() {
                 return Err("Neither EGL nor GLX exposes an OpenGL symbol resolver.".to_owned());
             }
@@ -729,6 +844,7 @@ mod linux {
                 _gl: gl,
                 egl_get_proc_address,
                 glx_get_proc_address,
+                get_integer_v,
             })
         }
     }
@@ -922,8 +1038,12 @@ mod linux {
             if width <= 0 || height <= 0 {
                 return Ok(false);
             }
+            let mut framebuffer = 0;
+            unsafe {
+                (self.resolver.get_integer_v)(GL_FRAMEBUFFER_BINDING, &mut framebuffer);
+            }
             let mut fbo = MpvOpenGlFbo {
-                fbo: 0,
+                fbo: framebuffer,
                 width,
                 height,
                 internal_format: 0,

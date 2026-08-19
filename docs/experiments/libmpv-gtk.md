@@ -97,6 +97,10 @@ Implemented prototype behavior:
 - Rust persists resume progress and hides the native surface on stop, EOF, render failure, initialization failure, or component cleanup;
 - opening the existing external mpv path closes embedded libmpv, and opening embedded libmpv closes external mpv;
 - missing libmpv/OpenGL support leaves the WebView, compatibility-copy, external-mpv, and system-player paths available.
+- decorated Linux windows detach Tauri's no-op GTK border-resize pointer and touch handlers before the WebView is reparented. Those handlers assume a fixed two-level widget ancestry and otherwise abort inside GTK after any pointer press. Borderless windows keep the handlers and report embedded libmpv unavailable instead of risking a process crash.
+- libmpv renders into the framebuffer currently bound by GTK's `GLArea`; assuming framebuffer zero produces successful decode/render callbacks but a black embedded surface.
+- native playback exposes an elapsed/total scrubber below the GTK surface in full and compact layouts, while relative-seek buttons and keyboard shortcuts remain available.
+- GTK surface placement uses the DOM rectangle's logical coordinates directly. `devicePixelRatio` is reserved for backing-buffer diagnostics; applying it to widget geometry oversizes the first full-player surface under fractional display scaling.
 
 Run the full app with `npm run tauri:dev` and open a catalog video in Watch. Nice Downloader first attempts to render the original directly with libmpv inside the Watch rectangle. It does not inspect or create a WebKit compatibility copy before that attempt. The header shows a **Native libmpv** badge and native play, pause, seek, speed, and stop controls while the surface is active.
 
