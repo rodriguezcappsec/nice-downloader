@@ -60,7 +60,10 @@ mod linux {
         path::{Path, PathBuf},
         ptr,
         rc::Rc,
-        sync::{mpsc, Arc, Mutex},
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            mpsc, Arc, Mutex,
+        },
         time::{Duration, Instant},
     };
 
@@ -75,6 +78,7 @@ mod linux {
     const MPV_RENDER_UPDATE_FRAME: u64 = 1;
     const GL_FRAMEBUFFER_BINDING: u32 = 0x8CA6;
     const ACTION_TIMEOUT: Duration = Duration::from_secs(4);
+    const PENDING_SURFACE_OPACITY: f64 = 0.001;
 
     #[derive(Clone)]
     pub struct EmbeddedMpvManager {
@@ -405,7 +409,25 @@ mod linux {
                 Some(Err(error)) => runtime.finish(area, false, Some(error)),
                 _ => {}
             }
+            if runtime.surface_matches_allocation(area)
+                && runtime.player.as_ref().is_some_and(|player| {
+                    player.is_rendered_at(
+                        area.allocated_width().saturating_mul(scale),
+                        area.allocated_height().saturating_mul(scale),
+                    )
+                })
+            {
+                area.set_opacity(1.0);
+            }
             glib::Propagation::Stop
+        });
+
+        area.connect_size_allocate(|area, _| {
+            // set_size_request() is asynchronous. Queue the geometry redraw only
+            // after GTK commits the new allocation and framebuffer dimensions.
+            if area.is_visible() {
+                area.queue_render();
+            }
         });
 
         let unrealize_runtime = Rc::clone(&runtime);
@@ -520,8 +542,18 @@ mod linux {
                         let _ = sender.send(result);
                     }
                     Action::Bounds(bounds) => {
+                        let wait_for_matching_frame = self.bounds.is_none_or(|previous| {
+                            surface_dimensions(previous) != surface_dimensions(bounds)
+                                || (!previous.visible && bounds.visible)
+                        });
                         self.bounds = Some(bounds);
-                        apply_bounds(fixed, area, bounds, self.player.is_some());
+                        apply_bounds(
+                            fixed,
+                            area,
+                            bounds,
+                            self.player.is_some(),
+                            wait_for_matching_frame,
+                        );
                     }
                     Action::Control(request, sender) => {
                         let result = self.control(request);
@@ -545,7 +577,7 @@ mod linux {
             self.render_callbacks = 0;
             self.rendered_frames = 0;
             self.render_diagnostic_at = Some(Instant::now() + Duration::from_secs(2));
-            apply_bounds(fixed, area, request.bounds, true);
+            apply_bounds(fixed, area, request.bounds, true, true);
             area.realize();
             area.make_current();
             if let Some(error) = area.error() {
@@ -613,7 +645,13 @@ mod linux {
             if self.player.is_none() {
                 return;
             }
-            area.queue_render();
+            if self
+                .player
+                .as_ref()
+                .is_some_and(Player::take_render_request)
+            {
+                area.queue_render();
+            }
             if self
                 .render_diagnostic_at
                 .is_some_and(|deadline| Instant::now() >= deadline)
@@ -653,6 +691,7 @@ mod linux {
 
         fn finish(&mut self, area: &gtk::GLArea, ended: bool, error: Option<String>) {
             let Some(player) = self.player.as_ref() else {
+                area.set_opacity(0.0);
                 area.hide();
                 return;
             };
@@ -666,6 +705,7 @@ mod linux {
                 .and_then(|status| status.active.clone());
             area.make_current();
             self.player.take();
+            area.set_opacity(0.0);
             area.hide();
             if let Some(active) = active {
                 let effective_duration = if duration > 0.0 {
@@ -700,6 +740,17 @@ mod linux {
                 });
             }
         }
+
+        fn surface_matches_allocation(&self, area: &gtk::GLArea) -> bool {
+            self.player.is_some()
+                && self.bounds.is_some_and(|bounds| {
+                    let (width, height) = surface_dimensions(bounds);
+                    bounds.visible
+                        && area.is_visible()
+                        && area.allocated_width() == width
+                        && area.allocated_height() == height
+                })
+        }
     }
 
     fn apply_bounds(
@@ -707,6 +758,7 @@ mod linux {
         area: &gtk::GLArea,
         bounds: EmbeddedMpvBounds,
         active: bool,
+        wait_for_matching_frame: bool,
     ) {
         // DOM client rectangles and GTK widget allocations both use logical window
         // coordinates. devicePixelRatio belongs only to backing-buffer resolution;
@@ -715,14 +767,28 @@ mod linux {
         // render dimensions are calculated.
         let x = bounds.x.round() as i32;
         let y = bounds.y.round() as i32;
-        let width = bounds.width.round().max(1.0) as i32;
-        let height = bounds.height.round().max(1.0) as i32;
+        let (width, height) = surface_dimensions(bounds);
         fixed.move_(area, x, y);
         area.set_size_request(width, height);
-        area.set_visible(active && bounds.visible && bounds.width >= 2.0 && bounds.height >= 2.0);
+        let visible = active && bounds.visible && bounds.width >= 2.0 && bounds.height >= 2.0;
+        if !visible {
+            area.set_opacity(0.0);
+        } else if wait_for_matching_frame {
+            // GTK may skip drawing a widget at exactly zero opacity. Keep it mapped
+            // and effectively invisible until the correctly sized frame is ready.
+            area.set_opacity(PENDING_SURFACE_OPACITY);
+        }
+        area.set_visible(visible);
         if area.is_visible() {
             area.queue_render();
         }
+    }
+
+    fn surface_dimensions(bounds: EmbeddedMpvBounds) -> (i32, i32) {
+        (
+            bounds.width.round().max(1.0) as i32,
+            bounds.height.round().max(1.0) as i32,
+        )
     }
 
     #[repr(C)]
@@ -784,6 +850,9 @@ mod linux {
     type MpvRenderUpdate = unsafe extern "C" fn(*mut MpvRenderContext) -> u64;
     type MpvRender = unsafe extern "C" fn(*mut MpvRenderContext, *mut MpvRenderParam) -> c_int;
     type MpvRenderFree = unsafe extern "C" fn(*mut MpvRenderContext);
+    type MpvRenderUpdateCallback = unsafe extern "C" fn(*mut c_void);
+    type MpvRenderSetUpdateCallback =
+        unsafe extern "C" fn(*mut MpvRenderContext, Option<MpvRenderUpdateCallback>, *mut c_void);
     type GlGetProcAddress = unsafe extern "C" fn(*const c_char) -> *const c_void;
     type GlGetIntegerV = unsafe extern "C" fn(u32, *mut c_int);
 
@@ -801,6 +870,7 @@ mod linux {
         render_update: MpvRenderUpdate,
         render: MpvRender,
         render_free: MpvRenderFree,
+        render_set_update_callback: MpvRenderSetUpdateCallback,
     }
 
     impl MpvApi {
@@ -826,6 +896,10 @@ mod linux {
                     render_update: load_symbol(&library, b"mpv_render_context_update\0")?,
                     render: load_symbol(&library, b"mpv_render_context_render\0")?,
                     render_free: load_symbol(&library, b"mpv_render_context_free\0")?,
+                    render_set_update_callback: load_symbol(
+                        &library,
+                        b"mpv_render_context_set_update_callback\0",
+                    )?,
                     _library: library,
                 })
             }
@@ -911,6 +985,7 @@ mod linux {
         render_context: *mut MpvRenderContext,
         resolver: Box<GlResolver>,
         last_render_size: Option<(c_int, c_int)>,
+        render_requested: Box<AtomicBool>,
     }
 
     impl Player {
@@ -929,6 +1004,7 @@ mod linux {
                     render_context: ptr::null_mut(),
                     resolver,
                     last_render_size: None,
+                    render_requested: Box::new(AtomicBool::new(true)),
                 };
                 for (name, value) in [
                     ("terminal", "no"),
@@ -988,9 +1064,17 @@ mod linux {
             let result = unsafe {
                 (self.api.render_create)(&mut self.render_context, self.handle, params.as_mut_ptr())
             };
-            (result >= 0 && !self.render_context.is_null())
-                .then_some(())
-                .ok_or_else(|| self.api.error(result, "mpv_render_context_create"))
+            if result < 0 || self.render_context.is_null() {
+                return Err(self.api.error(result, "mpv_render_context_create"));
+            }
+            unsafe {
+                (self.api.render_set_update_callback)(
+                    self.render_context,
+                    Some(mark_render_requested),
+                    self.render_requested.as_mut() as *mut AtomicBool as *mut c_void,
+                );
+            }
+            Ok(())
         }
 
         unsafe fn load_file(&self, path: &Path) -> Result<(), String> {
@@ -1118,6 +1202,23 @@ mod linux {
             self.last_render_size = Some((width, height));
             Ok(true)
         }
+
+        fn take_render_request(&self) -> bool {
+            self.render_requested.swap(false, Ordering::AcqRel)
+        }
+
+        fn is_rendered_at(&self, width: c_int, height: c_int) -> bool {
+            self.last_render_size == Some((width, height))
+        }
+    }
+
+    unsafe extern "C" fn mark_render_requested(context: *mut c_void) {
+        if context.is_null() {
+            return;
+        }
+        // SAFETY: the callback is removed before Player drops the boxed atomic.
+        let requested = unsafe { &*context.cast::<AtomicBool>() };
+        requested.store(true, Ordering::Release);
     }
 
     impl Drop for Player {
@@ -1126,6 +1227,11 @@ mod linux {
             // context must be released before the client handle.
             unsafe {
                 if !self.render_context.is_null() {
+                    (self.api.render_set_update_callback)(
+                        self.render_context,
+                        None,
+                        ptr::null_mut(),
+                    );
                     (self.api.render_free)(self.render_context);
                     self.render_context = ptr::null_mut();
                 }

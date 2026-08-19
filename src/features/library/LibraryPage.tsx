@@ -3171,7 +3171,7 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
       window.visualViewport?.removeEventListener("resize", syncBounds);
       window.visualViewport?.removeEventListener("scroll", syncBounds);
     };
-  }, [compact, embeddedMpvSession?.itemId, leanBack]);
+  }, [embeddedMpvSession?.itemId]);
 
   useEffect(() => {
     if (!nativeSession) return;
