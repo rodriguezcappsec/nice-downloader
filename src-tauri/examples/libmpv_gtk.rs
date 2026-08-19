@@ -30,14 +30,25 @@ mod linux {
     const MPV_RENDER_UPDATE_FRAME: u64 = 1;
 
     fn configure_numeric_locale() -> Result<(), String> {
+        gtk::disable_setlocale();
+        let environment_locale = b"\0";
         let locale = b"C\0";
-        let configured = unsafe {
+        let environment_configured = unsafe {
+            nix::libc::setlocale(
+                nix::libc::LC_ALL,
+                environment_locale.as_ptr().cast::<nix::libc::c_char>(),
+            )
+        };
+        if environment_configured.is_null() {
+            return Err("Could not apply the environment locale before GTK startup.".to_owned());
+        }
+        let numeric_configured = unsafe {
             nix::libc::setlocale(
                 nix::libc::LC_NUMERIC,
                 locale.as_ptr().cast::<nix::libc::c_char>(),
             )
         };
-        if configured.is_null() {
+        if numeric_configured.is_null() {
             Err("Could not configure LC_NUMERIC=C for libmpv.".to_owned())
         } else {
             Ok(())

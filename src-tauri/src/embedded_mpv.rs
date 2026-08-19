@@ -10,16 +10,29 @@ use tauri::WebviewWindow;
 
 #[cfg(target_os = "linux")]
 pub(crate) fn configure_numeric_locale() -> Result<(), String> {
-    // libmpv's client API requires locale-independent decimal parsing. Set this once at
-    // process startup, before Tauri creates worker threads or any mpv handle is initialized.
+    // GTK normally applies the environment locale during gtk_init, which would overwrite
+    // libmpv's required numeric locale. Apply the environment locale ourselves, pin only
+    // LC_NUMERIC to C, and prevent GTK from changing it later. This runs before Tauri creates
+    // worker threads or initializes GTK.
+    gtk::disable_setlocale();
+    let environment_locale = b"\0";
     let locale = b"C\0";
-    let configured = unsafe {
+    let environment_configured = unsafe {
+        nix::libc::setlocale(
+            nix::libc::LC_ALL,
+            environment_locale.as_ptr().cast::<nix::libc::c_char>(),
+        )
+    };
+    if environment_configured.is_null() {
+        return Err("could not apply the environment locale before GTK startup".to_owned());
+    }
+    let numeric_configured = unsafe {
         nix::libc::setlocale(
             nix::libc::LC_NUMERIC,
             locale.as_ptr().cast::<nix::libc::c_char>(),
         )
     };
-    if configured.is_null() {
+    if numeric_configured.is_null() {
         Err("could not configure LC_NUMERIC=C for embedded libmpv".to_owned())
     } else {
         Ok(())
