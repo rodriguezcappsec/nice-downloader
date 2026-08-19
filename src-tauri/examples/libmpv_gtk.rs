@@ -29,6 +29,21 @@ mod linux {
     const MPV_RENDER_PARAM_FLIP_Y: c_int = 4;
     const MPV_RENDER_UPDATE_FRAME: u64 = 1;
 
+    fn configure_numeric_locale() -> Result<(), String> {
+        let locale = b"C\0";
+        let configured = unsafe {
+            nix::libc::setlocale(
+                nix::libc::LC_NUMERIC,
+                locale.as_ptr().cast::<nix::libc::c_char>(),
+            )
+        };
+        if configured.is_null() {
+            Err("Could not configure LC_NUMERIC=C for libmpv.".to_owned())
+        } else {
+            Ok(())
+        }
+    }
+
     #[repr(C)]
     struct MpvHandle {
         _private: [u8; 0],
@@ -366,6 +381,7 @@ mod linux {
     }
 
     pub fn run() -> Result<(), String> {
+        configure_numeric_locale()?;
         let (path, smoke_seconds) = parse_args()?;
         gtk::init().map_err(|error| format!("Could not initialize GTK: {error}"))?;
 

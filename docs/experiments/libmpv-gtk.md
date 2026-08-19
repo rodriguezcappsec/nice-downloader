@@ -101,6 +101,7 @@ Implemented prototype behavior:
 - libmpv renders into the framebuffer currently bound by GTK's `GLArea`; assuming framebuffer zero produces successful decode/render callbacks but a black embedded surface.
 - native playback exposes an elapsed/total scrubber below the GTK surface in full and compact layouts, while relative-seek buttons and keyboard shortcuts remain available.
 - GTK surface placement uses the DOM rectangle's logical coordinates directly. `devicePixelRatio` is reserved for backing-buffer diagnostics; applying it to widget geometry oversizes the first full-player surface under fractional display scaling.
+- application startup sets only `LC_NUMERIC` to `C` before Tauri creates worker threads, as required by libmpv's client API. Other locale categories and translated desktop behavior remain unchanged.
 
 Run the full app with `npm run tauri:dev` and open a catalog video in Watch. Nice Downloader first attempts to render the original directly with libmpv inside the Watch rectangle. It does not inspect or create a WebKit compatibility copy before that attempt. The header shows a **Native libmpv** badge and native play, pause, seek, speed, and stop controls while the surface is active.
 

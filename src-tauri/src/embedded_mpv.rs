@@ -9,6 +9,29 @@ use crate::{
 use tauri::WebviewWindow;
 
 #[cfg(target_os = "linux")]
+pub(crate) fn configure_numeric_locale() -> Result<(), String> {
+    // libmpv's client API requires locale-independent decimal parsing. Set this once at
+    // process startup, before Tauri creates worker threads or any mpv handle is initialized.
+    let locale = b"C\0";
+    let configured = unsafe {
+        nix::libc::setlocale(
+            nix::libc::LC_NUMERIC,
+            locale.as_ptr().cast::<nix::libc::c_char>(),
+        )
+    };
+    if configured.is_null() {
+        Err("could not configure LC_NUMERIC=C for embedded libmpv".to_owned())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn configure_numeric_locale() -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
 mod linux {
     use super::*;
     use crate::models::{EmbeddedMpvControl, SaveLibraryPlaybackRequest};

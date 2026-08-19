@@ -72,6 +72,9 @@ fn install_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 pub fn run() {
+    if let Err(error) = embedded_mpv::configure_numeric_locale() {
+        eprintln!("Nice Downloader warning: {error}");
+    }
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
