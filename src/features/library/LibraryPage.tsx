@@ -1099,10 +1099,10 @@ const resultTitle = search.trim()
     if (facetsContext === `${sourceFilter}:${availabilityFilter}` && themeFilter !== "all" && !themes.some((theme) => theme.key === themeFilter)) setThemeFilter("all");
   }, [availabilityFilter, collectionFilter, collections, containerFilter, containers, facetsContext, libraryCatalogContextLoaded, sourceFilter, sources, themeFilter, themes]);
 
-  const navigationItems = useMemo(() => activeMediaStack ? activeMediaStackItems : isFiltered || selectionMode
+  const navigationItems = useMemo(() => activeMediaStack ? activeMediaStackItems : workspaceSection === "all" || isFiltered || selectionMode
     ? Array.from(new Map([...items, ...detailsExtraItems].map((item) => [item.id, item])).values())
     : Array.from(new Map([...continueWatching.map((entry) => entry.item), ...watchLater, ...recentlyWatched.map((entry) => entry.item), ...recentResult.items, ...videos, ...images, ...detailsExtraItems].map((item) => [item.id, item])).values()),
-    [activeMediaStack, activeMediaStackItems, continueWatching, detailsExtraItems, images, isFiltered, items, recentResult.items, recentlyWatched, selectionMode, videos, watchLater]);
+    [activeMediaStack, activeMediaStackItems, continueWatching, detailsExtraItems, images, isFiltered, items, recentResult.items, recentlyWatched, selectionMode, videos, watchLater, workspaceSection]);
   const watchPlaybackQueue = useMemo(() => {
     if (playbackContext && !watchDebouncedSearch) {
       return playbackContext.filter((item) => item.mediaKind === "video" && !item.missing);
@@ -2890,6 +2890,7 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
   const playbackWatchdog = useRef<number | null>(null);
   const playbackProgress = useRef<{ position: number; observedAt: number } | null>(null);
   const playbackVerification = useRef<{ lastPosition: number; accumulatedSeconds: number; recorded: boolean } | null>(null);
+  const webPlaybackHandoff = useRef<{ positionSeconds: number; shouldPlay: boolean } | null>(null);
   const embeddedMpvStopRequested = useRef(false);
   const nativeInitializationItemId = useRef(item.id);
   const [session, setSession] = useState<LibraryPlaybackSession | null>(null);
@@ -2949,6 +2950,7 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
     setCurrentPosition(0);
     setPlaybackDuration(item.durationSeconds || 0);
     setPendingNativeSeek(null);
+    webPlaybackHandoff.current = null;
 
     const isCurrent = () => !disposed && nativeInitializationItemId.current === item.id;
     const prepareWebPlayback = async () => {
@@ -3098,14 +3100,56 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
 
   useEffect(() => {
     if (!embeddedMpvSession) return;
+    let disposed = false;
     let frame = 0;
-    const syncBounds = () => {
-      window.cancelAnimationFrame(frame);
-      frame = window.requestAnimationFrame(() => {
-        const bounds = readEmbeddedMpvBounds();
-        if (bounds) void api.updateEmbeddedMpvBounds(bounds).catch(() => {});
-      });
+    let updateInFlight = false;
+    let pendingBounds: EmbeddedMpvBounds | null = null;
+    let lastSentSignature: string | null = null;
+
+    const boundsSignature = (bounds: EmbeddedMpvBounds) => [
+      Math.round(bounds.x),
+      Math.round(bounds.y),
+      Math.round(bounds.width),
+      Math.round(bounds.height),
+      bounds.devicePixelRatio,
+      bounds.visible,
+    ].join(":");
+
+    const flushBounds = () => {
+      if (disposed || updateInFlight || !pendingBounds) return;
+      const bounds = pendingBounds;
+      pendingBounds = null;
+      const signature = boundsSignature(bounds);
+      if (signature === lastSentSignature) return;
+
+      updateInFlight = true;
+      lastSentSignature = signature;
+      void api.updateEmbeddedMpvBounds(bounds)
+        .catch(() => {})
+        .finally(() => {
+          updateInFlight = false;
+          flushBounds();
+        });
     };
+
+    const syncBounds = () => {
+      const bounds = readEmbeddedMpvBounds();
+      if (!bounds) return;
+      if (boundsSignature(bounds) === lastSentSignature) {
+        pendingBounds = null;
+        return;
+      }
+      pendingBounds = bounds;
+      flushBounds();
+    };
+
+    const trackBounds = () => {
+      // ResizeObserver does not report position-only layout movement. Sampling the active
+      // surface keeps the GTK overlay aligned while still sending only changed rectangles.
+      syncBounds();
+      frame = window.requestAnimationFrame(trackBounds);
+    };
+
     const observer = new ResizeObserver(syncBounds);
     if (playbackSurfaceRef.current) observer.observe(playbackSurfaceRef.current);
     window.addEventListener("resize", syncBounds);
@@ -3115,7 +3159,9 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
     window.visualViewport?.addEventListener("resize", syncBounds);
     window.visualViewport?.addEventListener("scroll", syncBounds);
     syncBounds();
+    frame = window.requestAnimationFrame(trackBounds);
     return () => {
+      disposed = true;
       window.cancelAnimationFrame(frame);
       observer.disconnect();
       window.removeEventListener("resize", syncBounds);
@@ -3597,10 +3643,11 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
     if (embeddedMpvBusy) return;
     setEmbeddedMpvBusy(true);
     embeddedMpvStopRequested.current = true;
+    const handoff = { positionSeconds: currentPosition, shouldPlay: isPlaying };
     try {
       await api.closeEmbeddedMpv();
       setEmbeddedMpvSession(null);
-      await restartEmbeddedPlaybackAfterNative();
+      await restartEmbeddedPlaybackAfterNative(handoff);
     } catch (error) {
       setError(normalizeError(error));
     } finally {
@@ -3622,8 +3669,9 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
     }
   }
 
-  async function restartEmbeddedPlaybackAfterNative() {
+  async function restartEmbeddedPlaybackAfterNative(handoff: { positionSeconds: number; shouldPlay: boolean } | null = null) {
     clearPlaybackWatchdog();
+    webPlaybackHandoff.current = handoff;
     setPlaybackRenderer("web");
     setPlaybackError(null);
     setSession(null);
@@ -3641,6 +3689,7 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
       const prepared = await api.prepareLibraryPlayback(item.id, false);
       setSession(prepared);
     } catch (error) {
+      webPlaybackHandoff.current = null;
       setPlaybackError(normalizeError(error));
       setLoading(false);
     }
@@ -3675,6 +3724,17 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
     video.playbackRate = playbackRate;
     setPlaybackDuration(video.duration);
     setCurrentPosition(video.currentTime);
+    const handoff = webPlaybackHandoff.current;
+    if (handoff) {
+      webPlaybackHandoff.current = null;
+      const target = Math.min(Math.max(0, video.duration - 0.25), handoff.positionSeconds);
+      video.currentTime = target;
+      lastSavedPosition.current = target;
+      setCurrentPosition(target);
+      setResumedAt(target);
+      if (handoff.shouldPlay) void video.play().catch(() => {});
+      return;
+    }
     if (seekRequest?.itemId === item.id) {
       const target = Math.min(Math.max(0, video.duration - 0.25), seekRequest.seconds);
       video.currentTime = target;
@@ -3710,14 +3770,25 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
     void video.play().catch(() => {});
   }, [embeddedMpvSession?.itemId, item.id, seekRequest?.id]);
 
+  const nativeControlClass = "grid size-8 shrink-0 place-items-center rounded-[8px] text-white/65 transition-[background-color,color,transform] duration-150 hover:bg-white/10 hover:text-white active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/75 disabled:pointer-events-none disabled:opacity-40";
+
   return <><section ref={playerRef} className={`cinematic-player panel-shadow min-w-0 overflow-hidden border border-white/10 text-white ${compact ? "rounded-[10px] shadow-[0_28px_80px_rgb(0_0_0/0.58)]" : leanBack ? "flex min-h-0 flex-1 flex-col rounded-[16px] shadow-[0_30px_120px_rgb(0_0_0/0.8)]" : "flex max-h-[calc(100dvh-96px)] flex-col rounded-[12px]"}`} aria-label={`${leanBack ? "Lean-back player" : compact ? "Mini player" : "Playing"} ${item.title}`}>
-    <header className={`flex items-center border-b border-white/10 bg-black/70 backdrop-blur-xl ${compact ? "min-h-11 gap-2 px-3 py-2" : leanBack ? "min-h-14 gap-4 px-5 py-2" : "min-h-16 gap-4 px-5 py-3"}`}>
+    <header className={`flex items-center border-b border-white/10 bg-[linear-gradient(180deg,rgba(20,18,14,0.97),rgba(10,9,7,0.96))] shadow-[inset_0_1px_0_rgba(255,255,255,0.035)] backdrop-blur-xl ${compact ? "min-h-11 gap-1.5 px-2.5 py-1.5" : leanBack ? "min-h-14 gap-3 px-4 py-2" : "min-h-16 gap-3 px-4 py-2.5"}`}>
       <div className="min-w-0 flex-1"><h1 className={`${compact ? "text-[11px]" : "text-sm"} truncate font-semibold`}>{item.title}</h1>{!compact ? <p className="mt-0.5 truncate text-[11px] text-white/55">{sourceName}{item.container ? ` · ${item.container.toLocaleUpperCase()}` : ""}{item.width && item.height ? ` · ${item.width} × ${item.height}` : ""}</p> : null}</div>
       {embeddedMpvStatus?.available && !embeddedMpvSession ? <Button variant="ghost" className={`${compact ? "size-8 px-0" : ""} text-accent hover:text-accent`} disabled={embeddedMpvBusy} onClick={() => void playWithEmbeddedMpv()} aria-label="Use native libmpv player"><MonitorPlay size={15} />{compact ? null : " Use native player"}</Button> : null}
-      {embeddedMpvSession ? <div className="flex items-center gap-1" aria-label="Native libmpv controls">{!compact ? <span className="mr-1 rounded-full border border-accent/25 bg-accent/10 px-2 py-1 text-[10px] font-semibold text-accent">Native libmpv</span> : null}<button className="grid size-8 place-items-center rounded-[7px] text-white/70 hover:bg-white/10 hover:text-white" onClick={() => seek(-10)} aria-label="Seek back 10 seconds"><RotateCcw size={14} /></button><button className="grid size-8 place-items-center rounded-[7px] bg-accent text-[#081426] hover:brightness-110" onClick={togglePlayback} aria-label={embeddedMpvSession.paused ? "Play" : "Pause"}>{embeddedMpvSession.paused ? <Play size={14} fill="currentColor" /> : <Pause size={14} />}</button><button className="grid size-8 place-items-center rounded-[7px] text-white/70 hover:bg-white/10 hover:text-white" onClick={() => seek(10)} aria-label="Seek forward 10 seconds"><RotateCw size={14} /></button>{!compact ? <Select className="h-8 w-20 border-white/10 bg-white/5 text-xs text-white" value={playbackRate} aria-label="Playback speed" onChange={(event) => { const rate = Number(event.target.value); setPlaybackRate(rate); void api.controlEmbeddedMpv({ action: "setRate", value: rate }).catch((error) => setError(normalizeError(error))); }}><option value={0.5}>0.5×</option><option value={0.75}>0.75×</option><option value={1}>1×</option><option value={1.25}>1.25×</option><option value={1.5}>1.5×</option><option value={2}>2×</option></Select> : null}<button className="grid size-8 place-items-center rounded-[7px] text-white/70 hover:bg-white/10 hover:text-white" disabled={embeddedMpvBusy} onClick={() => void closeEmbeddedMpvPlayback()} aria-label="Switch to web player"><Square size={13} /></button></div> : null}
-      <Button variant="ghost" className={`${compact ? "size-8 px-0" : ""} text-white/75 hover:text-white`} onClick={() => void openExternal()} aria-label="Open in system player"><ExternalLink size={15} />{compact ? null : " Open in system player"}</Button>
-      {compact ? <button className="grid size-8 place-items-center rounded-[7px] text-white/70 hover:bg-white/10 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70" onClick={onRestore} aria-label="Return to full watch page"><Maximize size={15} /></button> : <button className="grid size-9 place-items-center rounded-[8px] text-white/70 hover:bg-white/10 hover:text-white" onClick={toggleFullscreen} aria-label="Toggle fullscreen"><Maximize size={17} /></button>}
-      {compact ? <button className="grid size-8 place-items-center rounded-[7px] text-white/70 hover:bg-white/10 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70" onClick={closePlayer} aria-label="Close mini player"><X size={16} /></button> : null}
+      {embeddedMpvSession ? <div className={`flex shrink-0 items-center ${compact ? "gap-1" : "gap-2"}`} aria-label="Native libmpv controls">
+        {!compact ? <span className="inline-flex h-8 items-center gap-1.5 rounded-[8px] border border-accent/20 bg-accent/[0.08] px-2 text-[10px] font-semibold text-accent shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"><span className="size-1.5 rounded-full bg-accent shadow-[0_0_8px_rgb(var(--accent)/0.65)]" /> Native</span> : null}
+        <div className="flex items-center gap-0.5 rounded-[10px] border border-white/10 bg-white/[0.055] p-1 shadow-[inset_0_1px_0_rgba(255,255,255,0.04),0_8px_24px_rgba(0,0,0,0.18)]">
+          <button className={nativeControlClass} onClick={() => seek(-10)} aria-label="Seek back 10 seconds" title="Back 10 seconds"><RotateCcw size={14} strokeWidth={1.9} /></button>
+          <button className="grid size-8 shrink-0 place-items-center rounded-[8px] bg-accent text-accentInk shadow-[0_5px_16px_rgb(var(--accent)/0.24),inset_0_1px_0_rgba(255,255,255,0.35)] transition-[filter,transform] duration-150 hover:brightness-110 active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/80 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0d0c09]" onClick={togglePlayback} aria-label={embeddedMpvSession.paused ? "Play" : "Pause"} title={embeddedMpvSession.paused ? "Play" : "Pause"}>{embeddedMpvSession.paused ? <Play size={14} fill="currentColor" /> : <Pause size={14} fill="currentColor" />}</button>
+          <button className={nativeControlClass} onClick={() => seek(10)} aria-label="Seek forward 10 seconds" title="Forward 10 seconds"><RotateCw size={14} strokeWidth={1.9} /></button>
+        </div>
+        {!compact ? <Select className="h-9 w-[72px] rounded-[9px] border-white/10 bg-white/[0.055] px-2 text-[11px] font-semibold text-white/75 shadow-[inset_0_1px_0_rgba(255,255,255,0.035)] hover:border-white/20 focus:border-accent/50 focus:bg-white/[0.08]" value={playbackRate} aria-label="Playback speed" title="Playback speed" onChange={(event) => { const rate = Number(event.target.value); setPlaybackRate(rate); void api.controlEmbeddedMpv({ action: "setRate", value: rate }).catch((error) => setError(normalizeError(error))); }}><option value={0.5}>0.5×</option><option value={0.75}>0.75×</option><option value={1}>1×</option><option value={1.25}>1.25×</option><option value={1.5}>1.5×</option><option value={2}>2×</option></Select> : null}
+        <button className={`inline-flex h-9 shrink-0 items-center justify-center gap-1.5 rounded-[9px] border border-white/10 bg-white/[0.045] text-[11px] font-semibold text-white/65 transition-[background-color,border-color,color,transform] duration-150 hover:border-white/20 hover:bg-white/[0.09] hover:text-white active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/75 ${compact ? "w-9" : "px-2.5"}`} title="Switch to the WebView player" disabled={embeddedMpvBusy} onClick={() => void closeEmbeddedMpvPlayback()} aria-label="Switch to WebView player"><MonitorPlay size={14} strokeWidth={1.9} />{compact ? null : <span>Web player</span>}</button>
+      </div> : null}
+      <Button variant="ghost" className={`${compact ? "size-8 px-0" : "h-9 rounded-[9px] border-white/10 bg-white/[0.035] px-3 text-[11px]"} shrink-0 text-white/65 hover:border-white/20 hover:bg-white/[0.08] hover:text-white`} onClick={() => void openExternal()} aria-label="Open in system player"><ExternalLink size={14} strokeWidth={1.9} />{compact ? null : " System player"}</Button>
+      {compact ? <button className={nativeControlClass} onClick={onRestore} aria-label="Return to full watch page" title="Restore full player"><Maximize size={15} /></button> : <button className="grid size-9 shrink-0 place-items-center rounded-[9px] border border-transparent text-white/60 transition hover:border-white/10 hover:bg-white/[0.07] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70" onClick={toggleFullscreen} aria-label="Toggle fullscreen" title="Fullscreen"><Maximize size={16} strokeWidth={1.9} /></button>}
+      {compact ? <button className={nativeControlClass} onClick={closePlayer} aria-label="Close mini player" title="Close player"><X size={16} /></button> : null}
     </header>
     <div ref={playbackSurfaceRef} className={`relative flex min-h-0 items-center justify-center overflow-auto bg-black ${compact ? "aspect-video" : leanBack ? "flex-1" : "aspect-video min-h-[240px] max-h-[calc(100dvh-250px)]"}`}>
       {loading && !embeddedMpvSession ? <div className="absolute inset-0 z-[1] flex items-center justify-center gap-2 bg-black/80 text-sm text-white/60" role="status"><LoaderCircle className="animate-spin text-accent" size={18} /> {playbackRenderer === "native" ? "Starting native playback…" : "Preparing web playback…"}</div> : null}

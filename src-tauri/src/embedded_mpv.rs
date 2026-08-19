@@ -910,6 +910,7 @@ mod linux {
         handle: *mut MpvHandle,
         render_context: *mut MpvRenderContext,
         resolver: Box<GlResolver>,
+        last_render_size: Option<(c_int, c_int)>,
     }
 
     impl Player {
@@ -927,6 +928,7 @@ mod linux {
                     handle,
                     render_context: ptr::null_mut(),
                     resolver,
+                    last_render_size: None,
                 };
                 for (name, value) in [
                     ("terminal", "no"),
@@ -1074,6 +1076,7 @@ mod linux {
             if width <= 0 || height <= 0 {
                 return Ok(false);
             }
+            let size_changed = self.last_render_size != Some((width, height));
             let mut framebuffer = 0;
             unsafe {
                 (self.resolver.get_integer_v)(GL_FRAMEBUFFER_BINDING, &mut framebuffer);
@@ -1102,14 +1105,18 @@ mod linux {
             // SAFETY: GTK invokes this with GLArea's context and FBO current.
             let result = unsafe {
                 let update = (self.api.render_update)(self.render_context);
-                if update & MPV_RENDER_UPDATE_FRAME == 0 {
+                // A paused player may not announce a new frame when GTK replaces its FBO
+                // after a resize. Redraw the current frame whenever render dimensions change.
+                if update & MPV_RENDER_UPDATE_FRAME == 0 && !size_changed {
                     return Ok(false);
                 }
                 (self.api.render)(self.render_context, params.as_mut_ptr())
             };
-            (result >= 0)
-                .then_some(true)
-                .ok_or_else(|| self.api.error(result, "mpv_render_context_render"))
+            if result < 0 {
+                return Err(self.api.error(result, "mpv_render_context_render"));
+            }
+            self.last_render_size = Some((width, height));
+            Ok(true)
         }
     }
 
