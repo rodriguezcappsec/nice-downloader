@@ -1,8 +1,8 @@
 use crate::embedded_mpv::EmbeddedMpvManager;
 use crate::models::LibraryWatchState;
 use crate::models::{
-    ConfigureLibraryPrivacyRequest, LibraryPrivacyRules, LibraryPrivacyStatus,
-    EmbeddedMpvBounds, EmbeddedMpvControlRequest, EmbeddedMpvSession, EmbeddedMpvStatus,
+    ConfigureLibraryPrivacyRequest, EmbeddedMpvBounds, EmbeddedMpvControlRequest,
+    EmbeddedMpvSession, EmbeddedMpvStatus, LibraryPrivacyRules, LibraryPrivacyStatus,
     SetLibraryFolderPrivacyRequest, SetLibraryItemPrivacyRequest,
 };
 use crate::models::{LibraryPlaylist, SaveLibraryPlaylistRequest};

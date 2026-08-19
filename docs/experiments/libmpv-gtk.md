@@ -1,6 +1,6 @@
 # Embedded libmpv GTK experiment
 
-Status: phase-one feasibility passed on Linux Wayland. An opt-in phase-two Watch overlay prototype now lives on the experiment branch; it is still development evidence, not the default production playback path.
+Status: phase-one feasibility passed on Linux Wayland. The phase-two Watch overlay now runs as the preferred playback path on `experiment/native-libmpv-player-v2`; it remains an experiment rather than the default production player on `main`.
 
 ## Question
 
@@ -98,11 +98,13 @@ Implemented prototype behavior:
 - opening the existing external mpv path closes embedded libmpv, and opening embedded libmpv closes external mpv;
 - missing libmpv/OpenGL support leaves the WebView, compatibility-copy, external-mpv, and system-player paths available.
 
-Run the full app with `npm run tauri:dev`, open a catalog video in Watch, and choose **Embedded libmpv**. For a video that triggers the compatibility dialog, cancel the copy first and select **Play here with libmpv** from the unchanged-video fallback panel. A successful run keeps video inside the Watch rectangle and shows the experimental controls in its header.
+Run the full app with `npm run tauri:dev` and open a catalog video in Watch. Nice Downloader first attempts to render the original directly with libmpv inside the Watch rectangle. It does not inspect or create a WebKit compatibility copy before that attempt. The header shows a **Native libmpv** badge and native play, pause, seek, speed, and stop controls while the surface is active.
+
+If libmpv is missing or initialization fails, Watch automatically continues through the existing WebKit playback-preparation path. The fallback reason appears as secondary status text. The user can also switch deliberately from native playback to the web player; compatibility-copy consent remains in force if WebKit needs a copy. External mpv and the system-player action remain recovery options.
 
 Still gated before making this a default player:
 
 1. AppImage dependency closure and license review for the selected libmpv build.
 2. Automated interaction coverage for modal overlap, accessibility tooling, non-default browser zoom, fractional HiDPI, mini-player movement, and fullscreen transitions.
-3. A persisted user preference and direct compatibility-dialog action, rather than the current explicit experiment entry points.
+3. A persisted renderer preference if the native path advances beyond the experiment branch.
 4. Linux distribution coverage beyond the validated native Wayland host.
