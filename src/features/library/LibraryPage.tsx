@@ -306,6 +306,11 @@ export function LibraryPage({ active = true, workspace = "library" }: { active?:
     return document.activeElement instanceof HTMLElement ? document.activeElement : null;
   }
 
+  function resetMainScroll() {
+    const main = document.getElementById("main-content");
+    if (main) main.scrollTop = 0;
+  }
+
   function restoreFocus(target: HTMLElement | null, fallbackId: string) {
     window.setTimeout(() => {
       if (target?.isConnected) {
@@ -430,6 +435,10 @@ export function LibraryPage({ active = true, workspace = "library" }: { active?:
   }, []);
 
   function startWatching(item: LibraryItem, queue: LibraryItem[] | null = null, startAtSeconds?: number) {
+    // The native surface reads viewport-relative DOM geometry as soon as Watch mounts.
+    // Reset a scrolled catalog before mounting it so Videos -> Details -> Watch cannot
+    // initialize libmpv against the catalog's transient off-screen position.
+    resetMainScroll();
     setViewImage(null);
     imageReturnFocus.current = null;
     setTranscriptSeekRequest(Number.isFinite(startAtSeconds)
@@ -440,7 +449,6 @@ export function LibraryPage({ active = true, workspace = "library" }: { active?:
     if (queue) setWatchSearch("");
     setWatchMinimized(false);
     setView("library");
-    window.setTimeout(() => document.getElementById("main-content")?.scrollTo({ top: 0 }), 0);
   }
 
   function playFirstQueued() {
@@ -488,7 +496,7 @@ export function LibraryPage({ active = true, workspace = "library" }: { active?:
     setViewImage(item);
     if (watchItem) setWatchMinimized(true);
     setView("library");
-    window.setTimeout(() => document.getElementById("main-content")?.scrollTo({ top: 0 }), 0);
+    resetMainScroll();
   }
 
   function closeImageViewer() {
@@ -505,11 +513,11 @@ export function LibraryPage({ active = true, workspace = "library" }: { active?:
   }
 
   function restoreWatching() {
+    resetMainScroll();
     setViewImage(null);
     imageReturnFocus.current = null;
     setView("library");
     setWatchMinimized(false);
-    window.setTimeout(() => document.getElementById("main-content")?.scrollTo({ top: 0 }), 0);
     restoreFocus(null, "watch-details-button");
   }
 
@@ -2927,6 +2935,8 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
 
   useEffect(() => {
     let disposed = false;
+    let boundsFrame = 0;
+    let finishBoundsWait: ((bounds: EmbeddedMpvBounds | null) => void) | null = null;
     nativeInitializationItemId.current = item.id;
     setSession(null);
     setPreflight(null);
@@ -2953,6 +2963,43 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
     webPlaybackHandoff.current = null;
 
     const isCurrent = () => !disposed && nativeInitializationItemId.current === item.id;
+    const waitForStableEmbeddedMpvBounds = () => new Promise<EmbeddedMpvBounds | null>((resolve) => {
+      let previousSignature: string | null = null;
+      let stableSamples = 0;
+      let attempts = 0;
+      const finish = (bounds: EmbeddedMpvBounds | null) => {
+        finishBoundsWait = null;
+        resolve(bounds);
+      };
+      const sample = () => {
+        if (!isCurrent()) {
+          finish(null);
+          return;
+        }
+        const bounds = readEmbeddedMpvBounds();
+        const signature = bounds?.visible ? [
+          Math.round(bounds.x),
+          Math.round(bounds.y),
+          Math.round(bounds.width),
+          Math.round(bounds.height),
+          bounds.devicePixelRatio,
+        ].join(":") : null;
+        stableSamples = signature && signature === previousSignature ? stableSamples + 1 : 0;
+        previousSignature = signature;
+        attempts += 1;
+        if (bounds?.visible && stableSamples >= 1) {
+          finish(bounds);
+          return;
+        }
+        if (attempts >= 30) {
+          finish(bounds?.visible ? bounds : null);
+          return;
+        }
+        boundsFrame = window.requestAnimationFrame(sample);
+      };
+      finishBoundsWait = finish;
+      boundsFrame = window.requestAnimationFrame(sample);
+    });
     const prepareWebPlayback = async () => {
       if (!isCurrent()) return;
       setPlaybackRenderer("web");
@@ -2983,7 +3030,8 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
           return;
         }
         if (status.available) {
-          const bounds = readEmbeddedMpvBounds();
+          const bounds = await waitForStableEmbeddedMpvBounds();
+          if (!isCurrent()) return;
           if (bounds) {
             try {
               const transcriptStart = seekRequest?.itemId === item.id ? seekRequest.seconds : undefined;
@@ -3023,7 +3071,12 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
         }
       }
     })();
-    return () => { disposed = true; };
+    return () => {
+      disposed = true;
+      window.cancelAnimationFrame(boundsFrame);
+      finishBoundsWait?.(null);
+      finishBoundsWait = null;
+    };
   }, [item.id]);
 
   useEffect(() => {

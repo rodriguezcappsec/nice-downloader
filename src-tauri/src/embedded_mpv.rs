@@ -69,7 +69,10 @@ mod linux {
 
     const MPV_FORMAT_FLAG: c_int = 3;
     const MPV_FORMAT_DOUBLE: c_int = 5;
+    const MPV_EVENT_SHUTDOWN: c_int = 1;
     const MPV_EVENT_END_FILE: c_int = 7;
+    const MPV_EVENT_PLAYBACK_RESTART: c_int = 21;
+    const MPV_END_FILE_REASON_ERROR: c_int = 4;
     const MPV_RENDER_PARAM_INVALID: c_int = 0;
     const MPV_RENDER_PARAM_API_TYPE: c_int = 1;
     const MPV_RENDER_PARAM_OPENGL_INIT_PARAMS: c_int = 2;
@@ -542,11 +545,15 @@ mod linux {
                         let _ = sender.send(result);
                     }
                     Action::Bounds(bounds) => {
-                        let wait_for_matching_frame = self.bounds.is_none_or(|previous| {
-                            surface_dimensions(previous) != surface_dimensions(bounds)
-                                || (!previous.visible && bounds.visible)
-                        });
+                        let wait_for_matching_frame = self
+                            .bounds
+                            .is_none_or(|previous| bounds_require_fresh_surface(previous, bounds));
                         self.bounds = Some(bounds);
+                        if wait_for_matching_frame {
+                            if let Some(player) = self.player.as_mut() {
+                                player.request_forced_render();
+                            }
+                        }
                         apply_bounds(
                             fixed,
                             area,
@@ -634,22 +641,29 @@ mod linux {
         }
 
         fn tick(&mut self, area: &gtk::GLArea) {
-            let ended = self
-                .player
-                .as_ref()
-                .is_some_and(|player| player.drain_events());
-            if ended {
-                self.finish(area, true, None);
+            let terminal = self.player.as_mut().and_then(Player::drain_events);
+            if let Some(terminal) = terminal {
+                match terminal {
+                    PlayerTerminal::Ended => self.finish(area, true, None),
+                    PlayerTerminal::Failed(error) => self.finish(area, false, Some(error)),
+                }
                 return;
             }
             if self.player.is_none() {
                 return;
             }
-            if self
+            let render_requested = self
                 .player
                 .as_ref()
-                .is_some_and(Player::take_render_request)
-            {
+                .is_some_and(Player::take_render_request);
+            let awaiting_initial_frame = self
+                .player
+                .as_ref()
+                .is_some_and(Player::needs_initial_frame);
+            if render_requested || awaiting_initial_frame {
+                // The update callback can fire while GTK is still mapping the first
+                // GLArea allocation. Poll until libmpv reports a real frame so that a
+                // lost edge cannot leave the initialization framebuffer visible.
                 area.queue_render();
             }
             if self
@@ -747,8 +761,10 @@ mod linux {
                     let (width, height) = surface_dimensions(bounds);
                     bounds.visible
                         && area.is_visible()
-                        && area.allocated_width() == width
-                        && area.allocated_height() == height
+                        && dimensions_match(
+                            (width, height),
+                            (area.allocated_width(), area.allocated_height()),
+                        )
                 })
         }
     }
@@ -791,6 +807,15 @@ mod linux {
         )
     }
 
+    fn dimensions_match(expected: (i32, i32), actual: (i32, i32)) -> bool {
+        expected.0.abs_diff(actual.0) <= 1 && expected.1.abs_diff(actual.1) <= 1
+    }
+
+    fn bounds_require_fresh_surface(previous: EmbeddedMpvBounds, next: EmbeddedMpvBounds) -> bool {
+        surface_dimensions(previous) != surface_dimensions(next)
+            || (!previous.visible && next.visible)
+    }
+
     #[repr(C)]
     struct MpvHandle {
         _private: [u8; 0],
@@ -807,6 +832,15 @@ mod linux {
         error: c_int,
         reply_userdata: u64,
         data: *mut c_void,
+    }
+
+    #[repr(C)]
+    struct MpvEventEndFile {
+        reason: c_int,
+        error: c_int,
+        _playlist_entry_id: i64,
+        _playlist_insert_id: i64,
+        _playlist_insert_num_entries: c_int,
     }
 
     #[repr(C)]
@@ -986,6 +1020,14 @@ mod linux {
         resolver: Box<GlResolver>,
         last_render_size: Option<(c_int, c_int)>,
         render_requested: Box<AtomicBool>,
+        force_render: bool,
+        playback_started: bool,
+        decoded_frame_available: bool,
+    }
+
+    enum PlayerTerminal {
+        Ended,
+        Failed(String),
     }
 
     impl Player {
@@ -1005,6 +1047,9 @@ mod linux {
                     resolver,
                     last_render_size: None,
                     render_requested: Box::new(AtomicBool::new(true)),
+                    force_render: true,
+                    playback_started: false,
+                    decoded_frame_available: false,
                 };
                 for (name, value) in [
                     ("terminal", "no"),
@@ -1138,20 +1183,40 @@ mod linux {
             (result >= 0).then_some(value != 0)
         }
 
-        fn drain_events(&self) -> bool {
+        fn drain_events(&mut self) -> Option<PlayerTerminal> {
             loop {
                 // SAFETY: zero timeout never blocks and mpv owns the returned event.
                 let event = unsafe { (self.api.wait_event)(self.handle, 0.0) };
                 if event.is_null() {
-                    return false;
+                    return None;
                 }
                 // SAFETY: pointer remains valid until the next mpv API call.
                 let event_id = unsafe { (*event).event_id };
                 if event_id == 0 {
-                    return false;
+                    return None;
+                }
+                if event_id == MPV_EVENT_SHUTDOWN {
+                    return Some(PlayerTerminal::Failed(
+                        "Embedded libmpv shut down unexpectedly.".to_owned(),
+                    ));
                 }
                 if event_id == MPV_EVENT_END_FILE {
-                    return true;
+                    let data = unsafe { (*event).data.cast::<MpvEventEndFile>().as_ref() };
+                    if let Some(data) = data {
+                        if end_file_failed(data.reason) {
+                            return Some(PlayerTerminal::Failed(
+                                self.api.error(data.error, "mpv playback"),
+                            ));
+                        }
+                    }
+                    return Some(PlayerTerminal::Ended);
+                }
+                if event_id == MPV_EVENT_PLAYBACK_RESTART {
+                    // This event is emitted only after initial loading or a seek has
+                    // produced playable output. A render made before it may contain
+                    // only libmpv's black initialization framebuffer.
+                    self.playback_started = true;
+                    self.request_forced_render();
                 }
             }
         }
@@ -1161,6 +1226,7 @@ mod linux {
                 return Ok(false);
             }
             let size_changed = self.last_render_size != Some((width, height));
+            let force_render = self.force_render;
             let mut framebuffer = 0;
             unsafe {
                 (self.resolver.get_integer_v)(GL_FRAMEBUFFER_BINDING, &mut framebuffer);
@@ -1187,19 +1253,27 @@ mod linux {
                 },
             ];
             // SAFETY: GTK invokes this with GLArea's context and FBO current.
-            let result = unsafe {
+            let (result, frame_updated) = unsafe {
                 let update = (self.api.render_update)(self.render_context);
+                let frame_updated = update & MPV_RENDER_UPDATE_FRAME != 0;
                 // A paused player may not announce a new frame when GTK replaces its FBO
                 // after a resize. Redraw the current frame whenever render dimensions change.
-                if update & MPV_RENDER_UPDATE_FRAME == 0 && !size_changed {
+                if !frame_updated && !size_changed && !force_render {
                     return Ok(false);
                 }
-                (self.api.render)(self.render_context, params.as_mut_ptr())
+                (
+                    (self.api.render)(self.render_context, params.as_mut_ptr()),
+                    frame_updated,
+                )
             };
             if result < 0 {
                 return Err(self.api.error(result, "mpv_render_context_render"));
             }
+            if frame_updated {
+                self.decoded_frame_available = true;
+            }
             self.last_render_size = Some((width, height));
+            self.force_render = false;
             Ok(true)
         }
 
@@ -1207,9 +1281,36 @@ mod linux {
             self.render_requested.swap(false, Ordering::AcqRel)
         }
 
-        fn is_rendered_at(&self, width: c_int, height: c_int) -> bool {
-            self.last_render_size == Some((width, height))
+        fn request_forced_render(&mut self) {
+            self.force_render = true;
+            self.render_requested.store(true, Ordering::Release);
         }
+
+        fn is_rendered_at(&self, width: c_int, height: c_int) -> bool {
+            surface_frame_is_ready(
+                self.playback_started,
+                self.decoded_frame_available,
+                self.last_render_size,
+                (width, height),
+            )
+        }
+
+        fn needs_initial_frame(&self) -> bool {
+            !self.decoded_frame_available
+        }
+    }
+
+    fn surface_frame_is_ready(
+        playback_started: bool,
+        decoded_frame_available: bool,
+        last_render_size: Option<(c_int, c_int)>,
+        current_render_size: (c_int, c_int),
+    ) -> bool {
+        playback_started && decoded_frame_available && last_render_size == Some(current_render_size)
+    }
+
+    fn end_file_failed(reason: c_int) -> bool {
+        reason == MPV_END_FILE_REASON_ERROR
     }
 
     unsafe extern "C" fn mark_render_requested(context: *mut c_void) {
@@ -1336,6 +1437,71 @@ mod linux {
                 .code,
                 "invalid_embedded_mpv_control"
             );
+        }
+
+        #[test]
+        fn initial_black_render_is_not_treated_as_ready_content() {
+            assert!(!surface_frame_is_ready(
+                false,
+                false,
+                Some((1280, 720)),
+                (1280, 720)
+            ));
+            assert!(!surface_frame_is_ready(
+                true,
+                false,
+                Some((1280, 720)),
+                (1280, 720)
+            ));
+            assert!(surface_frame_is_ready(
+                true,
+                true,
+                Some((1280, 720)),
+                (1280, 720)
+            ));
+            assert!(!surface_frame_is_ready(
+                true,
+                true,
+                Some((418, 235)),
+                (1280, 720)
+            ));
+        }
+
+        #[test]
+        fn allocation_matching_tolerates_fractional_layout_rounding_only() {
+            assert!(dimensions_match((1280, 720), (1279, 721)));
+            assert!(!dimensions_match((1280, 720), (1278, 720)));
+            assert!(!dimensions_match((1280, 720), (418, 235)));
+        }
+
+        #[test]
+        fn resized_or_restored_surfaces_require_a_fresh_render() {
+            let initial = bounds();
+            assert!(!bounds_require_fresh_surface(
+                initial,
+                EmbeddedMpvBounds { x: 30.0, ..initial }
+            ));
+            assert!(bounds_require_fresh_surface(
+                initial,
+                EmbeddedMpvBounds {
+                    width: 640.0,
+                    ..initial
+                }
+            ));
+            assert!(bounds_require_fresh_surface(
+                EmbeddedMpvBounds {
+                    visible: false,
+                    ..initial
+                },
+                initial
+            ));
+        }
+
+        #[test]
+        fn libmpv_end_errors_are_not_reported_as_normal_completion() {
+            assert!(end_file_failed(MPV_END_FILE_REASON_ERROR));
+            assert!(!end_file_failed(0));
+            assert!(!end_file_failed(2));
         }
     }
 }
