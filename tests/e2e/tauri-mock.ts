@@ -1,0 +1,155 @@
+import type { Page } from "@playwright/test";
+
+export async function installTauriMock(page: Page) {
+  await page.addInitScript(() => {
+    const callbacks = new Map<number, (payload: unknown) => void>();
+    let nextCallbackId = 1;
+    const emptyQuery = { items: [], totalItems: 0, page: 1, pageSize: 60, totalPages: 1 };
+    const emptyFacets = {
+      totalItems: 1,
+      availableItems: 1,
+      missingItems: 0,
+      containers: [],
+      tags: [],
+      creators: [],
+      series: [],
+      sites: [],
+      themes: [],
+      folders: [],
+    };
+    const testSource = { id: "00000000-0000-4000-8000-000000000001", name: "Playwright media", path: "/tmp/media", mediaKind: "both", recursive: true, watchEnabled: true, private: false, includePatterns: [], excludePatterns: [], status: "online", lastError: null, lastScannedAt: null, itemCount: 1, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z" };
+    const testItem = {
+      id: "00000000-0000-4000-8000-000000000002",
+      path: "/tmp/media/playwright-clip.mp4",
+      sourceId: testSource.id,
+      relativePath: "playwright-clip.mp4",
+      mediaKind: "video",
+      title: "Playwright clip",
+      sourceUrl: null,
+      thumbnail: null,
+      durationSeconds: 95,
+      site: "Local",
+      tags: ["existing"],
+      metadata: {},
+      fileSizeBytes: 1_048_576,
+      modifiedAtMs: Date.parse("2026-01-01T00:00:00Z"),
+      width: 1920,
+      height: 1080,
+      fps: 30,
+      videoCodec: "h264",
+      audioCodec: "aac",
+      container: "mp4",
+      dynamicRange: null,
+      metadataState: "ready",
+      metadataError: null,
+      favorite: false,
+      rating: null,
+      missing: false,
+      addedAt: "2026-01-01T00:00:00Z",
+      updatedAt: "2026-01-01T00:00:00Z",
+    };
+    const invoke = async (command: string, args?: Record<string, unknown>) => {
+      switch (command) {
+        case "plugin:event|listen": return nextCallbackId++;
+        case "plugin:event|unlisten":
+        case "plugin:window|on_close_requested":
+        case "plugin:webview|set_webview_zoom": return null;
+        case "get_desktop_preferences": return { closeBehavior: "quit", startMinimized: false, notifyWhenBackgrounded: false, reduceMotion: false, highContrast: false, interfaceScalePercent: 100, playbackCompatibility: "ask" };
+        case "get_desktop_runtime_status": return { trayAvailable: false };
+        case "get_onboarding_status": return { completed: true, defaultDestination: "/tmp", engines: [] };
+        case "list_jobs":
+        case "detect_engines":
+        case "list_history":
+        case "list_library_scan_jobs":
+        case "list_library_smart_views":
+        case "list_library_collections":
+        case "list_library_playlists":
+        case "list_continue_watching":
+        case "list_library_watch_later":
+        case "list_recently_watched": return [];
+        case "list_library_sources": return [testSource];
+        case "get_library_source_automation": return { sourceId: testSource.id, tags: [], collectionId: null, favorite: false };
+        case "get_library_watch_state": return { itemId: testItem.id, watchLater: false, playback: null };
+        case "inspect_library_playback": return { compatibilityRequired: false, compatibilityCached: false, unusuallyLarge: false, reencodeRequired: false, estimatedCopyBytes: 0, availableSpaceBytes: 10_000_000, reason: "H.264 and AAC in MP4 are expected to play directly.", preference: "ask", requiresConfirmation: false };
+        case "prepare_library_playback": return { item: testItem, url: "data:video/webm;base64,GkXfo59ChoEBQveBAULygQRC84EIQoKEd2VibUKHgQJChYECGFOAZwEAAAAAAAH0EU2bdLpNu4tTq4QVSalmU6yBoU27i1OrhBZUrmtTrIHWTbuMU6uEElTDZ1OsggEyTbuMU6uEHFO7a1OsggHe7AEAAAAAAABZAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAVSalmsCrXsYMPQkBNgIxMYXZmNjMuMS4xMDFXQYxMYXZmNjMuMS4xMDFEiYhARAAAAAAAABZUrmvXrgEAAAAAAABO14EBc8WILyhyjZlVrkycgQAitZyDdW5kiIEAhoVWX1ZQOIOBASPjg4QCYloA4JCwgRC6gRCagQJVsIRVuYEBVe6BAOwBAAAAAAAAAgAAElTDZ/pzc59jwIBnyJlFo4dFTkNPREVSRIeMTGF2ZjYzLjEuMTAxc3PVY8CLY8WILyhyjZlVrkxnyKBFo4dFTkNPREVSRIeTTGF2YzYzLjEuMTAxIGxpYnZweGfIoUWjiERVUkFUSU9ORIeTMDA6MDA6MDAuMDQwMDAwMDAwAB9DtnWo54EAo6OBAACAEAIAnQEqEAAQAABHCIWFiJmEiAICAAwNYAD+/6tQgBxTu2uRu4+zgQC3iveBAfGCAbHwgQM=", playback: null, subtitles: [], compatibilityMode: false, compatibilityTranscoded: false, liveTranscode: false, segmentedStream: false, streamStartSeconds: 0 };
+        case "load_library_embedded_subtitles": return [];
+        case "get_default_destination": return "/tmp";
+        case "get_engine_preferences": return { browserCookieSource: "none", browserProfile: null, proxyUrl: null, enableImpersonation: true, bandwidthLimitKib: null };
+        case "get_queue_snapshot": return { settings: { concurrentDownloads: 2, paused: false, notifyOnCompletion: true, completionAction: "none" }, orderedJobIds: [], activeJobIds: [], pauseSupported: true, completionNotificationsSupported: true };
+        case "get_library_privacy_status": {
+          const configured = window.localStorage.getItem("playwright.privacy") != null;
+          const locked = window.localStorage.getItem("playwright.privacy") === "locked";
+          return { configured, locked, autoLockMinutes: 15, privateSourceCount: configured ? 1 : 0, privateFolderCount: 0, privateItemCount: 0 };
+        }
+        case "lock_library_privacy":
+          window.localStorage.setItem("playwright.privacy", "locked");
+          return { configured: true, locked: true, autoLockMinutes: 15, privateSourceCount: 1, privateFolderCount: 0, privateItemCount: 0 };
+        case "touch_library_privacy": return null;
+        case "list_library_privacy_rules": return { itemIds: [], folders: [] };
+        case "get_library_search_status": return { catalogItems: 0, indexedItems: 0, consistent: true };
+        case "get_library_transcript_index_status": return { indexedItems: 0, cueCount: 0 };
+        case "search_library_transcripts": return [];
+        case "get_library_artwork_cache_status": return { fileCount: 0, totalBytes: 0, maxFiles: 20_000, maxBytes: 1_073_741_824 };
+        case "get_library_playback_cache_status": return { fileCount: 0, totalBytes: 0, maxFiles: 4, maxBytes: 8_589_934_592 };
+        case "get_library_visual_similarity_status": return { eligibleItems: 0, indexedItems: 0, staleItems: 0 };
+        case "get_library_visual_similarity_job":
+        case "get_library_theme_job":
+        case "get_library_duplicate_analysis":
+        case "get_local_share_status": return null;
+        case "get_library_health_summary": return { totalItems: 0, availableItems: 0, missingItems: 0, changedItems: 0, metadataPendingItems: 0, metadataFailedItems: 0, compatibilityRiskItems: 0, issues: [] };
+        case "get_library_storage_plan": return { catalogBytes: 0, sources: [], folders: [], containers: [], exactDuplicateReclaimableBytes: 0, playbackCacheBytes: 0, artworkCacheBytes: 0, incomingKnownBytes: 0, incomingUnknownItems: 0, activeTransformationCount: 0, warnings: [] };
+        case "get_library_theme_settings": return { enabled: false, model: "qwen2.5vl:7b", mode: "deep" };
+        case "get_library_theme_provider_status": return { available: false, installedModels: [], selectedModelAvailable: false, detail: "Test provider unavailable" };
+        case "get_library_theme_index_status": return { eligibleItems: 0, indexedItems: 0, staleItems: 0, themeCount: 0 };
+        case "get_native_playback_status": return { available: false, active: null, detail: "Test native player unavailable" };
+        case "get_embedded_mpv_status": return { available: false, active: null, detail: "Test embedded player unavailable", lastError: null };
+        case "get_library_transcription_provider_status": return { available: false, executable: null, detail: "Test transcription provider unavailable" };
+        case "get_library_semantic_transcript_index_status": return { model: "", indexedItems: 0, staleItems: 0 };
+        case "get_library_local_inference_job": return null;
+        case "list_library_curation_queue": return args?.reviewLater ? [] : [testItem];
+        case "query_library_items": return { ...emptyQuery, items: [testItem], totalItems: 1 };
+        case "get_library_facets": return emptyFacets;
+        case "get_library_artwork": return null;
+        case "generate_library_storyboard":
+          Object.assign(window, { __PLAYWRIGHT_STORYBOARD_REQUEST__: args });
+          return {
+            itemId: testItem.id,
+            durationSeconds: 95,
+            generatedAt: "2026-01-01T00:00:00Z",
+            frames: [6, 18, 30, 42, 54, 66, 78, 90].map((timeSeconds) => ({
+              timeSeconds,
+              imageDataUrl: "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==",
+            })),
+          };
+        case "apply_library_bulk_metadata":
+          Object.assign(window, { __PLAYWRIGHT_BULK_METADATA_REQUEST__: args?.request });
+          return [testItem];
+        default:
+          if (command.startsWith("list_")) return [];
+          throw new Error(`Unhandled Playwright Tauri command: ${command}`);
+      }
+    };
+    Object.assign(window, {
+      __TAURI_EVENT_PLUGIN_INTERNALS__: {
+        unregisterListener: () => undefined,
+      },
+      __TAURI_INTERNALS__: {
+        callbacks,
+        invoke,
+        transformCallback(callback: (payload: unknown) => void, once = false) {
+          const id = nextCallbackId++;
+          callbacks.set(id, once ? (payload) => { callbacks.delete(id); callback(payload); } : callback);
+          return id;
+        },
+        unregisterCallback(id: number) { callbacks.delete(id); },
+        runCallback(id: number, payload: unknown) { callbacks.get(id)?.(payload); },
+        convertFileSrc(path: string) { return path; },
+        metadata: {
+          currentWindow: { label: "main" },
+          currentWebview: { label: "main" },
+        },
+      },
+    });
+    window.localStorage.setItem("nice-downloader.view", "home");
+  });
+}

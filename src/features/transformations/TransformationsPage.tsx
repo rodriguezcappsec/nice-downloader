@@ -1,10 +1,11 @@
 import { open, save } from "@tauri-apps/plugin-dialog";
-import { FileAudio, Film, FolderOpen, LoaderCircle, Scissors, Square, WandSparkles } from "lucide-react";
+import { Check, FileAudio, Film, FolderOpen, HardDrive, LoaderCircle, Scissors, Square, WandSparkles } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { Button, Field, Input, Select } from "../../components/ui";
+import { formatBytes } from "../../lib/format";
 import { api, normalizeError } from "../../lib/tauri";
 import { useAppStore } from "../../stores/app-store";
-import type { PrivacyBlurRegion, PrivacyMuteRange, PrivacyRedactionSuggestion, StartTransformationRequest, TransformationOperation, TransformationTask } from "../../types";
+import type { LibraryItem, PrivacyBlurRegion, PrivacyMuteRange, PrivacyRedactionSuggestion, StartTransformationRequest, TransformationOperation, TransformationTask } from "../../types";
 
 type OperationKind = TransformationOperation["type"];
 
@@ -29,6 +30,12 @@ export function TransformationsPage() {
   const [redactionSuggestions, setRedactionSuggestions] = useState<PrivacyRedactionSuggestion[]>([]);
   const [overwrite, setOverwrite] = useState(false);
   const [starting, setStarting] = useState(false);
+  const [optimizerOpen, setOptimizerOpen] = useState(false);
+  const [optimizerLoading, setOptimizerLoading] = useState(false);
+  const [optimizerItems, setOptimizerItems] = useState<LibraryItem[]>([]);
+  const [optimizerSelection, setOptimizerSelection] = useState<Set<string>>(new Set());
+  const [optimizerDestination, setOptimizerDestination] = useState("");
+  const [optimizerStarting, setOptimizerStarting] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -87,6 +94,43 @@ export function TransformationsPage() {
     }
   }
 
+  async function openOptimizer() {
+    const opening = !optimizerOpen;
+    setOptimizerOpen(opening);
+    if (!opening || optimizerItems.length || optimizerLoading) return;
+    setOptimizerLoading(true);
+    try {
+      const result = await api.queryLibraryItems({ page: 1, pageSize: 100, search: null, sourceId: null, folderSourceId: null, folderPath: null, folderScope: "tree", mediaKind: "video", resolution: null, container: null, duration: null, dateAdded: null, datePublished: null, availability: "available", tags: [], creators: [], series: [], sites: [], rating: null, collectionId: null, favoriteOnly: false, sort: "recent" });
+      setOptimizerItems(result.items);
+    } catch (error) {
+      setError(normalizeError(error));
+    } finally {
+      setOptimizerLoading(false);
+    }
+  }
+
+  async function chooseOptimizerDestination() {
+    const selected = await open({ multiple: false, directory: true, title: "Choose optimized-video output folder" });
+    if (selected) setOptimizerDestination(selected);
+  }
+
+  async function startOptimization() {
+    if (!optimizerSelection.size || !optimizerDestination || optimizerStarting) return;
+    setOptimizerStarting(true);
+    try {
+      const started = await api.startLibraryOptimization([...optimizerSelection], optimizerDestination, false);
+      setTasks((current) => mergeTransformationTasks(started, current));
+      setOptimizerSelection(new Set());
+      setNotice({ message: `Started ${started.length} compatibility optimization${started.length === 1 ? "" : "s"}. Originals remain unchanged.`, view: "transformations" });
+    } catch (error) {
+      setError(normalizeError(error));
+    } finally {
+      setOptimizerStarting(false);
+    }
+  }
+
+  const optimizerSourceBytes = optimizerItems.filter((item) => optimizerSelection.has(item.id)).reduce((total, item) => total + (item.fileSizeBytes || 0), 0);
+
   async function detectPrivacyRegions() {
     if (!inputPath || !detectorModel.trim()) return;
     setDetecting(true);
@@ -115,6 +159,11 @@ export function TransformationsPage() {
         <h1 className="text-[28px] font-semibold tracking-[-0.035em]">Transform media</h1>
         <p className="mt-2 text-[13px] text-muted">Trim, extract, convert, or split local media with FFmpeg. Tasks continue in Rust when this page is hidden.</p>
       </header>
+
+      <section className="panel-shadow mb-6 overflow-hidden rounded-[14px] border border-accent/20 bg-[linear-gradient(135deg,rgb(var(--accent)/0.08),rgb(var(--panel)/0.78)_42%)]" aria-labelledby="optimizer-title">
+        <div className="flex flex-wrap items-center gap-4 px-5 py-5"><div className="grid size-11 shrink-0 place-items-center rounded-[11px] bg-accent/10 text-accent"><HardDrive size={20} /></div><div className="min-w-0 flex-1"><p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-accent">Playback readiness</p><h2 id="optimizer-title" className="mt-1 text-lg font-semibold">Optimize Library</h2><p className="mt-1 text-[12px] leading-5 text-muted">Create permanent H.264/AAC MP4 versions for selected videos. Every output is separate and the original stays untouched.</p></div><Button variant="secondary" onClick={() => void openOptimizer()}>{optimizerOpen ? "Close" : "Choose videos"}</Button></div>
+        {optimizerOpen ? <div className="border-t border-line/60 px-5 py-5"><div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_360px]"><div><div className="mb-2 flex items-center justify-between gap-3"><p className="text-xs font-semibold">Available Library videos</p><button className="text-[10px] font-semibold text-accent" onClick={() => setOptimizerSelection(optimizerSelection.size === optimizerItems.length ? new Set() : new Set(optimizerItems.map((item) => item.id)))}>{optimizerSelection.size === optimizerItems.length && optimizerItems.length ? "Clear all" : "Select all shown"}</button></div><div className="max-h-72 space-y-1 overflow-y-auto rounded-[10px] border border-line/60 bg-canvas/35 p-2">{optimizerLoading ? <p className="flex items-center justify-center gap-2 py-12 text-xs text-muted"><LoaderCircle className="animate-spin" size={14} /> Loading videos…</p> : optimizerItems.length ? optimizerItems.map((item) => { const selected = optimizerSelection.has(item.id); return <button key={item.id} className={`flex w-full items-center gap-3 rounded-[8px] px-3 py-2 text-left ${selected ? "bg-accent/10 text-ink" : "text-muted hover:bg-elevated/60 hover:text-ink"}`} onClick={() => setOptimizerSelection((current) => { const next = new Set(current); if (next.has(item.id)) next.delete(item.id); else next.add(item.id); return next; })}><span className={`grid size-5 shrink-0 place-items-center rounded-[5px] border ${selected ? "border-accent bg-accent text-accentInk" : "border-line"}`}>{selected ? <Check size={12} /> : null}</span><span className="min-w-0 flex-1 truncate text-xs font-medium">{item.title}</span><span className="number-font shrink-0 text-[9px] text-muted">{item.fileSizeBytes ? formatBytes(item.fileSizeBytes) : "Unknown"}</span></button>; }) : <p className="py-12 text-center text-xs text-muted">No available Library videos were found.</p>}</div></div><aside className="rounded-[10px] border border-line/60 bg-elevated/30 p-4"><h3 className="text-xs font-semibold">Optimization plan</h3><dl className="mt-3 grid grid-cols-[1fr_auto] gap-y-2 text-[11px]"><dt className="text-muted">Selected videos</dt><dd className="number-font font-semibold">{optimizerSelection.size}</dd><dt className="text-muted">Source storage</dt><dd className="number-font font-semibold">{optimizerSourceBytes ? formatBytes(optimizerSourceBytes) : "Unknown"}</dd><dt className="text-muted">Output profile</dt><dd className="font-semibold">H.264 · AAC · MP4</dd></dl><p className="mt-3 text-[10px] leading-4 text-muted">Final size depends on the source and content. Each task is cancellable from Recent transformations.</p><Field label="Output folder"><div className="mt-2 flex gap-2"><Input className="h-9 text-xs" value={optimizerDestination} readOnly placeholder="Choose a folder" /><Button variant="secondary" className="h-9 px-3" onClick={() => void chooseOptimizerDestination()}><FolderOpen size={14} /></Button></div></Field><Button className="mt-4 w-full" disabled={!optimizerSelection.size || !optimizerDestination || optimizerStarting} onClick={() => void startOptimization()}>{optimizerStarting ? <LoaderCircle className="animate-spin" size={15} /> : <WandSparkles size={15} />} Start optimization</Button></aside></div></div> : null}
+      </section>
 
       <section className="panel-shadow border border-line/60 bg-panel/75 p-5">
         <div className="grid gap-4 lg:grid-cols-2">

@@ -156,6 +156,14 @@ h1, h2, h3 {
     linear-gradient(180deg, rgb(16 15 12), rgb(10 9 7));
 }
 
+.cinematic-player video::cue {
+  color: var(--subtitle-color, #fffdf5);
+  background: var(--subtitle-background, rgb(0 0 0 / 0.62));
+  font-size: var(--subtitle-size, 100%);
+  line-height: 1.35;
+  text-shadow: 0 1px 3px rgb(0 0 0 / 0.95);
+}
+
 ::selection {
   background: rgb(var(--accent) / 0.28);
   color: rgb(var(--ink));

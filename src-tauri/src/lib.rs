@@ -13,8 +13,10 @@ mod models;
 mod native_player;
 mod post_download_recipes;
 mod queue;
+mod screenshots;
 mod semantic_transcripts;
 mod subscriptions;
+mod subtitles;
 mod theme_analysis;
 mod transcripts;
 mod transformations;
@@ -234,6 +236,7 @@ pub fn run() {
             commands::export_diagnostics,
             commands::list_transformation_tasks,
             commands::start_transformation,
+            commands::start_library_optimization,
             commands::cancel_transformation,
             commands::suggest_privacy_redactions,
             commands::list_library_items,
@@ -289,6 +292,7 @@ pub fn run() {
             commands::update_embedded_mpv_bounds,
             commands::control_embedded_mpv,
             commands::close_embedded_mpv,
+            commands::capture_library_frame,
             commands::save_library_playback_progress,
             commands::list_continue_watching,
             commands::get_library_watch_state,
@@ -300,6 +304,7 @@ pub fn run() {
             commands::update_library_item,
             commands::get_library_rich_metadata,
             commands::save_library_rich_metadata,
+            commands::apply_library_bulk_metadata,
             commands::reset_library_rich_metadata,
             commands::set_library_artwork,
             commands::get_library_search_status,
@@ -337,6 +342,7 @@ pub fn run() {
             commands::set_library_curation_decision,
             commands::export_library_moments,
             commands::generate_library_storyboard,
+            commands::load_library_embedded_subtitles,
             commands::start_library_clip_export,
             commands::apply_library_bulk_action,
             commands::list_library_changes,
@@ -370,6 +376,8 @@ pub fn run() {
             commands::set_library_folder_private,
             commands::list_library_sources,
             commands::save_library_source,
+            commands::get_library_source_automation,
+            commands::save_library_source_automation,
             commands::remove_library_source,
             commands::list_library_scan_jobs,
             commands::start_library_scan,

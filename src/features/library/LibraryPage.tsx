@@ -7,6 +7,7 @@ import {
   Ban,
   BellDot,
   Bookmark,
+  Camera,
   Captions,
   Check,
   Copy,
@@ -19,6 +20,7 @@ import {
   FolderPlus,
   FolderSearch,
   FolderInput,
+  GripHorizontal,
   HardDrive,
   Heart,
   ListPlus,
@@ -41,6 +43,8 @@ import {
   Minimize2,
   RotateCcw,
   RotateCw,
+  Repeat2,
+  Scaling,
   Save,
   Search,
   ScanSearch,
@@ -55,11 +59,13 @@ import {
   Trash2,
   Tv,
   Undo2,
+  Volume2,
+  VolumeX,
   X,
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { Button, Field, Input, Select, Textarea } from "../../components/ui";
 import { formatBytes, formatDuration } from "../../lib/format";
 import { assessEmbeddedCompatibility, embeddedPlaybackFingerprint, formatMediaCodec } from "../../lib/media-compatibility";
@@ -90,6 +96,7 @@ import type {
   LibraryCollection,
   LibraryFacets,
   LibraryFolderFacet,
+  LibraryHealthSummary,
   LibraryMediaKind,
   LibraryMediaStack,
   LibraryMediaStackRole,
@@ -108,12 +115,15 @@ import type {
   LibraryTranscriptMatch,
   LibrarySmartView,
   LibrarySmartViewQuery,
+  LibraryStoryboard,
+  LibrarySubtitleTrack,
   LibraryWatchState,
   LibraryQueryRequest,
   LibraryQueryResult,
   LibrarySort,
   LibraryScanJob,
   LibrarySource,
+  LibrarySourceAutomation,
 } from "../../types";
 
 type MediaFilter = "all" | "video" | "image";
@@ -124,12 +134,100 @@ type AvailabilityFilter = "all" | "available" | "missing";
 type FolderScope = "tree" | "direct";
 type FolderSelection = { sourceId: string; path: string };
 type FolderOption = FolderSelection & { value: string; label: string; directCount: number; treeCount: number };
+type MiniPlayerLayout = { x: number; y: number; width: number };
+type MiniPlayerGesture = {
+  kind: "move" | "resize";
+  pointerId: number;
+  startClientX: number;
+  startClientY: number;
+  startFrame: MiniPlayerLayout;
+  startHeight: number;
+  previousCursor: string;
+  previousUserSelect: string;
+};
+type SubtitlePosition = "bottom" | "middle" | "top";
+type SubtitleColor = "white" | "yellow";
+type SubtitleBackground = "none" | "soft" | "strong";
+type SubtitleCueOrigin = { startTime: number; endTime: number; line: number | "auto"; snapToLines: boolean };
 const LIBRARY_PAGE_SIZE = 60;
 const WATCH_BROWSE_PAGE_SIZE = 24;
+const MINI_PLAYER_LAYOUT_KEY = "nice-downloader.mini-player-layout";
+const MINI_PLAYER_MARGIN = 16;
+const MINI_PLAYER_DEFAULT_WIDTH = 420;
+const MINI_PLAYER_MIN_WIDTH = 340;
+const MINI_PLAYER_MAX_WIDTH = 720;
+const MEDIA_HOVER_PREVIEW_DELAY_MS = 450;
+const MEDIA_HOVER_STORYBOARD_FRAMES = 8;
+const MEDIA_HOVER_STORYBOARD_CACHE_LIMIT = 12;
+const mediaHoverStoryboardCache = new Map<string, LibraryStoryboard>();
+const mediaHoverStoryboardRequests = new Map<string, Promise<LibraryStoryboard>>();
 const EMPTY_LIBRARY_RESULT: LibraryQueryResult = { items: [], totalItems: 0, page: 1, pageSize: LIBRARY_PAGE_SIZE, totalPages: 1 };
 const EMPTY_LIBRARY_FACETS: LibraryFacets = { totalItems: 0, availableItems: 0, missingItems: 0, containers: [], tags: [], creators: [], series: [], sites: [], themes: [], folders: [] };
 type LiveAnnouncement = { signature: string; message: string; assertive?: boolean };
 type TranscriptSeekRequest = { id: number; itemId: string; seconds: number };
+
+function smartCollectionRules(
+  query: LibrarySmartViewQuery,
+  sourceNames: Map<string, string>,
+  collectionNames: Map<string, string>,
+): string[] {
+  const rules: string[] = [];
+  if (query.search) rules.push(`Search “${query.search}”`);
+  if (query.mediaKind === "video") rules.push("Videos");
+  if (query.mediaKind === "image") rules.push("Images");
+  if (query.sourceId) rules.push(`Source: ${sourceNames.get(query.sourceId) || "Saved source"}`);
+  if (query.folderPath != null) rules.push(query.folderPath ? `Folder: ${query.folderPath}` : "Source root only");
+  if (query.resolution) rules.push(`${query.resolution} resolution`);
+  if (query.container) rules.push(query.container.toLocaleUpperCase());
+  if (query.duration) rules.push(`${query.duration} duration`);
+  if (query.dateAdded) rules.push(`Added: ${query.dateAdded}`);
+  if (query.datePublished) rules.push(`Published: ${query.datePublished}`);
+  if (query.availability !== "available") rules.push(query.availability === "missing" ? "Missing files" : "Any availability");
+  rules.push(...query.tags.map((tag) => `#${tag}`));
+  rules.push(...query.creators.map((creator) => `Creator: ${creator}`));
+  rules.push(...query.series.map((series) => `Series: ${series}`));
+  rules.push(...query.sites.map((site) => `Site: ${site}`));
+  if (query.theme) rules.push(`Theme: ${query.theme}`);
+  if (query.rating) rules.push(`Rating: ${query.rating}`);
+  if (query.collectionId) rules.push(`Collection: ${collectionNames.get(query.collectionId) || "Saved collection"}`);
+  if (query.favoriteOnly) rules.push("Favorites");
+  if (query.privateOnly) rules.push("Private media");
+  if (query.sort !== "recent") rules.push(`Sort: ${query.sort}`);
+  return rules.length > 0 ? rules : ["All available media"];
+}
+
+function readMiniPlayerLayout(): MiniPlayerLayout | null {
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(MINI_PLAYER_LAYOUT_KEY) || "null") as Partial<MiniPlayerLayout> | null;
+    if (!parsed || !Number.isFinite(parsed.x) || !Number.isFinite(parsed.y) || !Number.isFinite(parsed.width)) return null;
+    return { x: Number(parsed.x), y: Number(parsed.y), width: Number(parsed.width) };
+  } catch {
+    return null;
+  }
+}
+
+function clampMiniPlayerLayout(layout: MiniPlayerLayout, height: number): MiniPlayerLayout {
+  const viewportWidth = Math.max(0, window.innerWidth);
+  const viewportHeight = Math.max(0, window.innerHeight);
+  const availableWidth = Math.max(0, viewportWidth - MINI_PLAYER_MARGIN * 2);
+  const minimumWidth = Math.min(MINI_PLAYER_MIN_WIDTH, availableWidth);
+  const width = Math.min(Math.max(minimumWidth, layout.width), Math.min(MINI_PLAYER_MAX_WIDTH, availableWidth));
+  const maximumX = Math.max(MINI_PLAYER_MARGIN, viewportWidth - width - MINI_PLAYER_MARGIN);
+  const visibleHeight = Math.min(Math.max(0, height), Math.max(0, viewportHeight - MINI_PLAYER_MARGIN * 2));
+  const maximumY = Math.max(MINI_PLAYER_MARGIN, viewportHeight - visibleHeight - MINI_PLAYER_MARGIN);
+  return {
+    x: Math.min(Math.max(MINI_PLAYER_MARGIN, layout.x), maximumX),
+    y: Math.min(Math.max(MINI_PLAYER_MARGIN, layout.y), maximumY),
+    width,
+  };
+}
+
+function sameMiniPlayerLayout(left: MiniPlayerLayout | null, right: MiniPlayerLayout) {
+  return Boolean(left
+    && Math.abs(left.x - right.x) < 0.5
+    && Math.abs(left.y - right.y) < 0.5
+    && Math.abs(left.width - right.width) < 0.5);
+}
 
 type LibraryWorkspaceSection = "home" | "all" | "videos" | "images" | "playlists" | "watchLater" | "private";
 
@@ -166,6 +264,8 @@ export function LibraryPage({ active = true, workspace = "library" }: { active?:
   const [smartViewFormOpen, setSmartViewFormOpen] = useState(false);
   const [smartViewBusy, setSmartViewBusy] = useState(false);
   const [confirmDeleteSmartViewId, setConfirmDeleteSmartViewId] = useState<string | null>(null);
+  const [smartViewCounts, setSmartViewCounts] = useState<Record<string, number>>({});
+  const [smartViewCountsLoading, setSmartViewCountsLoading] = useState(false);
   const [searchStatus, setSearchStatus] = useState<LibrarySearchStatus | null>(null);
   const [transcriptStatus, setTranscriptStatus] = useState<LibraryTranscriptIndexStatus | null>(null);
   const [transcriptMatches, setTranscriptMatches] = useState<LibraryTranscriptMatch[]>([]);
@@ -186,6 +286,8 @@ export function LibraryPage({ active = true, workspace = "library" }: { active?:
   const [playbackContext, setPlaybackContext] = useState<LibraryItem[] | null>(null);
   const [playNextItems, setPlayNextQueueItems] = useState<LibraryItem[]>([]);
   const [changes, setChanges] = useState<LibraryChange[]>([]);
+  const [healthSummary, setHealthSummary] = useState<LibraryHealthSummary | null>(null);
+  const [curationQueueSummary, setCurationQueueSummary] = useState({ count: 0, capped: false });
   const [duplicateJob, setDuplicateJob] = useState<LibraryDuplicateAnalysisJob | null>(null);
   const [duplicateGroups, setDuplicateGroups] = useState<LibraryDuplicateGroup[]>([]);
   const [fileOperations, setFileOperations] = useState<LibraryFileOperation[]>([]);
@@ -665,7 +767,11 @@ export function LibraryPage({ active = true, workspace = "library" }: { active?:
   useEffect(() => {
     const refreshWatchShelves = () => scheduleLibraryRefresh(0);
     window.addEventListener("nice-downloader:library-watch-state", refreshWatchShelves);
-    return () => window.removeEventListener("nice-downloader:library-watch-state", refreshWatchShelves);
+    window.addEventListener("nice-downloader:library-items-changed", refreshWatchShelves);
+    return () => {
+      window.removeEventListener("nice-downloader:library-watch-state", refreshWatchShelves);
+      window.removeEventListener("nice-downloader:library-items-changed", refreshWatchShelves);
+    };
   }, []);
 
   useEffect(() => {
@@ -902,6 +1008,39 @@ export function LibraryPage({ active = true, workspace = "library" }: { active?:
     return { ...query, search: search.trim() || null };
   }, [libraryRequest, search]);
 
+  const visibleSmartViews = useMemo(
+    () => smartViews.filter((view) => !view.query.privateOnly || Boolean(privacyStatus?.configured && !privacyStatus.locked)),
+    [privacyStatus?.configured, privacyStatus?.locked, smartViews],
+  );
+
+  useEffect(() => {
+    if (!active || visibleSmartViews.length === 0) {
+      setSmartViewCounts({});
+      setSmartViewCountsLoading(false);
+      return;
+    }
+    let disposed = false;
+    setSmartViewCountsLoading(true);
+    void (async () => {
+      const nextCounts: Record<string, number> = {};
+      for (let index = 0; index < visibleSmartViews.length; index += 4) {
+        const group = visibleSmartViews.slice(index, index + 4);
+        await Promise.all(group.map(async (view) => {
+          try {
+            const result = await api.queryLibraryItems({ ...view.query, page: 1, pageSize: 1 });
+            nextCounts[view.id] = result.totalItems;
+          } catch {
+            // A stale saved rule must not prevent the rest of Library from loading.
+          }
+        }));
+        if (disposed) return;
+      }
+      setSmartViewCounts(nextCounts);
+      setSmartViewCountsLoading(false);
+    })();
+    return () => { disposed = true; };
+  }, [active, libraryRevision, visibleSmartViews]);
+
   useEffect(() => {
     if (!activeSmartViewId) return;
     const activeView = smartViews.find((view) => view.id === activeSmartViewId);
@@ -996,6 +1135,23 @@ export function LibraryPage({ active = true, workspace = "library" }: { active?:
   }, [availabilityFilter, libraryRevision, setError, sourceFilter]);
 
   useEffect(() => {
+    let disposed = false;
+    void Promise.all([
+      api.getLibraryHealthSummary(),
+      api.listLibraryCurationQueue(false, 500),
+      api.listLibraryCurationQueue(true, 500),
+    ]).then(([health, unreviewed, reviewLater]) => {
+      if (disposed) return;
+      setHealthSummary(health);
+      setCurationQueueSummary({
+        count: unreviewed.length + reviewLater.length,
+        capped: unreviewed.length === 500 || reviewLater.length === 500,
+      });
+    }).catch((error) => { if (!disposed) setError(normalizeError(error)); });
+    return () => { disposed = true; };
+  }, [libraryRevision, setError]);
+
+  useEffect(() => {
     if (!manageOpen) return;
     const ids = Array.from(new Set([
       ...changes.map((change) => change.itemId),
@@ -1009,6 +1165,21 @@ export function LibraryPage({ active = true, workspace = "library" }: { active?:
   }, [changes, duplicateGroups, libraryRevision, manageOpen, setError]);
 
 const sourceNames = useMemo(() => new Map(sources.map((source) => [source.id, source.name])), [sources]);
+const latestScanWarningCount = useMemo(() => {
+    const visibleSourceIds = new Set(sources.map((source) => source.id));
+    const latestBySource = new Map<string, LibraryScanJob>();
+    for (const job of scanJobs) {
+      if (!visibleSourceIds.has(job.sourceId)) continue;
+      const current = latestBySource.get(job.sourceId);
+      if (!current || Date.parse(job.updatedAt) > Date.parse(current.updatedAt)) latestBySource.set(job.sourceId, job);
+    }
+    return Array.from(latestBySource.values()).reduce((total, job) => total + job.warningCount, 0);
+  }, [scanJobs, sources]);
+const collectionNames = useMemo(() => new Map(collections.map((collection) => [collection.id, collection.name])), [collections]);
+const smartCollectionCards = useMemo(() => visibleSmartViews.map((view) => ({
+    view,
+    rules: smartCollectionRules(view.query, sourceNames, collectionNames),
+  })), [collectionNames, sourceNames, visibleSmartViews]);
 const items = queryResult.items;
 const privateMediaIds = useMemo(() => {
     if (!privacyRules || privacyStatus?.locked) return new Set<string>();
@@ -1465,6 +1636,27 @@ const resultTitle = search.trim()
     if (section === "private") setPrivacyOnly(true);
   }
 
+  function openLibraryManagerSection(targetId: string) {
+    setManageOpen(true);
+    window.setTimeout(() => {
+      const target = document.getElementById(targetId);
+      if (target) target.tabIndex = -1;
+      target?.scrollIntoView({ block: "start" });
+      target?.focus();
+    }, 0);
+  }
+
+  function openMissingMedia() {
+    setWorkspaceSection("all");
+    setActivePlaylist(null);
+    setActivePlaylistItems([]);
+    setSearch("");
+    resetFilters();
+    setAvailabilityFilter("missing");
+    setResultPage(1);
+    setView("library");
+  }
+
   const previousWorkspace = useRef(workspace);
   useEffect(() => {
     if (!active || previousWorkspace.current === workspace) return;
@@ -1474,6 +1666,10 @@ const resultTitle = search.trim()
 
   function applySmartView(view: LibrarySmartView) {
     const query = view.query;
+    if (query.privateOnly && (!privacyStatus?.configured || privacyStatus.locked)) {
+      setNotice({ message: "Unlock Private Library in Settings to open this Smart Collection.", view: "library" });
+      return;
+    }
     setActivePlaylist(null);
     setActivePlaylistItems([]);
     setSearch(query.search || "");
@@ -1902,6 +2098,7 @@ const resultTitle = search.trim()
             scheduleLibraryRefresh(0);
           }}
         />
+        <WatchAutomationSection sources={sources} collections={collections} />
         <CollectionSection collections={collections} onChanged={setCollections} />
         <ReviewSection changes={changes} items={manageItems} sourceNames={sourceNames} onChanged={setChanges} />
         <DuplicateSection job={duplicateJob} groups={duplicateGroups} items={manageItems} onJob={setDuplicateJob} onTrashed={(itemId) => {
@@ -1960,11 +2157,40 @@ const resultTitle = search.trim()
         {folderFilter !== "all" && privacyStatus?.configured && !privacyStatus.locked ? <><Button variant="ghost" disabled={busy} onClick={() => void setCurrentFolderPrivacy(true)}><Lock size={14} /> Make current folder private</Button><Button variant="ghost" disabled={busy} onClick={() => void setCurrentFolderPrivacy(false)}>Remove folder privacy rule</Button></> : null}
       </div>
 
+      {workspaceSection === "home" ? <LibraryActivityInbox
+        curationCount={curationQueueSummary.count}
+        curationCapped={curationQueueSummary.capped}
+        changeCount={changes.length}
+        scanWarningCount={latestScanWarningCount}
+        health={healthSummary}
+        onOpenCuration={() => setView("curation")}
+        onOpenChanges={() => openLibraryManagerSection("library-review-title")}
+        onOpenScans={() => openLibraryManagerSection("library-sources-title")}
+        onOpenMissing={openMissingMedia}
+        onOpenHealth={() => setView("health")}
+      /> : null}
+
       <div className={workspaceSection === "home" ? "hidden" : ""}>
-      <section className="mt-3 flex flex-wrap items-center gap-2 border-y border-line/45 py-2.5" aria-label="Automatic collections">
-        <span className="mr-1 inline-flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-muted"><Bookmark size={13} /> Automatic collections</span>
-        {smartViews.length === 0 ? <span className="text-[11px] text-muted">Save the current filters as a collection that updates itself.</span> : smartViews.map((view) => <span key={view.id} className={`inline-flex items-center overflow-hidden rounded-[7px] border ${activeSmartViewId === view.id ? "border-accent/35 bg-accent/12 text-accent" : "border-line/70 bg-elevated/50 text-muted"}`}><button className="h-7 max-w-[220px] truncate px-2.5 text-[11px] font-medium hover:text-ink" onClick={() => applySmartView(view)} title={`Open ${view.name}`}>{view.name}</button><button className={`grid size-7 place-items-center border-l transition ${confirmDeleteSmartViewId === view.id ? "border-red-400/30 bg-red-400/10 text-red-300" : "border-line/60 hover:bg-panel hover:text-ink"}`} disabled={smartViewBusy} onClick={() => void deleteSmartView(view.id)} aria-label={confirmDeleteSmartViewId === view.id ? `Confirm removing ${view.name}` : `Remove ${view.name}`} title={confirmDeleteSmartViewId === view.id ? "Click again to confirm" : "Remove automatic collection"}>{confirmDeleteSmartViewId === view.id ? <Trash2 size={12} /> : <X size={12} />}</button></span>)}
-        <span className="ml-auto flex items-center gap-2">{smartViewFormOpen ? <><Input className="h-8 w-[190px] text-xs" value={smartViewName} maxLength={80} autoFocus placeholder="Collection name" onChange={(event) => setSmartViewName(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void saveCurrentSmartView(); if (event.key === "Escape") { setSmartViewFormOpen(false); setSmartViewName(""); } }} /><Button className="h-8 text-xs" disabled={!smartViewName.trim() || smartViewBusy} onClick={() => void saveCurrentSmartView()}>{smartViewBusy ? <LoaderCircle className="animate-spin" size={13} /> : <Save size={13} />} Save</Button><Button variant="ghost" className="h-8 text-xs" onClick={() => { setSmartViewFormOpen(false); setSmartViewName(""); }}>Cancel</Button></> : <Button variant="ghost" className="h-8 text-xs" onClick={() => setSmartViewFormOpen(true)}><Bookmark size={13} /> Save automatic collection</Button>}<button className={`inline-flex h-8 items-center gap-1.5 rounded-[7px] px-2 text-[10px] transition hover:bg-elevated hover:text-ink ${searchStatus?.consistent === false ? "text-amber-300" : "text-muted"}`} disabled={smartViewBusy} onClick={() => void rebuildSearchIndex()} title="Rebuild the local Library search index"><Database size={12} />{searchStatus?.consistent === false ? "Repair search" : searchStatus ? "Search ready" : "Search index"}</button></span>
+      <section className="mt-4 rounded-panel bg-panel/55 p-4 shadow-control" aria-labelledby="smart-collections-heading">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 id="smart-collections-heading" className="flex items-center gap-2 text-sm font-semibold"><Bookmark className="text-accent" size={16} /> Smart Collections</h2>
+            <p className="mt-1 max-w-2xl text-xs leading-5 text-muted">Saved rules update automatically as media is added, inspected, rated, or organized.</p>
+          </div>
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            {smartViewFormOpen ? <><Input aria-label="Smart Collection name" className="h-9 w-[210px] text-xs" value={smartViewName} maxLength={80} autoFocus placeholder="Collection name" onChange={(event) => setSmartViewName(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void saveCurrentSmartView(); if (event.key === "Escape") { setSmartViewFormOpen(false); setSmartViewName(""); } }} /><Button className="h-9 text-xs" disabled={!smartViewName.trim() || smartViewBusy} onClick={() => void saveCurrentSmartView()}>{smartViewBusy ? <LoaderCircle className="animate-spin" size={13} /> : <Save size={13} />} Save</Button><Button variant="ghost" className="h-9 text-xs" onClick={() => { setSmartViewFormOpen(false); setSmartViewName(""); }}>Cancel</Button></> : <Button variant="secondary" className="h-9 text-xs" onClick={() => setSmartViewFormOpen(true)}><Bookmark size={13} /> Create from current filters</Button>}
+            <button className={`inline-flex h-9 items-center gap-1.5 rounded-[7px] px-2.5 text-[11px] transition hover:bg-elevated hover:text-ink ${searchStatus?.consistent === false ? "text-amber-300" : "text-muted"}`} disabled={smartViewBusy} onClick={() => void rebuildSearchIndex()} title="Rebuild the local Library search index"><Database size={13} />{searchStatus?.consistent === false ? "Repair search" : searchStatus ? "Search ready" : "Search index"}</button>
+          </div>
+        </div>
+        {smartCollectionCards.length === 0 ? <div className="mt-4 rounded-[10px] border border-dashed border-line/70 px-4 py-5 text-center"><p className="text-sm font-medium">Build a shelf around what matters to you</p><p className="mx-auto mt-1 max-w-xl text-xs leading-5 text-muted">Choose any combination of search, creator, folder, theme, format, rating, or availability filters, then save those rules here.</p></div> : <div className="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">{smartCollectionCards.map(({ view, rules }) => {
+          const count = smartViewCounts[view.id];
+          const previewRules = rules.slice(0, 3);
+          return <article key={view.id} className={`group relative min-w-0 rounded-[10px] border p-3 transition ${activeSmartViewId === view.id ? "border-accent/45 bg-accent/10" : "border-line/60 bg-elevated/45 hover:border-line"}`}>
+            <div className="flex items-start gap-3"><button className="min-w-0 flex-1 text-left" onClick={() => applySmartView(view)} aria-label={`Open Smart Collection ${view.name}`}><span className="flex items-center gap-2"><span className="truncate text-sm font-semibold text-ink">{view.name}</span>{view.query.privateOnly ? <Lock className="shrink-0 text-muted" size={12} aria-label="Private rules" /> : null}</span><span className="mt-1 block text-[11px] text-muted">{smartViewCountsLoading && count == null ? "Updating count…" : count == null ? "Count unavailable" : `${count.toLocaleString()} matching item${count === 1 ? "" : "s"}`}</span></button><button className={`grid size-8 shrink-0 place-items-center rounded-[7px] transition ${confirmDeleteSmartViewId === view.id ? "bg-red-400/12 text-red-300" : "text-muted hover:bg-panel hover:text-ink"}`} disabled={smartViewBusy} onClick={() => void deleteSmartView(view.id)} aria-label={confirmDeleteSmartViewId === view.id ? `Confirm removing ${view.name}` : `Remove ${view.name}`} title={confirmDeleteSmartViewId === view.id ? "Click again to confirm" : "Remove Smart Collection"}>{confirmDeleteSmartViewId === view.id ? <Trash2 size={14} /> : <X size={14} />}</button></div>
+            <button className="mt-3 flex w-full flex-wrap gap-1.5 text-left" onClick={() => applySmartView(view)} aria-label={`Apply rules for ${view.name}`}>{previewRules.map((rule) => <span key={rule} className="max-w-full truncate rounded-[6px] bg-panel/75 px-2 py-1 text-[10px] text-muted">{rule}</span>)}{rules.length > previewRules.length ? <span className="rounded-[6px] bg-panel/75 px-2 py-1 text-[10px] text-muted">+{rules.length - previewRules.length} rules</span> : null}</button>
+          </article>;
+        })}</div>}
+        {smartViews.length > visibleSmartViews.length ? <p className="mt-3 flex items-center gap-1.5 text-[11px] text-muted"><Lock size={12} /> Private Smart Collections stay hidden while the Private Library is locked.</p> : null}
       </section>
 
       {searchStatus && !searchStatus.consistent ? <div className="mt-3 flex items-center gap-3 border-l-2 border-amber-400/60 bg-amber-400/5 px-3 py-2 text-xs text-amber-100" role="alert"><span>Search index has {searchStatus.indexedItems.toLocaleString()} of {searchStatus.catalogItems.toLocaleString()} Library items.</span><Button variant="secondary" className="ml-auto h-8 text-xs" disabled={smartViewBusy} onClick={() => void rebuildSearchIndex()}>{smartViewBusy ? <LoaderCircle className="animate-spin" size={13} /> : <RotateCcw size={13} />} Rebuild search</Button></div> : null}
@@ -2359,6 +2585,39 @@ function PlaylistWorkspace({ playlist, items, loading, busy, sourceNames, onBack
   </section>;
 }
 
+function LibraryActivityInbox({ curationCount, curationCapped, changeCount, scanWarningCount, health, onOpenCuration, onOpenChanges, onOpenScans, onOpenMissing, onOpenHealth }: { curationCount: number; curationCapped: boolean; changeCount: number; scanWarningCount: number; health: LibraryHealthSummary | null; onOpenCuration: () => void; onOpenChanges: () => void; onOpenScans: () => void; onOpenMissing: () => void; onOpenHealth: () => void }) {
+  const activities = [
+    { key: "curation", label: "Curation queue", detail: "New and saved-for-later media awaiting a decision", count: curationCount, countLabel: curationCapped ? `${curationCount}+` : String(curationCount), action: onOpenCuration },
+    { key: "changes", label: "Library changes", detail: "Added, moved, restored, or changed files to review", count: changeCount, countLabel: String(changeCount), action: onOpenChanges },
+    { key: "scans", label: "Scan warnings", detail: "Warnings from the latest scan of each watched folder", count: scanWarningCount, countLabel: String(scanWarningCount), action: onOpenScans },
+    { key: "missing", label: "Missing media", detail: "Catalog entries whose original file is unavailable", count: health?.missingItems || 0, countLabel: String(health?.missingItems || 0), action: onOpenMissing },
+    { key: "metadata", label: "Inspection failures", detail: "Files whose technical metadata could not be inspected", count: health?.metadataFailedItems || 0, countLabel: String(health?.metadataFailedItems || 0), action: onOpenHealth },
+    { key: "health", label: "Other health notices", detail: "Pending inspection and conservative playback advisories", count: (health?.metadataPendingItems || 0) + (health?.compatibilityRiskItems || 0), countLabel: String((health?.metadataPendingItems || 0) + (health?.compatibilityRiskItems || 0)), action: onOpenHealth },
+  ].filter((activity) => activity.count > 0);
+  const total = activities.reduce((sum, activity) => sum + activity.count, 0);
+
+  function iconFor(key: string) {
+    if (key === "curation") return <CheckSquare2 size={15} />;
+    if (key === "changes") return <BellDot size={15} />;
+    if (key === "scans") return <FolderSearch size={15} />;
+    if (key === "missing") return <FileVideo size={15} />;
+    if (key === "metadata") return <Database size={15} />;
+    return <Film size={15} />;
+  }
+
+  return <details className="group mt-4 overflow-hidden rounded-[12px] border border-line/55 bg-panel/55 shadow-control">
+    <summary className="flex min-h-12 cursor-pointer list-none items-center gap-3 px-4 py-2.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/70">
+      <span className={`grid size-8 shrink-0 place-items-center rounded-[8px] ${total ? "bg-accent/10 text-accent" : "bg-elevated text-muted"}`}><BellDot size={15} /></span>
+      <span className="min-w-0 flex-1"><strong className="block text-[12px] font-semibold">Library activity</strong><span className="mt-0.5 block truncate text-[10px] text-muted">{total ? `${total.toLocaleString()} attention signal${total === 1 ? "" : "s"} across review and media health` : "Everything visible is reviewed and healthy"}</span></span>
+      {total ? <span className="number-font rounded-[6px] bg-accent/10 px-2 py-1 text-[10px] font-semibold text-accent">{total.toLocaleString()}</span> : <Check size={15} className="text-emerald-300" />}
+      <ChevronRight className="text-muted transition-transform group-open:rotate-90" size={15} />
+    </summary>
+    <div className="border-t border-line/50 p-3">
+      {activities.length ? <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">{activities.map((activity) => <button key={activity.key} className="flex min-h-16 items-center gap-3 rounded-[9px] bg-elevated/40 px-3 py-2.5 text-left transition hover:bg-elevated/75 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70" onClick={activity.action}><span className="grid size-8 shrink-0 place-items-center rounded-[7px] bg-panel text-accent">{iconFor(activity.key)}</span><span className="min-w-0 flex-1"><strong className="block text-[11px] font-semibold">{activity.label}</strong><span className="mt-0.5 block text-[9px] leading-4 text-muted">{activity.detail}</span></span><span className="number-font shrink-0 text-xs font-semibold text-accent">{activity.countLabel}</span></button>)}</div> : <div className="flex items-center gap-3 px-2 py-3 text-[11px] text-muted"><Check className="text-emerald-300" size={16} /><span>No visible media needs review. Private activity remains hidden while the vault is locked.</span></div>}
+    </div>
+  </details>;
+}
+
 function MediaSection({ title, subtitle, items, sourceNames, onSelect, onSeeAll, progress, horizontal = false, selectionMode = false, selectedIds = new Set(), onToggleSelection, privateItemIds = new Set(), viewMode = "grid" }: { title: string; subtitle: string; items: LibraryItem[]; sourceNames: Map<string, string>; onSelect: (item: LibraryItem) => void; onSeeAll?: () => void; progress?: Map<string, number>; horizontal?: boolean; selectionMode?: boolean; selectedIds?: Set<string>; onToggleSelection?: (id: string) => void; privateItemIds?: Set<string>; viewMode?: "grid" | "list" }) {
   const shelfRef = useRef<HTMLDivElement | null>(null);
   const shelf = horizontal && viewMode === "grid" && !selectionMode;
@@ -2372,6 +2631,42 @@ function MediaSection({ title, subtitle, items, sourceNames, onSelect, onSeeAll,
   return <section className="mt-10" aria-labelledby={headingId}><div className="mb-4 flex items-end justify-between gap-4"><div><h2 id={headingId} className="text-[21px] font-semibold tracking-[-0.035em]">{title}</h2><p className="mt-1 text-[12px] text-muted">{subtitle}</p></div><div className="flex items-center gap-2">{onSeeAll ? <button className="h-9 rounded-control px-3 text-[12px] font-semibold text-muted transition hover:bg-elevated hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70" onClick={onSeeAll}>See all</button> : null}{shelf && items.length > 1 ? <div className="flex gap-1"><button className="grid size-9 place-items-center rounded-full bg-elevated/70 text-muted hover:bg-elevated hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70" onClick={() => moveShelf(-1)} aria-label={`Scroll ${title} left`}><ChevronRight className="rotate-180" size={16} /></button><button className="grid size-9 place-items-center rounded-full bg-elevated/70 text-muted hover:bg-elevated hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70" onClick={() => moveShelf(1)} aria-label={`Scroll ${title} right`}><ChevronRight size={16} /></button></div> : null}</div></div>{items.length > 0 ? <div ref={shelfRef} tabIndex={shelf ? 0 : undefined} onKeyDown={shelf ? (event) => { if (event.key === "ArrowLeft") { event.preventDefault(); moveShelf(-1); } else if (event.key === "ArrowRight") { event.preventDefault(); moveShelf(1); } } : undefined} className={shelf ? "media-shelf flex snap-x snap-mandatory gap-4 overflow-x-auto pb-3 outline-none focus-visible:ring-2 focus-visible:ring-accent/60" : viewMode === "grid" ? "grid gap-x-4 gap-y-7 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4" : "grid gap-2"} aria-label={shelf ? `${title} media shelf. Use Left and Right Arrow keys to scroll.` : undefined}>{items.map((item) => <div key={item.id} className={shelf ? "w-[clamp(220px,24vw,330px)] shrink-0 snap-start" : ""}><MediaCard item={item} sourceName={sourceLabel(item, sourceNames)} progress={progress?.get(item.id)} selected={selectedIds.has(item.id)} selectionMode={selectionMode} privateMedia={privateItemIds.has(item.id)} initialWatchLater={title.toLocaleLowerCase() === "watch later"} viewMode={viewMode} onSelect={() => selectionMode ? onToggleSelection?.(item.id) : onSelect(item)} /></div>)}</div> : <div className="border border-dashed border-line/70 px-6 py-12 text-center text-sm text-muted">Nothing matches these filters.</div>}</section>;
 }
 
+function mediaHoverStoryboardKey(item: LibraryItem) {
+  return `${item.id}:${item.modifiedAtMs ?? item.updatedAt}:${MEDIA_HOVER_STORYBOARD_FRAMES}`;
+}
+
+function rememberMediaHoverStoryboard(key: string, storyboard: LibraryStoryboard) {
+  mediaHoverStoryboardCache.delete(key);
+  mediaHoverStoryboardCache.set(key, storyboard);
+  while (mediaHoverStoryboardCache.size > MEDIA_HOVER_STORYBOARD_CACHE_LIMIT) {
+    const oldest = mediaHoverStoryboardCache.keys().next().value;
+    if (oldest == null) break;
+    mediaHoverStoryboardCache.delete(oldest);
+  }
+}
+
+async function loadMediaHoverStoryboard(item: LibraryItem, privateMedia: boolean) {
+  const key = mediaHoverStoryboardKey(item);
+  if (!privateMedia) {
+    const cached = mediaHoverStoryboardCache.get(key);
+    if (cached) {
+      rememberMediaHoverStoryboard(key, cached);
+      return cached;
+    }
+    const pending = mediaHoverStoryboardRequests.get(key);
+    if (pending) return pending;
+  }
+  const request = api.generateLibraryStoryboard(item.id, MEDIA_HOVER_STORYBOARD_FRAMES);
+  if (!privateMedia) mediaHoverStoryboardRequests.set(key, request);
+  try {
+    const storyboard = await request;
+    if (!privateMedia) rememberMediaHoverStoryboard(key, storyboard);
+    return storyboard;
+  } finally {
+    if (!privateMedia && mediaHoverStoryboardRequests.get(key) === request) mediaHoverStoryboardRequests.delete(key);
+  }
+}
+
 function MediaCard({ item, sourceName, onSelect, progress, selectionMode = false, selected = false, privateMedia = false, initialWatchLater = false, viewMode = "grid" }: { item: LibraryItem; sourceName: string; onSelect: () => void; progress?: number; selectionMode?: boolean; selected?: boolean; privateMedia?: boolean; initialWatchLater?: boolean; viewMode?: "grid" | "list" }) {
   const setError = useAppStore((state) => state.setError);
   const setNotice = useAppStore((state) => state.setNotice);
@@ -2380,6 +2675,71 @@ function MediaCard({ item, sourceName, onSelect, progress, selectionMode = false
   const listView = viewMode === "list";
   const [watchLater, setWatchLater] = useState<boolean | null>(initialWatchLater ? true : null);
   const [watchLaterBusy, setWatchLaterBusy] = useState(false);
+  const [hoverPreviewActive, setHoverPreviewActive] = useState(false);
+  const [hoverStoryboard, setHoverStoryboard] = useState<LibraryStoryboard | null>(null);
+  const [hoverPreviewFrame, setHoverPreviewFrame] = useState(0);
+  const [hoverPreviewBusy, setHoverPreviewBusy] = useState(false);
+  const [hoverPreviewUnavailable, setHoverPreviewUnavailable] = useState(false);
+  const hoverPreviewDelay = useRef<number | null>(null);
+  const hoverPreviewPercent = useRef(0.5);
+  const hoverPreviewRequest = useRef(0);
+
+  useEffect(() => () => {
+    if (hoverPreviewDelay.current != null) window.clearTimeout(hoverPreviewDelay.current);
+    hoverPreviewRequest.current += 1;
+  }, []);
+
+  const previewEligible = item.mediaKind === "video"
+    && !item.missing
+    && !selectionMode
+    && item.durationSeconds != null
+    && item.durationSeconds > 0.1;
+
+  async function requestHoverPreview() {
+    if (!previewEligible || hoverStoryboard || hoverPreviewBusy || hoverPreviewUnavailable) return;
+    const requestId = ++hoverPreviewRequest.current;
+    setHoverPreviewBusy(true);
+    try {
+      const storyboard = await loadMediaHoverStoryboard(item, privateMedia);
+      if (hoverPreviewRequest.current !== requestId) return;
+      setHoverStoryboard(storyboard);
+      setHoverPreviewFrame(Math.min(storyboard.frames.length - 1, Math.floor(hoverPreviewPercent.current * storyboard.frames.length)));
+    } catch {
+      if (hoverPreviewRequest.current === requestId) setHoverPreviewUnavailable(true);
+    } finally {
+      if (hoverPreviewRequest.current === requestId) setHoverPreviewBusy(false);
+    }
+  }
+
+  function startHoverPreview() {
+    if (!previewEligible) return;
+    const reducedMotion = document.documentElement.classList.contains("reduce-motion")
+      || window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (reducedMotion) return;
+    setHoverPreviewActive(true);
+    if (hoverStoryboard || hoverPreviewBusy || hoverPreviewUnavailable || hoverPreviewDelay.current != null) return;
+    hoverPreviewDelay.current = window.setTimeout(() => {
+      hoverPreviewDelay.current = null;
+      void requestHoverPreview();
+    }, MEDIA_HOVER_PREVIEW_DELAY_MS);
+  }
+
+  function scrubHoverPreview(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!previewEligible) return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    if (rect.width <= 0) return;
+    const percent = Math.min(0.999, Math.max(0, (event.clientX - rect.left) / rect.width));
+    hoverPreviewPercent.current = percent;
+    if (hoverStoryboard?.frames.length) setHoverPreviewFrame(Math.floor(percent * hoverStoryboard.frames.length));
+  }
+
+  function stopHoverPreview() {
+    setHoverPreviewActive(false);
+    if (hoverPreviewDelay.current != null) {
+      window.clearTimeout(hoverPreviewDelay.current);
+      hoverPreviewDelay.current = null;
+    }
+  }
 
   async function toggleWatchLater() {
     if (watchLaterBusy) return;
@@ -2400,8 +2760,9 @@ function MediaCard({ item, sourceName, onSelect, progress, selectionMode = false
   return (
     <article className="group min-w-0">
       <button className={`${listView ? "grid grid-cols-[180px_minmax(0,1fr)] items-center gap-4 bg-panel/45 p-2 hover:bg-panel/70" : "block"} w-full text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/80 focus-visible:ring-offset-4 focus-visible:ring-offset-canvas ${selected && listView ? "ring-2 ring-accent ring-offset-2 ring-offset-canvas" : ""}`} onClick={onSelect} aria-pressed={selectionMode ? selected : undefined}>
-        <div className={`relative aspect-video overflow-hidden rounded-[9px] bg-elevated shadow-[0_14px_35px_rgb(3_11_24/0.24)] transition duration-200 group-hover:-translate-y-0.5 group-hover:shadow-[0_20px_45px_rgb(3_11_24/0.36)] ${selected ? "ring-2 ring-accent ring-offset-2 ring-offset-canvas" : ""}`}>
+        <div className={`relative aspect-video overflow-hidden rounded-[9px] bg-elevated shadow-[0_14px_35px_rgb(3_11_24/0.24)] transition duration-200 group-hover:-translate-y-0.5 group-hover:shadow-[0_20px_45px_rgb(3_11_24/0.36)] ${selected ? "ring-2 ring-accent ring-offset-2 ring-offset-canvas" : ""}`} onPointerEnter={startHoverPreview} onPointerMove={scrubHoverPreview} onPointerLeave={stopHoverPreview}>
           <MediaArtwork item={item} />
+          {hoverPreviewActive && hoverStoryboard?.frames[hoverPreviewFrame] ? <span className="absolute inset-0"><img className="h-full w-full object-cover" src={hoverStoryboard.frames[hoverPreviewFrame].imageDataUrl} alt="" aria-hidden="true" /><span className="number-font absolute bottom-2 left-1/2 z-[1] -translate-x-1/2 rounded-[5px] bg-black/78 px-2 py-1 text-[9px] font-semibold text-white/90 shadow-control">Preview · {formatDuration(hoverStoryboard.frames[hoverPreviewFrame].timeSeconds)}</span></span> : hoverPreviewActive && hoverPreviewBusy ? <span className="absolute bottom-2 left-1/2 z-[1] inline-flex -translate-x-1/2 items-center gap-1.5 rounded-[5px] bg-black/78 px-2 py-1 text-[9px] font-medium text-white/75"><LoaderCircle className="animate-spin" size={10} /> Preparing preview</span> : hoverPreviewActive && hoverPreviewUnavailable ? <span className="absolute bottom-2 left-1/2 z-[1] -translate-x-1/2 rounded-[5px] bg-black/78 px-2 py-1 text-[9px] font-medium text-white/65">Preview unavailable</span> : null}
           <span className="absolute inset-0 grid place-items-center bg-black/0 transition group-hover:bg-black/20"><span className={`grid size-11 place-items-center rounded-full shadow-lg transition ${selectionMode ? "scale-100 bg-panel/95 text-ink opacity-100" : "scale-90 bg-white/90 text-black opacity-0 group-hover:scale-100 group-hover:opacity-100"}`}>{selectionMode ? selected ? <CheckSquare2 className="text-accent" size={21} /> : <Square size={21} /> : item.mediaKind === "image" ? <ImageIcon size={19} strokeWidth={1.8} /> : <Play size={18} strokeWidth={1.8} fill="currentColor" />}</span></span>
           <span className="number-font absolute bottom-2 right-2 rounded-[4px] bg-black/82 px-1.5 py-0.5 text-[10px] font-semibold text-white">{item.durationSeconds != null ? formatDuration(item.durationSeconds) : quality}</span>
           {item.durationSeconds != null && quality ? <span className="absolute bottom-2 left-2 rounded-[4px] bg-black/75 px-1.5 py-0.5 text-[9px] font-semibold text-white/90">{quality}</span> : null}
@@ -2421,17 +2782,40 @@ function MediaCard({ item, sourceName, onSelect, progress, selectionMode = false
 function MediaArtwork({ item, eager = false }: { item: LibraryItem; eager?: boolean }) {
   const inlineArtwork = item.thumbnail?.startsWith("data:") ? item.thumbnail : null;
   const [artwork, setArtwork] = useState<string | null>(inlineArtwork);
+  const [nearViewport, setNearViewport] = useState(eager);
+  const artworkRoot = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (eager || inlineArtwork || item.missing) {
+      setNearViewport(true);
+      return;
+    }
+    const element = artworkRoot.current;
+    if (!element || typeof IntersectionObserver === "undefined") {
+      setNearViewport(true);
+      return;
+    }
+    setNearViewport(false);
+    const observer = new IntersectionObserver(([entry]) => {
+      if (!entry?.isIntersecting) return;
+      setNearViewport(true);
+      observer.disconnect();
+    }, { rootMargin: "240px" });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [eager, inlineArtwork, item.id, item.missing]);
   useEffect(() => {
     setArtwork(inlineArtwork);
-    if (inlineArtwork || item.missing) return;
+    if (inlineArtwork || item.missing || !nearViewport) return;
     let disposed = false;
-    void api.getLibraryArtwork(item.id).then((value) => { if (!disposed) setArtwork(value); }).catch(() => {});
+    void api.getLibraryArtwork(item.id)
+      .then((value) => { if (!disposed) setArtwork(value); })
+      .catch((error) => { if (!disposed) console.warn(`Could not load artwork for ${item.id}`, error); });
     return () => { disposed = true; };
-  }, [inlineArtwork, item.id, item.missing]);
-  if (artwork) return <img className="h-full w-full object-cover transition duration-300 group-hover:scale-[1.025]" src={artwork} alt={`${item.title} artwork`} loading={eager ? "eager" : "lazy"} />;
+  }, [inlineArtwork, item.id, item.missing, nearViewport]);
+  if (artwork) return <div ref={artworkRoot} className="h-full w-full"><img className="h-full w-full object-cover transition duration-300 group-hover:scale-[1.025]" src={artwork} alt={`${item.title} artwork`} loading={eager ? "eager" : "lazy"} /></div>;
   const variant = item.id.charCodeAt(0) % 3;
   const background = variant === 0 ? "from-[#1b2b45] via-[#172235] to-[#101419]" : variant === 1 ? "from-[#33291d] via-[#26231d] to-[#111417]" : "from-[#202b3a] via-[#1b252f] to-[#101419]";
-  return <div className={`relative grid h-full w-full place-items-center bg-gradient-to-br ${background}`}><div className="absolute inset-0 opacity-[0.08] [background-image:radial-gradient(circle_at_center,white_1px,transparent_1px)] [background-size:18px_18px]" />{item.mediaKind === "image" ? <FileImage className="relative text-white/35" size={34} /> : <FileVideo className="relative text-white/35" size={34} />}</div>;
+  return <div ref={artworkRoot} className={`relative grid h-full w-full place-items-center bg-gradient-to-br ${background}`}><div className="absolute inset-0 opacity-[0.08] [background-image:radial-gradient(circle_at_center,white_1px,transparent_1px)] [background-size:18px_18px]" />{item.mediaKind === "image" ? <FileImage className="relative text-white/35" size={34} /> : <FileVideo className="relative text-white/35" size={34} />}</div>;
 }
 
 function EmbeddedCompatibilityLabel({ item, preflight, variant = "panel" }: { item: LibraryItem; preflight?: LibraryPlaybackPreflight | null; variant?: "badge" | "overlay" | "panel" }) {
@@ -2727,6 +3111,9 @@ function WatchWorkspace({ item, sourceName, browseItems, browseTotal, browsePage
 }) {
   const [leanBack, setLeanBack] = useState(false);
   const leanBackReturnFocus = useRef<HTMLElement | null>(null);
+  const miniPlayerRef = useRef<HTMLElement | null>(null);
+  const miniPlayerGesture = useRef<MiniPlayerGesture | null>(null);
+  const [miniPlayerLayout, setMiniPlayerLayout] = useState<MiniPlayerLayout | null>(readMiniPlayerLayout);
 
   function enterLeanBack() {
     leanBackReturnFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -2754,7 +3141,174 @@ function WatchWorkspace({ item, sourceName, browseItems, browseTotal, browsePage
     if (compact) setLeanBack(false);
   }, [compact]);
 
-  return <section className={leanBack ? "fixed inset-0 z-[80] flex min-h-0 flex-col bg-[#080705] px-5 pb-5 text-white sm:px-8 sm:pb-8" : compact ? "fixed bottom-5 right-5 z-[65] w-[min(420px,calc(100vw-32px))]" : "mx-auto w-full max-w-[1640px] px-6 pb-12 pt-5 xl:px-8"} aria-label={leanBack ? "Lean-back player" : compact ? "Mini player" : "Watch workspace"}>
+  useEffect(() => {
+    if (!miniPlayerLayout) return;
+    window.localStorage.setItem(MINI_PLAYER_LAYOUT_KEY, JSON.stringify(miniPlayerLayout));
+  }, [miniPlayerLayout]);
+
+  useEffect(() => {
+    if (!compact) return;
+    const frame = window.requestAnimationFrame(() => {
+      const element = miniPlayerRef.current;
+      if (!element) return;
+      const rect = element.getBoundingClientRect();
+      const next = clampMiniPlayerLayout(
+        miniPlayerLayout || { x: rect.left, y: rect.top, width: rect.width },
+        rect.height,
+      );
+      setMiniPlayerLayout((current) => sameMiniPlayerLayout(current, next) ? current : next);
+    });
+    const keepInsideViewport = () => {
+      const element = miniPlayerRef.current;
+      if (!element) return;
+      const rect = element.getBoundingClientRect();
+      setMiniPlayerLayout((current) => {
+        const next = clampMiniPlayerLayout(current || { x: rect.left, y: rect.top, width: rect.width }, rect.height);
+        return sameMiniPlayerLayout(current, next) ? current : next;
+      });
+    };
+    const observer = new ResizeObserver(keepInsideViewport);
+    if (miniPlayerRef.current) observer.observe(miniPlayerRef.current);
+    window.addEventListener("resize", keepInsideViewport);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      observer.disconnect();
+      window.removeEventListener("resize", keepInsideViewport);
+    };
+  }, [compact]);
+
+  useEffect(() => {
+    const finishGesture = (pointerId?: number) => {
+      const gesture = miniPlayerGesture.current;
+      if (!gesture || (pointerId != null && pointerId !== gesture.pointerId)) return;
+      document.body.style.cursor = gesture.previousCursor;
+      document.body.style.userSelect = gesture.previousUserSelect;
+      miniPlayerGesture.current = null;
+    };
+    const updateGesture = (event: PointerEvent) => {
+      const gesture = miniPlayerGesture.current;
+      if (!gesture || event.pointerId !== gesture.pointerId) return;
+      event.preventDefault();
+      if (gesture.kind === "move") {
+        const next = clampMiniPlayerLayout({
+          x: gesture.startFrame.x + event.clientX - gesture.startClientX,
+          y: gesture.startFrame.y + event.clientY - gesture.startClientY,
+          width: gesture.startFrame.width,
+        }, gesture.startHeight);
+        setMiniPlayerLayout(next);
+        return;
+      }
+      const horizontalDelta = event.clientX - gesture.startClientX;
+      const chromeHeight = Math.max(0, gesture.startHeight - gesture.startFrame.width * 9 / 16);
+      const maximumHeightWidth = Math.max(MINI_PLAYER_MIN_WIDTH, (window.innerHeight - MINI_PLAYER_MARGIN * 2 - chromeHeight) * 16 / 9);
+      const width = Math.min(
+        MINI_PLAYER_MAX_WIDTH,
+        window.innerWidth - MINI_PLAYER_MARGIN * 2,
+        maximumHeightWidth,
+        Math.max(MINI_PLAYER_MIN_WIDTH, gesture.startFrame.width + horizontalDelta * 2),
+      );
+      const estimatedHeight = chromeHeight + width * 9 / 16;
+      setMiniPlayerLayout(clampMiniPlayerLayout({
+        x: gesture.startFrame.x + (gesture.startFrame.width - width) / 2,
+        y: gesture.startFrame.y + (gesture.startHeight - estimatedHeight) / 2,
+        width,
+      }, estimatedHeight));
+    };
+    const endGesture = (event: PointerEvent) => finishGesture(event.pointerId);
+    window.addEventListener("pointermove", updateGesture, { passive: false });
+    window.addEventListener("pointerup", endGesture);
+    window.addEventListener("pointercancel", endGesture);
+    return () => {
+      finishGesture();
+      window.removeEventListener("pointermove", updateGesture);
+      window.removeEventListener("pointerup", endGesture);
+      window.removeEventListener("pointercancel", endGesture);
+    };
+  }, []);
+
+  function startMiniPlayerGesture(kind: MiniPlayerGesture["kind"], event: ReactPointerEvent<HTMLElement>) {
+    if (!compact || event.button !== 0) return;
+    const element = miniPlayerRef.current;
+    if (!element) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const rect = element.getBoundingClientRect();
+    const startFrame = clampMiniPlayerLayout({ x: rect.left, y: rect.top, width: rect.width }, rect.height);
+    setMiniPlayerLayout(startFrame);
+    miniPlayerGesture.current = {
+      kind,
+      pointerId: event.pointerId,
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      startFrame,
+      startHeight: rect.height,
+      previousCursor: document.body.style.cursor,
+      previousUserSelect: document.body.style.userSelect,
+    };
+    document.body.style.cursor = kind === "move" ? "grabbing" : "ew-resize";
+    document.body.style.userSelect = "none";
+  }
+
+  function moveMiniPlayerBy(deltaX: number, deltaY: number) {
+    const element = miniPlayerRef.current;
+    if (!element) return;
+    const rect = element.getBoundingClientRect();
+    setMiniPlayerLayout(clampMiniPlayerLayout({ x: rect.left + deltaX, y: rect.top + deltaY, width: rect.width }, rect.height));
+  }
+
+  function resizeMiniPlayerBy(deltaWidth: number) {
+    const element = miniPlayerRef.current;
+    if (!element) return;
+    const rect = element.getBoundingClientRect();
+    const width = Math.min(MINI_PLAYER_MAX_WIDTH, Math.max(MINI_PLAYER_MIN_WIDTH, rect.width + deltaWidth));
+    const estimatedHeight = rect.height + (width - rect.width) * 9 / 16;
+    setMiniPlayerLayout(clampMiniPlayerLayout({
+      x: rect.left + (rect.width - width) / 2,
+      y: rect.top + (rect.height - estimatedHeight) / 2,
+      width,
+    }, estimatedHeight));
+  }
+
+  function handleMiniPlayerMoveKey(event: ReactKeyboardEvent<HTMLElement>) {
+    const amount = event.shiftKey ? 48 : 16;
+    if (event.key === "ArrowLeft") moveMiniPlayerBy(-amount, 0);
+    else if (event.key === "ArrowRight") moveMiniPlayerBy(amount, 0);
+    else if (event.key === "ArrowUp") moveMiniPlayerBy(0, -amount);
+    else if (event.key === "ArrowDown") moveMiniPlayerBy(0, amount);
+    else return;
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
+  function handleMiniPlayerResizeKey(event: ReactKeyboardEvent<HTMLElement>) {
+    const amount = event.shiftKey ? 80 : 32;
+    if (event.key === "ArrowRight" || event.key === "ArrowUp") resizeMiniPlayerBy(amount);
+    else if (event.key === "ArrowLeft" || event.key === "ArrowDown") resizeMiniPlayerBy(-amount);
+    else return;
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
+  function resetMiniPlayerLayout() {
+    const element = miniPlayerRef.current;
+    if (!element) return;
+    const rect = element.getBoundingClientRect();
+    const width = Math.min(MINI_PLAYER_DEFAULT_WIDTH, window.innerWidth - MINI_PLAYER_MARGIN * 2);
+    const estimatedHeight = rect.height + (width - rect.width) * 9 / 16;
+    setMiniPlayerLayout(clampMiniPlayerLayout({
+      x: window.innerWidth - width - 20,
+      y: window.innerHeight - estimatedHeight - 20,
+      width,
+    }, estimatedHeight));
+  }
+
+  const miniPlayerStyle = compact
+    ? miniPlayerLayout
+      ? { left: miniPlayerLayout.x, top: miniPlayerLayout.y, width: miniPlayerLayout.width }
+      : { bottom: 20, right: 20, width: `min(${MINI_PLAYER_DEFAULT_WIDTH}px, calc(100vw - 32px))` }
+    : undefined;
+
+  return <section ref={miniPlayerRef} style={miniPlayerStyle} className={leanBack ? "fixed inset-0 z-[80] flex min-h-0 flex-col bg-[#080705] px-5 pb-5 text-white sm:px-8 sm:pb-8" : compact ? "fixed z-[65]" : "mx-auto w-full max-w-[1640px] px-6 pb-12 pt-5 xl:px-8"} aria-label={leanBack ? "Lean-back player" : compact ? "Mini player" : "Watch workspace"}>
     <LibraryLiveRegions polite="" assertive="" />
       <header className={`${compact ? "hidden" : leanBack ? "flex" : "sticky"} top-0 z-10 -mx-2 mb-5 items-center gap-4 px-2 py-3 ${leanBack ? "min-h-20 bg-[#080705]" : "bg-canvas/92 backdrop-blur-xl"}`}>
       {leanBack ? <><div className="grid size-11 shrink-0 place-items-center rounded-full bg-accent/15 text-accent"><Tv size={21} /></div><div className="min-w-0 flex-1"><p className="text-[11px] font-semibold uppercase tracking-[0.15em] text-accent">Lean-back mode</p><h1 className="mt-1 truncate text-lg font-semibold tracking-[-0.025em] sm:text-2xl">{item.title}</h1></div><p className="hidden text-xs text-white/45 lg:block">Keyboard or gamepad supported</p><Button data-lean-back-exit variant="secondary" className="h-12 shrink-0 border-white/10 bg-white/10 px-5 text-white hover:bg-white/15" onClick={exitLeanBack}><Minimize2 size={18} /> Exit</Button></> : <><button autoFocus className="flex h-10 shrink-0 items-center gap-2 rounded-[8px] px-2.5 text-xs font-semibold text-muted transition hover:bg-elevated hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70" onClick={onBack}><ChevronRight className="rotate-180" size={16} /> Library</button><div className="h-6 w-px bg-line/70" /><div className="min-w-0"><p className="text-[10px] font-medium text-accent">Now watching</p><h1 className="max-w-xl truncate text-sm font-semibold tracking-[-0.02em]">{item.title}</h1></div><Button variant="secondary" className="ml-auto h-10 shrink-0" onClick={enterLeanBack}><Tv size={16} /> Lean back</Button><label className="relative w-full max-w-md"><span className="sr-only">Search videos while watching</span><Search className="absolute left-3.5 top-3 text-muted" size={15} /><Input className="h-10 rounded-[9px] bg-panel/85 pl-10 text-xs shadow-control" value={search} onChange={(event) => onSearch(event.target.value)} placeholder="Find another video" /></label></>}
@@ -2762,7 +3316,7 @@ function WatchWorkspace({ item, sourceName, browseItems, browseTotal, browsePage
 
     <div className={leanBack ? "flex min-h-0 flex-1" : compact ? "block" : "grid min-w-0 gap-6 xl:grid-cols-[minmax(0,1fr)_370px] 2xl:grid-cols-[minmax(0,1fr)_410px]"}>
       <article className={leanBack ? "flex min-h-0 min-w-0 flex-1 flex-col" : "min-w-0"}>
-        <EmbeddedVideoPlayer key={item.id} item={item} sourceName={sourceName} compact={compact} leanBack={leanBack} seekRequest={seekRequest} onRestore={onRestore} onClose={onClose} onExitLeanBack={exitLeanBack} onPrevious={onPrevious} onNext={onNext} onPlaybackEnded={onPlaybackEnded} />
+        <EmbeddedVideoPlayer key={item.id} item={item} sourceName={sourceName} compact={compact} leanBack={leanBack} seekRequest={seekRequest} onRestore={onRestore} onClose={onClose} onExitLeanBack={exitLeanBack} onPrevious={onPrevious} onNext={onNext} onPlaybackEnded={onPlaybackEnded} onMiniPlayerMoveStart={(event) => startMiniPlayerGesture("move", event)} onMiniPlayerMoveKey={handleMiniPlayerMoveKey} onMiniPlayerResizeStart={(event) => startMiniPlayerGesture("resize", event)} onMiniPlayerResizeKey={handleMiniPlayerResizeKey} onMiniPlayerReset={resetMiniPlayerLayout} />
         <section className={`${compact || leanBack ? "hidden" : "block"} mt-5 border-b border-line/60 pb-6`} aria-labelledby="watch-title">
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div className="min-w-0 max-w-4xl"><h2 id="watch-title" className="text-[24px] font-semibold leading-tight tracking-[-0.035em] text-balance">{item.title}</h2><p className="mt-2 text-xs text-muted">{sourceName}{item.durationSeconds != null ? ` · ${formatDuration(item.durationSeconds)}` : ""}{item.container ? ` · ${item.container.toLocaleUpperCase()}` : ""}{item.width && item.height ? ` · ${item.width} × ${item.height}` : ""}</p></div>
@@ -2885,8 +3439,143 @@ function PlaybackPreparationStatus({ preparation, reencodeRequired, cancelling }
   </div>;
 }
 
-function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = false, seekRequest, onRestore, onClose, onExitLeanBack, onPrevious, onNext, onPlaybackEnded }: { item: LibraryItem; sourceName: string; compact?: boolean; leanBack?: boolean; seekRequest: TranscriptSeekRequest | null; onRestore?: () => void; onClose: () => void; onExitLeanBack?: () => void; onPrevious?: () => void; onNext?: () => void; onPlaybackEnded?: () => void }) {
+function PlaybackPreviewTimeline({ currentTime, duration, pendingTime, compact, isPlaying, muted, volume, subtitlesAvailable, subtitlesOpen, storyboard, storyboardBusy, storyboardUnavailable, onPreviewRequested, onPendingTime, onCommit, onTogglePlayback, onSeekRelative, onToggleMuted, onVolumeChange, onToggleSubtitles, onToggleFullscreen }: {
+  currentTime: number;
+  duration: number;
+  pendingTime: number | null;
+  compact: boolean;
+  isPlaying: boolean;
+  muted: boolean;
+  volume: number;
+  subtitlesAvailable: boolean;
+  subtitlesOpen: boolean;
+  storyboard: LibraryStoryboard | null;
+  storyboardBusy: boolean;
+  storyboardUnavailable: boolean;
+  onPreviewRequested: () => void;
+  onPendingTime: (seconds: number | null) => void;
+  onCommit: (seconds: number) => void;
+  onTogglePlayback: () => void;
+  onSeekRelative: (seconds: number) => void;
+  onToggleMuted: () => void;
+  onVolumeChange: (volume: number) => void;
+  onToggleSubtitles?: () => void;
+  onToggleFullscreen: () => void;
+}) {
+  const [hover, setHover] = useState<{ seconds: number; percent: number } | null>(null);
+  const safeDuration = Math.max(0.1, Number.isFinite(duration) ? duration : 0.1);
+  const value = Math.min(Math.max(0, pendingTime ?? currentTime), safeDuration);
+  const previewFrame = hover && storyboard?.frames.length
+    ? storyboard.frames.reduce((nearest, frame) => Math.abs(frame.timeSeconds - hover.seconds) < Math.abs(nearest.timeSeconds - hover.seconds) ? frame : nearest)
+    : null;
+
+  function updateHover(event: ReactPointerEvent<HTMLDivElement>) {
+    const rect = event.currentTarget.getBoundingClientRect();
+    if (rect.width <= 0) return;
+    const percent = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
+    setHover({ percent, seconds: percent * safeDuration });
+  }
+
+  const controlClass = "grid size-9 shrink-0 place-items-center rounded-[8px] text-white/65 transition-[background-color,color,transform] duration-150 hover:bg-white/10 hover:text-white active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/75";
+
+  return <div className={`relative border-t border-white/10 bg-[linear-gradient(180deg,#14110d,#0c0b09)] ${compact ? "px-2 py-2" : "px-4 py-2.5"}`} aria-label="Playback controls with frame previews">
+    <div className="flex items-center gap-1.5">
+      <button className={controlClass} onClick={() => onSeekRelative(-15)} aria-label="Go back 15 seconds" title="Back 15 seconds"><span className="relative grid place-items-center"><RotateCcw size={18} strokeWidth={1.8} /><span className="number-font absolute mt-px text-[7px] font-bold leading-none">15</span></span></button>
+      <button className="grid size-9 shrink-0 place-items-center rounded-[9px] bg-accent text-accentInk shadow-[0_5px_18px_rgb(var(--accent)/0.24),inset_0_1px_0_rgba(255,255,255,0.34)] transition-[filter,transform] duration-150 hover:brightness-110 active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/80 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0d0c09]" onClick={onTogglePlayback} aria-label={isPlaying ? "Pause" : "Play"} title={isPlaying ? "Pause" : "Play"}>{isPlaying ? <Pause size={15} fill="currentColor" /> : <Play className="translate-x-px" size={15} fill="currentColor" />}</button>
+      <button className={controlClass} onClick={() => onSeekRelative(15)} aria-label="Go forward 15 seconds" title="Forward 15 seconds"><span className="relative grid place-items-center"><RotateCw size={18} strokeWidth={1.8} /><span className="number-font absolute mt-px text-[7px] font-bold leading-none">15</span></span></button>
+      <span className={`${compact ? "hidden" : "block"} number-font ml-1 min-w-9 text-right text-[10px] text-white/55`}>{formatDuration(value)}</span>
+      <div className="relative mx-1 min-w-0 flex-1" onPointerEnter={onPreviewRequested} onPointerMove={updateHover} onPointerLeave={() => setHover(null)}>
+        {hover ? <div className="pointer-events-none absolute bottom-[calc(100%+10px)] z-20 -translate-x-1/2 overflow-hidden rounded-[8px] border border-white/15 bg-[#090806] shadow-[0_16px_45px_rgb(0_0_0/0.65)]" style={{ left: `${Math.min(90, Math.max(10, hover.percent * 100))}%` }} aria-hidden="true">
+          <div className={`${compact ? "w-28" : "w-40"} aspect-video bg-black`}>
+            {previewFrame ? <img className="h-full w-full object-cover" src={previewFrame.imageDataUrl} alt="" /> : <div className="grid h-full place-items-center text-white/35">{storyboardBusy ? <LoaderCircle className="animate-spin" size={15} /> : <Film size={17} />}</div>}
+          </div>
+          <div className="number-font flex items-center justify-between gap-3 px-2 py-1 text-[9px] text-white/65"><span>{formatDuration(hover.seconds)}</span><span className="text-white/35">{storyboardUnavailable ? "Preview unavailable" : storyboardBusy ? "Preparing…" : previewFrame ? "Frame preview" : "Hover preview"}</span></div>
+        </div> : null}
+        <input className="h-7 w-full cursor-pointer accent-[var(--color-accent)]" type="range" min={0} max={safeDuration} step={0.1} value={value} aria-label="Seek through video with frame previews" aria-valuetext={`${formatDuration(value)} of ${formatDuration(duration)}`} onFocus={onPreviewRequested} onChange={(event) => onPendingTime(Number(event.currentTarget.value))} onPointerUp={(event) => onCommit(Number(event.currentTarget.value))} onPointerCancel={() => onPendingTime(null)} onKeyUp={(event) => onCommit(Number(event.currentTarget.value))} onBlur={(event) => { if (pendingTime != null) onCommit(Number(event.currentTarget.value)); }} />
+      </div>
+      <span className={`${compact ? "hidden" : "block"} number-font min-w-9 text-[10px] text-white/45`}>{formatDuration(duration)}</span>
+      <button className={controlClass} onClick={onToggleMuted} aria-label={muted || volume === 0 ? "Unmute" : "Mute"} title={muted || volume === 0 ? "Unmute" : "Mute"}>{muted || volume === 0 ? <VolumeX size={16} /> : <Volume2 size={16} />}</button>
+      {!compact ? <input className="h-7 w-20 cursor-pointer accent-[var(--color-accent)]" type="range" min={0} max={1} step={0.05} value={muted ? 0 : volume} onChange={(event) => onVolumeChange(Number(event.currentTarget.value))} aria-label="Playback volume" aria-valuetext={`${Math.round((muted ? 0 : volume) * 100)} percent`} /> : null}
+      {subtitlesAvailable && onToggleSubtitles ? <button className={`${controlClass} ${subtitlesOpen ? "bg-white/10 text-accent" : ""}`} onClick={onToggleSubtitles} aria-expanded={subtitlesOpen} aria-controls="subtitle-center" aria-label="Subtitle Center" title="Subtitle Center"><Captions size={16} /></button> : null}
+      {!compact ? <button className={controlClass} onClick={onToggleFullscreen} aria-label="Toggle fullscreen" title="Fullscreen"><Maximize size={16} /></button> : null}
+    </div>
+    {compact ? <div className="number-font mt-0.5 flex items-center justify-center gap-1 text-[9px] text-white/45"><span>{formatDuration(value)}</span><span aria-hidden="true">/</span><span>{formatDuration(duration)}</span></div> : null}
+  </div>;
+}
+
+function PlaybackTools({ currentTime, loopStart, loopEnd, frameStepDisabled, screenshotBusy, onSetLoopStart, onSetLoopEnd, onClearLoop, onFrameStep, onScreenshot }: { currentTime: number; loopStart: number | null; loopEnd: number | null; frameStepDisabled: boolean; screenshotBusy: boolean; onSetLoopStart: () => void; onSetLoopEnd: () => void; onClearLoop: () => void; onFrameStep: (direction: -1 | 1) => void; onScreenshot: () => void }) {
+  const loopActive = loopStart != null && loopEnd != null && loopEnd > loopStart;
+  return <section className="flex flex-wrap items-center gap-2 border-t border-white/10 bg-[#100e0b] px-5 py-2.5" aria-label="Precision playback tools"><span className="mr-1 inline-flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.1em] text-white/45"><Repeat2 size={13} /> Playback tools</span><button className={`h-8 rounded-[7px] border px-2.5 text-[10px] font-semibold transition ${loopStart != null ? "border-accent/30 bg-accent/10 text-accent" : "border-white/10 bg-white/5 text-white/60 hover:bg-white/10 hover:text-white"}`} onClick={onSetLoopStart} title="Set loop start at current position">A · {loopStart == null ? "Set start" : formatDuration(loopStart)}</button><button className={`h-8 rounded-[7px] border px-2.5 text-[10px] font-semibold transition ${loopEnd != null ? "border-accent/30 bg-accent/10 text-accent" : "border-white/10 bg-white/5 text-white/60 hover:bg-white/10 hover:text-white"}`} disabled={loopStart == null} onClick={onSetLoopEnd} title="Set loop end at current position">B · {loopEnd == null ? "Set end" : formatDuration(loopEnd)}</button>{loopStart != null || loopEnd != null ? <button className="h-8 rounded-[7px] px-2 text-[10px] text-white/45 transition hover:bg-white/10 hover:text-white" onClick={onClearLoop}>Clear loop</button> : null}<span className="mx-1 hidden h-5 w-px bg-white/10 sm:block" /><button className="inline-flex h-8 items-center gap-1.5 rounded-[7px] border border-white/10 bg-white/5 px-2.5 text-[10px] font-semibold text-white/60 transition hover:bg-white/10 hover:text-white disabled:pointer-events-none disabled:opacity-35" disabled={frameStepDisabled} onClick={() => onFrameStep(-1)} title={frameStepDisabled ? "Frame stepping is unavailable for live compatibility streams" : "Previous frame (comma)"}><SkipBack size={12} /> Frame</button><button className="inline-flex h-8 items-center gap-1.5 rounded-[7px] border border-white/10 bg-white/5 px-2.5 text-[10px] font-semibold text-white/60 transition hover:bg-white/10 hover:text-white disabled:pointer-events-none disabled:opacity-35" disabled={frameStepDisabled} onClick={() => onFrameStep(1)} title={frameStepDisabled ? "Frame stepping is unavailable for live compatibility streams" : "Next frame (period)"}>Frame <SkipForward size={12} /></button><button className="ml-auto inline-flex h-8 items-center gap-1.5 rounded-[7px] border border-white/10 bg-white/5 px-2.5 text-[10px] font-semibold text-white/60 transition hover:bg-white/10 hover:text-white disabled:pointer-events-none disabled:opacity-45" disabled={screenshotBusy} onClick={onScreenshot}>{screenshotBusy ? <LoaderCircle className="animate-spin" size={12} /> : <Camera size={12} />} Capture frame</button><span className="number-font w-full text-[9px] text-white/35 sm:w-auto">{loopActive ? `Repeating ${formatDuration(loopStart)}–${formatDuration(loopEnd)}` : `At ${formatDuration(currentTime)}`}</span></section>;
+}
+
+function PlaybackDiagnostics({ item, session, preflight, nativeSession, embeddedMpvSession, subtitleCount, error }: { item: LibraryItem; session: LibraryPlaybackSession | null; preflight: LibraryPlaybackPreflight | null; nativeSession: NativePlaybackSession | null; embeddedMpvSession: EmbeddedMpvSession | null; subtitleCount: number; error: AppError | null }) {
+  const renderer = embeddedMpvSession
+    ? "Embedded libmpv"
+    : nativeSession
+      ? "Native mpv window"
+      : session?.segmentedStream
+        ? "HLS compatibility stream"
+        : session?.liveTranscode
+          ? "Fragmented MP4 compatibility stream"
+          : session?.compatibilityTranscoded
+            ? "H.264/AAC compatibility copy"
+            : session?.compatibilityMode
+              ? "Stream-copy compatibility file"
+              : session
+                ? "Direct WebView video"
+                : error
+                  ? "Playback unavailable"
+                  : "Preparing renderer";
+  const delivery = session?.segmentedStream
+    ? "Temporary segmented stream"
+    : session?.liveTranscode
+      ? "Temporary live stream"
+      : session?.compatibilityMode
+        ? preflight?.compatibilityCached
+          ? "Cached playback copy"
+          : "New playback copy"
+        : embeddedMpvSession || nativeSession
+          ? "Original file through mpv"
+          : session
+            ? "Original file through WebView"
+            : "Not started";
+  const processing = session?.compatibilityTranscoded || session?.liveTranscode
+    ? "Video and audio converted to H.264/AAC"
+    : session?.compatibilityMode
+      ? "Streams copied without codec conversion"
+      : "No compatibility conversion";
+  const reason = preflight?.reason || error?.message || (preflight?.compatibilityRequired
+    ? "This file needs a compatibility playback route in the embedded WebView."
+    : "The WebView preflight did not request a compatibility route.");
+
+  return <details className="group border-t border-white/10 bg-[#0d0c09] text-white/70">
+    <summary className="flex min-h-10 cursor-pointer list-none items-center gap-2 px-5 py-2 text-[11px] font-semibold transition hover:bg-white/[0.035] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/70">
+      <Film size={13} className="text-accent" />
+      Playback diagnostics
+      <span className="ml-1 truncate text-[10px] font-normal text-white/40">{renderer}</span>
+      <ChevronRight className="ml-auto transition-transform group-open:rotate-90" size={14} />
+    </summary>
+    <div className="border-t border-white/[0.07] px-5 py-4">
+      <dl className="grid gap-x-8 gap-y-3 text-[11px] sm:grid-cols-2">
+        <div><dt className="text-[9px] font-semibold uppercase tracking-[0.1em] text-white/35">Renderer</dt><dd className="mt-1 font-medium text-white/80">{renderer}</dd></div>
+        <div><dt className="text-[9px] font-semibold uppercase tracking-[0.1em] text-white/35">Delivery</dt><dd className="mt-1 font-medium text-white/80">{delivery}</dd></div>
+        <div><dt className="text-[9px] font-semibold uppercase tracking-[0.1em] text-white/35">Container and codecs</dt><dd className="number-font mt-1 text-white/70">{item.container?.toLocaleUpperCase() || "Unknown container"} · {formatMediaCodec(item.videoCodec)} video · {formatMediaCodec(item.audioCodec)} audio</dd></div>
+        <div><dt className="text-[9px] font-semibold uppercase tracking-[0.1em] text-white/35">Playback processing</dt><dd className="mt-1 text-white/70">{processing}</dd></div>
+        <div><dt className="text-[9px] font-semibold uppercase tracking-[0.1em] text-white/35">Stream start</dt><dd className="number-font mt-1 text-white/70">{session && session.streamStartSeconds > 0 ? formatDuration(session.streamStartSeconds) : "Beginning of media"}</dd></div>
+        <div><dt className="text-[9px] font-semibold uppercase tracking-[0.1em] text-white/35">Subtitles</dt><dd className="number-font mt-1 text-white/70">{subtitleCount} available track{subtitleCount === 1 ? "" : "s"}</dd></div>
+      </dl>
+      <div className="mt-4 border-l-2 border-accent/45 bg-white/[0.025] px-3 py-2.5">
+        <p className="text-[9px] font-semibold uppercase tracking-[0.1em] text-accent">Preflight explanation</p>
+        <p className="mt-1 text-[11px] leading-5 text-white/55">{reason}</p>
+      </div>
+      <p className="mt-3 text-[9px] leading-4 text-white/30">Diagnostics intentionally omit local paths, server tokens, and process arguments.</p>
+    </div>
+  </details>;
+}
+
+function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = false, seekRequest, onRestore, onClose, onExitLeanBack, onPrevious, onNext, onPlaybackEnded, onMiniPlayerMoveStart, onMiniPlayerMoveKey, onMiniPlayerResizeStart, onMiniPlayerResizeKey, onMiniPlayerReset }: { item: LibraryItem; sourceName: string; compact?: boolean; leanBack?: boolean; seekRequest: TranscriptSeekRequest | null; onRestore?: () => void; onClose: () => void; onExitLeanBack?: () => void; onPrevious?: () => void; onNext?: () => void; onPlaybackEnded?: () => void; onMiniPlayerMoveStart?: (event: ReactPointerEvent<HTMLElement>) => void; onMiniPlayerMoveKey?: (event: ReactKeyboardEvent<HTMLElement>) => void; onMiniPlayerResizeStart?: (event: ReactPointerEvent<HTMLElement>) => void; onMiniPlayerResizeKey?: (event: ReactKeyboardEvent<HTMLElement>) => void; onMiniPlayerReset?: () => void }) {
   const setError = useAppStore((state) => state.setError);
+  const setNotice = useAppStore((state) => state.setNotice);
   const recordEmbeddedPlaybackEvidence = useAppStore((state) => state.recordEmbeddedPlaybackEvidence);
   const playbackFingerprint = embeddedPlaybackFingerprint(item);
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -2904,6 +3593,7 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
   const livePlaybackShouldPlay = useRef(false);
   const embeddedMpvStopRequested = useRef(false);
   const nativeInitializationItemId = useRef(item.id);
+  const subtitleCueOrigins = useRef(new WeakMap<TextTrackCue, SubtitleCueOrigin>());
   const [session, setSession] = useState<LibraryPlaybackSession | null>(null);
   const [preflight, setPreflight] = useState<LibraryPlaybackPreflight | null>(null);
   const [consent, setConsent] = useState<LibraryPlaybackPreflight | null>(null);
@@ -2921,7 +3611,8 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
   const [embeddedMpvStatus, setEmbeddedMpvStatus] = useState<EmbeddedMpvStatus | null>(null);
   const [embeddedMpvSession, setEmbeddedMpvSession] = useState<EmbeddedMpvSession | null>(null);
   const [embeddedMpvBusy, setEmbeddedMpvBusy] = useState(false);
-  const [embeddedMpvMuted, setEmbeddedMpvMuted] = useState(false);
+  const [playbackMuted, setPlaybackMuted] = useState(false);
+  const [playbackVolume, setPlaybackVolume] = useState(1);
   const [playbackRenderer, setPlaybackRenderer] = useState<"native" | "web">("web");
   const [nativeFallbackMessage, setNativeFallbackMessage] = useState<string | null>(null);
   const [resumedAt, setResumedAt] = useState<number | null>(null);
@@ -2929,7 +3620,24 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentPosition, setCurrentPosition] = useState(0);
   const [playbackDuration, setPlaybackDuration] = useState(item.durationSeconds || 0);
+  const [loopStart, setLoopStart] = useState<number | null>(null);
+  const [loopEnd, setLoopEnd] = useState<number | null>(null);
+  const [screenshotBusy, setScreenshotBusy] = useState(false);
   const [pendingNativeSeek, setPendingNativeSeek] = useState<number | null>(null);
+  const [previewStoryboard, setPreviewStoryboard] = useState<LibraryStoryboard | null>(null);
+  const [previewStoryboardBusy, setPreviewStoryboardBusy] = useState(false);
+  const [previewStoryboardUnavailable, setPreviewStoryboardUnavailable] = useState(false);
+  const [subtitleCenterOpen, setSubtitleCenterOpen] = useState(false);
+  const [subtitleTracks, setSubtitleTracks] = useState<LibrarySubtitleTrack[]>([]);
+  const [embeddedSubtitleBusy, setEmbeddedSubtitleBusy] = useState(false);
+  const [embeddedSubtitleScanned, setEmbeddedSubtitleScanned] = useState(false);
+  const [embeddedSubtitleMessage, setEmbeddedSubtitleMessage] = useState<string | null>(null);
+  const [selectedSubtitleIndex, setSelectedSubtitleIndex] = useState(-1);
+  const [subtitleOffsetSeconds, setSubtitleOffsetSeconds] = useState(0);
+  const [subtitleSizePercent, setSubtitleSizePercent] = useState(100);
+  const [subtitlePosition, setSubtitlePosition] = useState<SubtitlePosition>("bottom");
+  const [subtitleColor, setSubtitleColor] = useState<SubtitleColor>("white");
+  const [subtitleBackground, setSubtitleBackground] = useState<SubtitleBackground>("soft");
 
   function recordDirectPlaybackEvidence(evidence: "played" | "failed") {
     if (!session || session.compatibilityMode || session.liveTranscode) return;
@@ -2954,13 +3662,28 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
     setNativeBusy(false);
     setEmbeddedMpvSession(null);
     setEmbeddedMpvBusy(false);
-    setEmbeddedMpvMuted(false);
+    setPlaybackMuted(false);
+    setPlaybackVolume(1);
     setPlaybackRenderer("web");
     setNativeFallbackMessage(null);
     setIsPlaying(false);
     setCurrentPosition(0);
     setPlaybackDuration(item.durationSeconds || 0);
+    setLoopStart(null);
+    setLoopEnd(null);
+    setScreenshotBusy(false);
     setPendingNativeSeek(null);
+    setPreviewStoryboard(null);
+    setPreviewStoryboardBusy(false);
+    setPreviewStoryboardUnavailable(false);
+    setSubtitleCenterOpen(false);
+    setSubtitleTracks([]);
+    setEmbeddedSubtitleBusy(false);
+    setEmbeddedSubtitleScanned(false);
+    setEmbeddedSubtitleMessage(null);
+    setSelectedSubtitleIndex(-1);
+    setSubtitleOffsetSeconds(0);
+    subtitleCueOrigins.current = new WeakMap<TextTrackCue, SubtitleCueOrigin>();
     webPlaybackHandoff.current = null;
     hlsFallbackAttempted.current = false;
     liveFallbackAttempted.current = false;
@@ -3473,6 +4196,39 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
     else video.pause();
   }
 
+  function toggleMuted() {
+    const restoringVolume = playbackVolume === 0;
+    const volume = restoringVolume ? 1 : playbackVolume;
+    const muted = restoringVolume ? false : !playbackMuted;
+    if (restoringVolume) setPlaybackVolume(volume);
+    setPlaybackMuted(muted);
+    if (embeddedMpvSession) {
+      if (restoringVolume) void api.controlEmbeddedMpv({ action: "setVolume", value: volume * 100 }).catch((error) => setError(normalizeError(error)));
+      void api.controlEmbeddedMpv({ action: "setMuted", value: muted ? 1 : 0 }).catch((error) => setError(normalizeError(error)));
+    }
+    const video = videoRef.current;
+    if (video) {
+      if (restoringVolume) video.volume = volume;
+      video.muted = muted;
+    }
+  }
+
+  function changeVolume(volume: number) {
+    const normalized = Math.min(1, Math.max(0, Number.isFinite(volume) ? volume : 1));
+    const muted = normalized === 0;
+    setPlaybackVolume(normalized);
+    setPlaybackMuted(muted);
+    if (embeddedMpvSession) {
+      void api.controlEmbeddedMpv({ action: "setVolume", value: normalized * 100 }).catch((error) => setError(normalizeError(error)));
+      void api.controlEmbeddedMpv({ action: "setMuted", value: muted ? 1 : 0 }).catch((error) => setError(normalizeError(error)));
+    }
+    const video = videoRef.current;
+    if (video) {
+      video.volume = normalized;
+      video.muted = muted;
+    }
+  }
+
   function seek(seconds: number) {
     if (embeddedMpvSession) {
       void api.controlEmbeddedMpv({ action: "seekRelative", value: seconds }).catch((error) => setError(normalizeError(error)));
@@ -3511,6 +4267,148 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
     setPendingNativeSeek(null);
   }
 
+  function setLoopStartAtCurrentPosition() {
+    const start = Math.max(0, currentPosition);
+    setLoopStart(start);
+    if (loopEnd != null && loopEnd <= start + 0.05) setLoopEnd(null);
+  }
+
+  function setLoopEndAtCurrentPosition() {
+    if (loopStart == null) return;
+    if (currentPosition <= loopStart + 0.05) {
+      setNotice({ message: "Move past point A before setting loop point B.", view: "library" });
+      return;
+    }
+    setLoopEnd(currentPosition);
+  }
+
+  function clearLoop() {
+    setLoopStart(null);
+    setLoopEnd(null);
+  }
+
+  function stepFrame(direction: -1 | 1) {
+    if (session?.liveTranscode) return;
+    const frameSeconds = 1 / (item.fps && item.fps > 0 ? item.fps : 30);
+    if (embeddedMpvSession) {
+      const action = direction < 0 ? "frameBackStep" : "frameStep";
+      void api.controlEmbeddedMpv({ action }).catch((error) => setError(normalizeError(error)));
+      setCurrentPosition((position) => Math.max(0, position + frameSeconds * direction));
+      setIsPlaying(false);
+      return;
+    }
+    const video = videoRef.current;
+    if (!video) return;
+    video.pause();
+    seekTo(currentPosition + frameSeconds * direction);
+  }
+
+  async function captureFrame() {
+    if (screenshotBusy) return;
+    const safeTitle = item.title.replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_").trim().slice(0, 80) || "video";
+    const selected = await save({
+      title: "Save current video frame",
+      defaultPath: `${safeTitle}-frame-${Math.floor(Math.max(0, currentPosition))}.png`,
+      filters: [{ name: "PNG image", extensions: ["png"] }, { name: "JPEG image", extensions: ["jpg", "jpeg"] }],
+    });
+    if (!selected) return;
+    setScreenshotBusy(true);
+    try {
+      await api.captureLibraryFrame(item.id, Math.max(0, currentPosition), selected);
+      setNotice({ message: `Captured frame at ${formatDuration(currentPosition)}.`, view: "library" });
+    } catch (error) {
+      setError(normalizeError(error));
+    } finally {
+      setScreenshotBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!isPlaying || loopStart == null || loopEnd == null || loopEnd <= loopStart) return;
+    if (currentPosition >= loopEnd) seekTo(loopStart);
+  }, [currentPosition, isPlaying, loopEnd, loopStart]);
+
+  function requestPreviewStoryboard() {
+    if (previewStoryboard || previewStoryboardBusy || previewStoryboardUnavailable || playbackDuration <= 0) return;
+    setPreviewStoryboardBusy(true);
+    void api.generateLibraryStoryboard(item.id, compact ? 8 : 16)
+      .then((generated) => {
+        if (generated.itemId === item.id) setPreviewStoryboard(generated);
+      })
+      .catch(() => setPreviewStoryboardUnavailable(true))
+      .finally(() => setPreviewStoryboardBusy(false));
+  }
+
+  function applySubtitleSettings() {
+    const video = videoRef.current;
+    if (!video || !session) return;
+    for (let index = 0; index < video.textTracks.length; index += 1) {
+      const textTrack = video.textTracks[index];
+      const selected = index === selectedSubtitleIndex;
+      textTrack.mode = selected ? "showing" : "disabled";
+      if (!selected || !textTrack.cues) continue;
+      for (const cue of Array.from(textTrack.cues)) {
+        let origin = subtitleCueOrigins.current.get(cue);
+        if (!origin) {
+          const visualCue = typeof VTTCue !== "undefined" && cue instanceof VTTCue ? cue : null;
+          origin = {
+            startTime: cue.startTime,
+            endTime: cue.endTime,
+            line: visualCue?.line ?? "auto",
+            snapToLines: visualCue?.snapToLines ?? true,
+          };
+          subtitleCueOrigins.current.set(cue, origin);
+        }
+        cue.startTime = Math.max(0, origin.startTime - session.streamStartSeconds + subtitleOffsetSeconds);
+        cue.endTime = Math.max(cue.startTime + 0.05, origin.endTime - session.streamStartSeconds + subtitleOffsetSeconds);
+        if (typeof VTTCue !== "undefined" && cue instanceof VTTCue) {
+          cue.snapToLines = false;
+          cue.line = subtitlePosition === "top" ? 12 : subtitlePosition === "middle" ? 50 : 88;
+        }
+      }
+    }
+  }
+
+  function onSubtitleTrackLoaded() {
+    window.requestAnimationFrame(applySubtitleSettings);
+  }
+
+  useEffect(() => {
+    if (!session) return;
+    setSubtitleTracks(session.subtitles);
+    setSelectedSubtitleIndex(-1);
+    setEmbeddedSubtitleScanned(false);
+    setEmbeddedSubtitleMessage(null);
+  }, [session?.item.id]);
+
+  function toggleSubtitleCenter() {
+    const opening = !subtitleCenterOpen;
+    setSubtitleCenterOpen(opening);
+    if (!opening || embeddedSubtitleScanned || embeddedSubtitleBusy) return;
+    setEmbeddedSubtitleBusy(true);
+    setEmbeddedSubtitleMessage(null);
+    void api.loadLibraryEmbeddedSubtitles(item.id)
+      .then((embedded) => {
+        setSubtitleTracks((current) => [...current, ...embedded.filter((track) => !current.some((candidate) => candidate.url === track.url))]);
+        setEmbeddedSubtitleMessage(embedded.length ? `${embedded.length} embedded text track${embedded.length === 1 ? "" : "s"} ready.` : "No compatible embedded text subtitles were found.");
+      })
+      .catch((error) => setEmbeddedSubtitleMessage(normalizeError(error).message))
+      .finally(() => {
+        setEmbeddedSubtitleBusy(false);
+        setEmbeddedSubtitleScanned(true);
+      });
+  }
+
+  useEffect(() => {
+    applySubtitleSettings();
+  }, [selectedSubtitleIndex, session?.streamStartSeconds, session?.url, subtitleOffsetSeconds, subtitlePosition, subtitleTracks]);
+
+  const subtitleVideoStyle = {
+    "--subtitle-size": `${subtitleSizePercent}%`,
+    "--subtitle-color": subtitleColor === "yellow" ? "#f6df78" : "#fffdf5",
+    "--subtitle-background": subtitleBackground === "none" ? "transparent" : subtitleBackground === "strong" ? "rgba(0, 0, 0, 0.88)" : "rgba(0, 0, 0, 0.62)",
+  } as CSSProperties;
+
   function toggleFullscreen() {
     if (document.fullscreenElement) void document.exitFullscreen();
     else if (playerRef.current) void playerRef.current.requestFullscreen();
@@ -3525,20 +4423,18 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
       const key = event.key.toLocaleLowerCase();
       if (key === "escape" && !document.fullscreenElement) { event.preventDefault(); if (leanBack) onExitLeanBack?.(); else closePlayer(); }
       else if (key === " " || key === "k") { event.preventDefault(); togglePlayback(); }
-      else if (key === "j" || key === "arrowleft") { event.preventDefault(); seek(-10); }
-      else if (key === "l" || key === "arrowright") { event.preventDefault(); seek(10); }
-      else if (key === "m" && embeddedMpvSession) {
-        event.preventDefault();
-        const muted = !embeddedMpvMuted;
-        setEmbeddedMpvMuted(muted);
-        void api.controlEmbeddedMpv({ action: "setMuted", value: muted ? 1 : 0 }).catch(() => {});
-      }
-      else if (key === "m" && videoRef.current) { event.preventDefault(); videoRef.current.muted = !videoRef.current.muted; }
+      else if (key === "j" || key === "arrowleft") { event.preventDefault(); seek(-15); }
+      else if (key === "l" || key === "arrowright") { event.preventDefault(); seek(15); }
+      else if (key === "m" && (embeddedMpvSession || videoRef.current)) { event.preventDefault(); toggleMuted(); }
       else if (key === "f") { event.preventDefault(); toggleFullscreen(); }
+      else if (key === ",") { event.preventDefault(); stepFrame(-1); }
+      else if (key === ".") { event.preventDefault(); stepFrame(1); }
+      else if (key === "[") { event.preventDefault(); setLoopStartAtCurrentPosition(); }
+      else if (key === "]") { event.preventDefault(); setLoopEndAtCurrentPosition(); }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [compact, consent, embeddedMpvMuted, embeddedMpvSession, leanBack, onExitLeanBack]);
+  }, [compact, consent, currentPosition, embeddedMpvSession, item.fps, leanBack, loopEnd, loopStart, onExitLeanBack, playbackMuted, session?.liveTranscode]);
 
   useEffect(() => {
     if (!leanBack || consent || typeof navigator.getGamepads !== "function") return;
@@ -3561,8 +4457,8 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
         else if (action === "exit") onExitLeanBack?.();
         else if (action === "previous") changeVideo(onPrevious);
         else if (action === "next") changeVideo(onNext);
-        else if (action === "seek-back") seek(-10);
-        else if (action === "seek-forward") seek(10);
+        else if (action === "seek-back") seek(-15);
+        else if (action === "seek-forward") seek(15);
       }
       previousActions = actions;
       frame = window.requestAnimationFrame(poll);
@@ -3734,6 +4630,8 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
       setSession(null);
       setNativeSession(null);
       setEmbeddedMpvSession(opened);
+      void api.controlEmbeddedMpv({ action: "setVolume", value: playbackVolume * 100 }).catch((error) => setError(normalizeError(error)));
+      void api.controlEmbeddedMpv({ action: "setMuted", value: playbackMuted ? 1 : 0 }).catch((error) => setError(normalizeError(error)));
       setCurrentPosition(opened.positionSeconds);
       setPlaybackDuration(opened.durationSeconds);
       setIsPlaying(!opened.paused);
@@ -3837,6 +4735,8 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
     if (!video) return;
     setLoading(false);
     video.playbackRate = playbackRate;
+    video.volume = playbackVolume;
+    video.muted = playbackMuted;
     if (session?.liveTranscode) {
       const position = logicalVideoPosition(video);
       const duration = item.durationSeconds || Math.max(playbackDuration, position);
@@ -3907,20 +4807,16 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
 
   return <><section ref={playerRef} className={`cinematic-player panel-shadow min-w-0 overflow-hidden border border-white/10 text-white ${compact ? "rounded-[10px] shadow-[0_28px_80px_rgb(0_0_0/0.58)]" : leanBack ? "flex min-h-0 flex-1 flex-col rounded-[16px] shadow-[0_30px_120px_rgb(0_0_0/0.8)]" : "flex max-h-[calc(100dvh-96px)] flex-col rounded-[12px]"}`} aria-label={`${leanBack ? "Lean-back player" : compact ? "Mini player" : "Playing"} ${item.title}`}>
     <header className={`flex items-center border-b border-white/10 bg-[linear-gradient(180deg,rgba(20,18,14,0.97),rgba(10,9,7,0.96))] shadow-[inset_0_1px_0_rgba(255,255,255,0.035)] backdrop-blur-xl ${compact ? "min-h-11 gap-1.5 px-2.5 py-1.5" : leanBack ? "min-h-14 gap-3 px-4 py-2" : "min-h-16 gap-3 px-4 py-2.5"}`}>
-      <div className="min-w-0 flex-1"><h1 className={`${compact ? "text-[11px]" : "text-sm"} truncate font-semibold`}>{item.title}</h1>{!compact ? <p className="mt-0.5 truncate text-[11px] text-white/55">{sourceName}{item.container ? ` · ${item.container.toLocaleUpperCase()}` : ""}{item.width && item.height ? ` · ${item.width} × ${item.height}` : ""}</p> : null}</div>
+      {compact ? <button className="flex min-w-0 flex-1 touch-none items-center gap-2 rounded-[7px] px-1.5 py-1 text-left text-white/65 transition hover:bg-white/[0.065] hover:text-white active:cursor-grabbing focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/75" style={{ cursor: "grab" }} onPointerDown={onMiniPlayerMoveStart} onKeyDown={onMiniPlayerMoveKey} onDoubleClick={onMiniPlayerReset} aria-label={`Move mini player for ${item.title}. Use arrow keys to move it; hold Shift for larger steps. Double-click to reset.`} title="Drag to move · Arrow keys move · Double-click resets"><GripHorizontal className="shrink-0 text-white/35" size={14} /><span className="truncate text-[11px] font-semibold">{item.title}</span></button> : <div className="min-w-0 flex-1"><h1 className="truncate text-sm font-semibold">{item.title}</h1><p className="mt-0.5 truncate text-[11px] text-white/55">{sourceName}{item.container ? ` · ${item.container.toLocaleUpperCase()}` : ""}{item.width && item.height ? ` · ${item.width} × ${item.height}` : ""}</p></div>}
       {embeddedMpvStatus?.available && !embeddedMpvSession ? <Button variant="ghost" className={`${compact ? "size-8 px-0" : ""} text-accent hover:text-accent`} disabled={embeddedMpvBusy} onClick={() => void playWithEmbeddedMpv()} aria-label="Use native libmpv player"><MonitorPlay size={15} />{compact ? null : " Use native player"}</Button> : null}
       {embeddedMpvSession ? <div className={`flex shrink-0 items-center ${compact ? "gap-1" : "gap-2"}`} aria-label="Native libmpv controls">
         {!compact ? <span className="inline-flex h-8 items-center gap-1.5 rounded-[8px] border border-accent/20 bg-accent/[0.08] px-2 text-[10px] font-semibold text-accent shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"><span className="size-1.5 rounded-full bg-accent shadow-[0_0_8px_rgb(var(--accent)/0.65)]" /> Native</span> : null}
-        <div className="flex items-center gap-0.5 rounded-[10px] border border-white/10 bg-white/[0.055] p-1 shadow-[inset_0_1px_0_rgba(255,255,255,0.04),0_8px_24px_rgba(0,0,0,0.18)]">
-          <button className={nativeControlClass} onClick={() => seek(-10)} aria-label="Seek back 10 seconds" title="Back 10 seconds"><RotateCcw size={14} strokeWidth={1.9} /></button>
-          <button className="grid size-8 shrink-0 place-items-center rounded-[8px] bg-accent text-accentInk shadow-[0_5px_16px_rgb(var(--accent)/0.24),inset_0_1px_0_rgba(255,255,255,0.35)] transition-[filter,transform] duration-150 hover:brightness-110 active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/80 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0d0c09]" onClick={togglePlayback} aria-label={embeddedMpvSession.paused ? "Play" : "Pause"} title={embeddedMpvSession.paused ? "Play" : "Pause"}>{embeddedMpvSession.paused ? <Play size={14} fill="currentColor" /> : <Pause size={14} fill="currentColor" />}</button>
-          <button className={nativeControlClass} onClick={() => seek(10)} aria-label="Seek forward 10 seconds" title="Forward 10 seconds"><RotateCw size={14} strokeWidth={1.9} /></button>
-        </div>
         {!compact ? <Select className="h-9 w-[72px] rounded-[9px] border-white/10 bg-white/[0.055] px-2 text-[11px] font-semibold text-white/75 shadow-[inset_0_1px_0_rgba(255,255,255,0.035)] hover:border-white/20 focus:border-accent/50 focus:bg-white/[0.08]" value={playbackRate} aria-label="Playback speed" title="Playback speed" onChange={(event) => { const rate = Number(event.target.value); setPlaybackRate(rate); void api.controlEmbeddedMpv({ action: "setRate", value: rate }).catch((error) => setError(normalizeError(error))); }}><option value={0.5}>0.5×</option><option value={0.75}>0.75×</option><option value={1}>1×</option><option value={1.25}>1.25×</option><option value={1.5}>1.5×</option><option value={2}>2×</option></Select> : null}
         <button className={`inline-flex h-9 shrink-0 items-center justify-center gap-1.5 rounded-[9px] border border-white/10 bg-white/[0.045] text-[11px] font-semibold text-white/65 transition-[background-color,border-color,color,transform] duration-150 hover:border-white/20 hover:bg-white/[0.09] hover:text-white active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/75 ${compact ? "w-9" : "px-2.5"}`} title="Switch to the WebView player" disabled={embeddedMpvBusy} onClick={() => void closeEmbeddedMpvPlayback()} aria-label="Switch to WebView player"><MonitorPlay size={14} strokeWidth={1.9} />{compact ? null : <span>Web player</span>}</button>
       </div> : null}
       <Button variant="ghost" className={`${compact ? "size-8 px-0" : "h-9 rounded-[9px] border-white/10 bg-white/[0.035] px-3 text-[11px]"} shrink-0 text-white/65 hover:border-white/20 hover:bg-white/[0.08] hover:text-white`} onClick={() => void openExternal()} aria-label="Open in system player"><ExternalLink size={14} strokeWidth={1.9} />{compact ? null : " System player"}</Button>
-      {compact ? <button className={nativeControlClass} onClick={onRestore} aria-label="Return to full watch page" title="Restore full player"><Maximize size={15} /></button> : <button className="grid size-9 shrink-0 place-items-center rounded-[9px] border border-transparent text-white/60 transition hover:border-white/10 hover:bg-white/[0.07] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70" onClick={toggleFullscreen} aria-label="Toggle fullscreen" title="Fullscreen"><Maximize size={16} strokeWidth={1.9} /></button>}
+      {compact ? <button className={`${nativeControlClass} touch-none cursor-ew-resize`} onPointerDown={onMiniPlayerResizeStart} onKeyDown={onMiniPlayerResizeKey} aria-label="Resize mini player. Drag horizontally or use arrow keys; hold Shift for larger steps." title="Drag horizontally to resize · Arrow keys resize"><Scaling size={15} /></button> : null}
+      {compact ? <button className={nativeControlClass} onClick={onRestore} aria-label="Return to full watch page" title="Restore full player"><Maximize size={15} /></button> : null}
       {compact ? <button className={nativeControlClass} onClick={closePlayer} aria-label="Close mini player" title="Close player"><X size={16} /></button> : null}
     </header>
     <div ref={playbackSurfaceRef} className={`relative flex min-h-0 items-center justify-center overflow-auto bg-black ${compact ? "aspect-video" : leanBack ? "flex-1" : "aspect-video min-h-[240px] max-h-[calc(100dvh-250px)]"}`}>
@@ -3931,9 +4827,10 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
         {session && !playbackError && !nativeSession && !embeddedMpvSession ? <video
         ref={videoRef}
         className="h-full w-full max-h-full max-w-full bg-black object-contain shadow-[0_30px_100px_rgb(0_0_0/0.65)]"
+        style={subtitleVideoStyle}
         crossOrigin="anonymous"
         src={session.url}
-        controls={!session.liveTranscode}
+        controls={false}
         playsInline
         preload="metadata"
         onLoadedMetadata={onLoadedMetadata}
@@ -3946,18 +4843,24 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
         onEnded={() => { recordDirectPlaybackEvidence("played"); setIsPlaying(false); clearPlaybackWatchdog(); persistProgress(true); window.setTimeout(() => onPlaybackEnded?.(), 0); }}
         onError={() => { const video = videoRef.current; recordDirectPlaybackEvidence("failed"); clearPlaybackWatchdog(); if (advanceCompatibilitySource(video, true)) return; setLoading(false); setPlaybackError(createPlaybackError("embedded_playback_decode_failed", session.liveTranscode ? "The available H.264/AAC compatibility streams failed. Try libmpv, a cached playback copy, or your system player." : "The WebView does not support this file's container or codecs. The original file is unchanged and can still be opened with your system player.")); }}
       >
-        {session.subtitles.map((track) => <track key={`${track.url}:${session.streamStartSeconds}`} kind="subtitles" src={track.url} srcLang={track.language || "und"} label={track.label} onLoad={(event) => { if (!session.liveTranscode || session.streamStartSeconds <= 0) return; const cues = event.currentTarget.track.cues; if (!cues) return; for (const cue of Array.from(cues)) { cue.startTime = Math.max(0, cue.startTime - session.streamStartSeconds); cue.endTime = Math.max(0, cue.endTime - session.streamStartSeconds); } }} />)}
+        {subtitleTracks.map((track, index) => <track key={`${track.label}:${index}:${session.streamStartSeconds}`} kind="subtitles" src={track.url} srcLang={track.language || "und"} label={track.label} default={index === selectedSubtitleIndex} onLoad={onSubtitleTrackLoaded} />)}
       </video> : null}
     </div>
-    {embeddedMpvSession ? <div className={`flex items-center gap-2 border-t border-white/10 bg-[#100e0b] ${compact ? "px-2.5 py-1.5" : "px-5 py-2"}`} aria-label="Native playback timeline"><span className={`${compact ? "text-[9px]" : "text-[10px]"} number-font min-w-9 text-right text-white/55`}>{formatDuration(pendingNativeSeek ?? currentPosition)}</span><input className="h-5 min-w-0 flex-1 cursor-pointer accent-[var(--color-accent)]" type="range" min={0} max={Math.max(0.1, playbackDuration)} step={0.1} value={Math.min(Math.max(0, pendingNativeSeek ?? currentPosition), Math.max(0.1, playbackDuration))} aria-label="Seek through video" aria-valuetext={`${formatDuration(pendingNativeSeek ?? currentPosition)} of ${formatDuration(playbackDuration)}`} onChange={(event) => setPendingNativeSeek(Number(event.currentTarget.value))} onPointerUp={(event) => commitNativeSeek(Number(event.currentTarget.value))} onPointerCancel={() => setPendingNativeSeek(null)} onKeyUp={(event) => commitNativeSeek(Number(event.currentTarget.value))} onBlur={(event) => { if (pendingNativeSeek != null) commitNativeSeek(Number(event.currentTarget.value)); }} /><span className={`${compact ? "text-[9px]" : "text-[10px]"} number-font min-w-9 text-white/45`}>{formatDuration(playbackDuration)}</span></div> : null}
-    {session?.liveTranscode ? <div className={`flex items-center gap-2 border-t border-white/10 bg-[#100e0b] ${compact ? "px-2 py-1.5" : "px-5 py-2"}`} aria-label="Live compatibility playback controls">
-      <button className={nativeControlClass} onClick={() => seek(-10)} aria-label="Seek back 10 seconds"><RotateCcw size={14} /></button>
-      <button className="grid size-8 shrink-0 place-items-center rounded-[8px] bg-accent text-accentInk focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/80" onClick={togglePlayback} aria-label={isPlaying ? "Pause" : "Play"}>{isPlaying ? <Pause size={14} fill="currentColor" /> : <Play size={14} fill="currentColor" />}</button>
-      <span className={`${compact ? "text-[9px]" : "text-[10px]"} number-font min-w-9 text-right text-white/55`}>{formatDuration(pendingNativeSeek ?? currentPosition)}</span>
-      <input className="h-5 min-w-0 flex-1 cursor-pointer accent-[var(--color-accent)]" type="range" min={0} max={Math.max(0.1, playbackDuration)} step={0.1} value={Math.min(Math.max(0, pendingNativeSeek ?? currentPosition), Math.max(0.1, playbackDuration))} aria-label="Seek through live compatibility playback" aria-valuetext={`${formatDuration(pendingNativeSeek ?? currentPosition)} of ${formatDuration(playbackDuration)}`} onChange={(event) => setPendingNativeSeek(Number(event.currentTarget.value))} onPointerUp={(event) => commitNativeSeek(Number(event.currentTarget.value))} onPointerCancel={() => setPendingNativeSeek(null)} onKeyUp={(event) => commitNativeSeek(Number(event.currentTarget.value))} onBlur={(event) => { if (pendingNativeSeek != null) commitNativeSeek(Number(event.currentTarget.value)); }} />
-      <span className={`${compact ? "text-[9px]" : "text-[10px]"} number-font min-w-9 text-white/45`}>{formatDuration(playbackDuration)}</span>
-      {!compact ? <span className="rounded-[7px] border border-accent/20 bg-accent/10 px-2 py-1 text-[10px] font-semibold text-accent">Live compatible</span> : null}
-    </div> : null}
+    {(embeddedMpvSession || session) && !playbackError && !nativeSession ? <PlaybackPreviewTimeline currentTime={currentPosition} duration={playbackDuration} pendingTime={pendingNativeSeek} compact={compact} isPlaying={isPlaying} muted={playbackMuted} volume={playbackVolume} subtitlesAvailable={Boolean(session && !embeddedMpvSession)} subtitlesOpen={subtitleCenterOpen} storyboard={previewStoryboard} storyboardBusy={previewStoryboardBusy} storyboardUnavailable={previewStoryboardUnavailable} onPreviewRequested={requestPreviewStoryboard} onPendingTime={setPendingNativeSeek} onCommit={commitNativeSeek} onTogglePlayback={togglePlayback} onSeekRelative={seek} onToggleMuted={toggleMuted} onVolumeChange={changeVolume} onToggleSubtitles={session && !embeddedMpvSession ? toggleSubtitleCenter : undefined} onToggleFullscreen={toggleFullscreen} /> : null}
+    {!compact && !leanBack && (embeddedMpvSession || session) && !playbackError && !nativeSession ? <PlaybackTools currentTime={currentPosition} loopStart={loopStart} loopEnd={loopEnd} frameStepDisabled={Boolean(session?.liveTranscode)} screenshotBusy={screenshotBusy} onSetLoopStart={setLoopStartAtCurrentPosition} onSetLoopEnd={setLoopEndAtCurrentPosition} onClearLoop={clearLoop} onFrameStep={stepFrame} onScreenshot={() => void captureFrame()} /> : null}
+    {subtitleCenterOpen && session && !embeddedMpvSession ? <section id="subtitle-center" className={`border-t border-white/10 bg-[linear-gradient(180deg,#15120e,#0d0c09)] ${compact ? "p-3" : "px-5 py-4"}`} aria-labelledby="subtitle-center-title">
+      <div className="flex items-start gap-3"><div className="grid size-8 shrink-0 place-items-center rounded-[7px] bg-accent/10 text-accent"><Captions size={15} /></div><div className="min-w-0 flex-1"><h2 id="subtitle-center-title" className="text-xs font-semibold text-white/85">Subtitle Center</h2>{!compact ? <p className="mt-1 text-[10px] leading-4 text-white/40">Choose a local sidecar track and tune its timing and appearance. The original subtitle file is never modified.</p> : null}</div><button className={nativeControlClass} onClick={() => setSubtitleCenterOpen(false)} aria-label="Close Subtitle Center"><X size={14} /></button></div>
+      <div className={`mt-3 grid gap-3 ${compact ? "grid-cols-2" : "sm:grid-cols-2 lg:grid-cols-5"}`}>
+        <label className={compact ? "col-span-2" : "lg:col-span-2"}><span className="text-[9px] font-semibold uppercase tracking-[0.1em] text-white/40">Track</span><Select className="mt-1 h-9 border-white/10 bg-white/5 text-xs text-white" value={selectedSubtitleIndex} onChange={(event) => setSelectedSubtitleIndex(Number(event.target.value))}><option value={-1}>Off</option>{subtitleTracks.map((track, index) => <option key={`${track.label}:${index}`} value={index}>{track.label}{track.language ? ` · ${track.language.toLocaleUpperCase()}` : ""}</option>)}</Select>{embeddedSubtitleBusy ? <span className="mt-1 flex items-center gap-1 text-[9px] text-white/40"><LoaderCircle className="animate-spin" size={10} /> Inspecting embedded tracks…</span> : embeddedSubtitleMessage ? <span className="mt-1 block text-[9px] leading-4 text-white/35">{embeddedSubtitleMessage}</span> : null}</label>
+        <label><span className="text-[9px] font-semibold uppercase tracking-[0.1em] text-white/40">Sync offset</span><div className="mt-1 flex"><Input className="h-9 rounded-r-none border-white/10 bg-white/5 text-xs text-white" type="number" min={-10} max={10} step={0.25} value={subtitleOffsetSeconds} onChange={(event) => setSubtitleOffsetSeconds(Math.min(10, Math.max(-10, Number(event.target.value) || 0)))} /><span className="grid h-9 place-items-center rounded-r-[8px] border border-l-0 border-white/10 bg-white/5 px-2 text-[9px] text-white/40">sec</span></div></label>
+        <label><span className="text-[9px] font-semibold uppercase tracking-[0.1em] text-white/40">Size</span><Select className="mt-1 h-9 border-white/10 bg-white/5 text-xs text-white" value={subtitleSizePercent} onChange={(event) => setSubtitleSizePercent(Number(event.target.value))}><option value={80}>Small</option><option value={100}>Standard</option><option value={125}>Large</option><option value={150}>Extra large</option></Select></label>
+        <label><span className="text-[9px] font-semibold uppercase tracking-[0.1em] text-white/40">Position</span><Select className="mt-1 h-9 border-white/10 bg-white/5 text-xs text-white" value={subtitlePosition} onChange={(event) => setSubtitlePosition(event.target.value as SubtitlePosition)}><option value="bottom">Bottom</option><option value="middle">Middle</option><option value="top">Top</option></Select></label>
+        <label><span className="text-[9px] font-semibold uppercase tracking-[0.1em] text-white/40">Text</span><Select className="mt-1 h-9 border-white/10 bg-white/5 text-xs text-white" value={subtitleColor} onChange={(event) => setSubtitleColor(event.target.value as SubtitleColor)}><option value="white">Ivory</option><option value="yellow">Warm yellow</option></Select></label>
+        <label><span className="text-[9px] font-semibold uppercase tracking-[0.1em] text-white/40">Background</span><Select className="mt-1 h-9 border-white/10 bg-white/5 text-xs text-white" value={subtitleBackground} onChange={(event) => setSubtitleBackground(event.target.value as SubtitleBackground)}><option value="none">None</option><option value="soft">Soft</option><option value="strong">Strong</option></Select></label>
+        <div className="flex items-end"><Button variant="ghost" className="h-9 w-full text-[10px] text-white/55" onClick={() => { setSubtitleOffsetSeconds(0); setSubtitleSizePercent(100); setSubtitlePosition("bottom"); setSubtitleColor("white"); setSubtitleBackground("soft"); }}>Reset tuning</Button></div>
+      </div>
+    </section> : null}
+    {!compact && !leanBack ? <PlaybackDiagnostics item={item} session={session} preflight={preflight} nativeSession={nativeSession} embeddedMpvSession={embeddedMpvSession} subtitleCount={subtitleTracks.length} error={playbackError} /> : null}
     <footer className={`${compact ? "hidden" : "flex"} flex-wrap items-center gap-3 border-t border-white/10 bg-[#100e0b] ${leanBack ? "justify-center px-5 py-4" : "px-5 py-3"}`}>
       {leanBack ? <><Button variant="ghost" className="h-14 min-w-32 text-base text-white/75" disabled={!onPrevious} onClick={() => changeVideo(onPrevious)}><SkipBack size={21} /> Previous</Button><Button className="h-14 min-w-44 text-base" disabled={(!videoRef.current && !embeddedMpvSession) || Boolean(playbackError) || Boolean(nativeSession)} onClick={togglePlayback}>{isPlaying ? <Pause size={22} /> : <Play size={22} fill="currentColor" />} {isPlaying ? "Pause" : "Play"}</Button><Button variant="ghost" className="h-14 min-w-32 text-base text-white/75" disabled={!onNext} onClick={() => changeVideo(onNext)}>Next <SkipForward size={21} /></Button><Button variant="secondary" className="h-14 min-w-28 border-white/10 bg-white/10 text-white" onClick={onExitLeanBack}><Minimize2 size={19} /> Exit</Button><p className="w-full text-center text-[11px] text-white/45">Gamepad: A/Start play · B exit · D-pad browse · LB/RB seek · Keyboard: Space/K · J/L · M · F · Esc</p></> : <><Button variant="ghost" className="h-9 text-white/70" disabled={!onPrevious} onClick={() => changeVideo(onPrevious)}><ChevronRight className="rotate-180" size={15} /> Previous</Button><Button variant="ghost" className="h-9 text-white/70" disabled={!onNext} onClick={() => changeVideo(onNext)}>Next <ChevronRight size={15} /></Button><span className="h-5 w-px bg-white/10" /><label className="flex items-center gap-2 text-xs text-white/55"><span>Speed</span><Select className="h-8 w-24 border-white/10 bg-white/5 text-xs text-white" value={playbackRate} onChange={(event) => { const rate = Number(event.target.value); setPlaybackRate(rate); if (embeddedMpvSession) void api.controlEmbeddedMpv({ action: "setRate", value: rate }).catch((error) => setError(normalizeError(error))); else if (videoRef.current) videoRef.current.playbackRate = rate; }}><option value={0.5}>0.5×</option><option value={0.75}>0.75×</option><option value={1}>1×</option><option value={1.25}>1.25×</option><option value={1.5}>1.5×</option><option value={2}>2×</option></Select></label><p className="ml-auto text-[10px] text-white/40">Space/K play · J/L seek · M mute · F fullscreen · Esc close</p></>}
       {resumedAt != null ? <p className="w-full text-[10px] text-accent" role="status">{seekRequest?.itemId === item.id ? "Started from transcript" : "Resumed"} at {formatDuration(resumedAt)}</p> : null}
@@ -4358,10 +5261,75 @@ function PrivacyManagerDialog({ status, rules, sources, busy, onClose, onShowPri
 
 function BulkActionBar({ selectedIds, collections, busy, onCompare, onCompareImages, onCreateStack, onMove, onSetPrivacy, onApply, onClose }: { selectedIds: Set<string>; collections: LibraryCollection[]; busy: boolean; onCompare: () => Promise<void>; onCompareImages: () => Promise<void>; onCreateStack: () => Promise<void>; onMove: () => void; onSetPrivacy: (isPrivate: boolean) => Promise<void>; onApply: (action: LibraryBulkAction, message: string) => Promise<void>; onClose: () => void }) {
   const [tag, setTag] = useState("");
+  const [metadataOpen, setMetadataOpen] = useState(false);
   const disabled = busy || selectedIds.size === 0;
   const compareDisabled = busy || selectedIds.size < 2 || selectedIds.size > 4;
   const stackDisabled = busy || selectedIds.size < 2 || selectedIds.size > 100;
-  return <aside className="panel-shadow fixed bottom-6 left-1/2 z-40 flex max-h-[calc(100dvh-3rem)] w-[min(1280px,calc(100vw-300px))] -translate-x-1/2 flex-wrap items-center gap-2 overflow-y-auto rounded-[14px] border border-line/80 bg-panel/95 p-3 backdrop-blur-xl" aria-label="Bulk library actions"><div className="mr-2 min-w-24"><p className="number-font text-sm font-semibold">{selectedIds.size} selected</p><button className="mt-0.5 text-[10px] font-medium text-muted hover:text-ink" onClick={onClose}>Clear selection</button></div><Button className="h-9 px-3 text-xs" disabled={compareDisabled} onClick={() => void onCompare()} title={compareDisabled ? "Select between 2 and 4 videos to compare" : "Open selected videos in the comparison grid"}><LayoutGrid size={14} /> Videos</Button><Button variant="secondary" className="h-9 px-3 text-xs" disabled={compareDisabled} onClick={() => void onCompareImages()} title={compareDisabled ? "Select between 2 and 4 images to compare" : "Open selected images in the comparison studio"}><ImageIcon size={14} /> Images</Button><Button variant="secondary" className="h-9 px-3 text-xs" disabled={stackDisabled} onClick={() => void onCreateStack()} title={stackDisabled ? "Select between 2 and 100 items of one media type" : "Group versions without moving files"}><Layers size={14} /> Stack</Button><Button className="h-9 px-3 text-xs" disabled={disabled} onClick={onMove}><FolderInput size={14} /> Move</Button><Button variant="secondary" className="h-9 px-3 text-xs" disabled={disabled} onClick={() => void onSetPrivacy(true)}><Lock size={14} /> Make private</Button><Button variant="ghost" className="h-9 px-3 text-xs" disabled={disabled} onClick={() => void onSetPrivacy(false)}>Remove privacy rule</Button><Button variant="secondary" className="h-9 px-3 text-xs" disabled={disabled} onClick={() => void onApply({ type: "setFavorite", favorite: true }, `Marked ${selectedIds.size} item${selectedIds.size === 1 ? "" : "s"} as favorites.`)}><Heart size={14} /> Favorite</Button><Button variant="secondary" className="h-9 px-3 text-xs" disabled={disabled} onClick={() => void onApply({ type: "setFavorite", favorite: false }, `Removed ${selectedIds.size} item${selectedIds.size === 1 ? "" : "s"} from favorites.`)}><Heart size={14} fill="none" /> Unfavorite</Button><label><span className="sr-only">Set rating</span><Select className="h-9 w-32 text-xs" disabled={disabled} defaultValue="" onChange={(event) => { const value = event.target.value; if (value !== "") void onApply({ type: "setRating", rating: value === "clear" ? null : Number(value) }, value === "clear" ? "Cleared selected ratings." : `Rated selected media ${value} stars.`); event.currentTarget.value = ""; }}><option value="" disabled>Set rating</option>{[5, 4, 3, 2, 1].map((rating) => <option key={rating} value={rating}>{rating} star{rating === 1 ? "" : "s"}</option>)}<option value="clear">Clear rating</option></Select></label><label><span className="sr-only">Add to collection</span><Select className="h-9 w-44 text-xs" disabled={disabled || collections.length === 0} defaultValue="" onChange={(event) => { if (event.target.value) void onApply({ type: "addToCollection", collectionId: event.target.value }, "Added selected media to the collection."); event.currentTarget.value = ""; }}><option value="" disabled>{collections.length ? "Add to collection" : "No collections"}</option>{collections.map((collection) => <option key={collection.id} value={collection.id}>{collection.name}</option>)}</Select></label><label><span className="sr-only">Remove from collection</span><Select className="h-9 w-48 text-xs" disabled={disabled || collections.length === 0} defaultValue="" onChange={(event) => { if (event.target.value) void onApply({ type: "removeFromCollection", collectionId: event.target.value }, "Removed selected media from the collection."); event.currentTarget.value = ""; }}><option value="" disabled>{collections.length ? "Remove from collection" : "No collections"}</option>{collections.map((collection) => <option key={collection.id} value={collection.id}>{collection.name}</option>)}</Select></label><div className="flex min-w-48 flex-1"><Input className="h-9 rounded-r-none text-xs" value={tag} onChange={(event) => setTag(event.target.value)} placeholder="Add a tag" /><Button variant="secondary" className="h-9 rounded-l-none px-3 text-xs" disabled={disabled || !tag.trim()} onClick={() => { const value = tag.trim(); if (!value) return; void onApply({ type: "addTags", tags: [value] }, `Added #${value} to selected media.`); setTag(""); }}><Tags size={14} /> Add</Button></div></aside>;
+  function closeMetadata() {
+    setMetadataOpen(false);
+    window.requestAnimationFrame(() => document.querySelector<HTMLButtonElement>("[data-bulk-metadata-trigger]")?.focus());
+  }
+  return <><aside className="panel-shadow fixed bottom-6 left-1/2 z-40 flex max-h-[calc(100dvh-3rem)] w-[min(1280px,calc(100vw-300px))] -translate-x-1/2 flex-wrap items-center gap-2 overflow-y-auto rounded-[14px] border border-line/80 bg-panel/95 p-3 backdrop-blur-xl" aria-label="Bulk library actions"><div className="mr-2 min-w-24"><p className="number-font text-sm font-semibold">{selectedIds.size} selected</p><button className="mt-0.5 text-[10px] font-medium text-muted hover:text-ink" onClick={onClose}>Clear selection</button></div><Button className="h-9 px-3 text-xs" disabled={compareDisabled} onClick={() => void onCompare()} title={compareDisabled ? "Select between 2 and 4 videos to compare" : "Open selected videos in the comparison grid"}><LayoutGrid size={14} /> Videos</Button><Button variant="secondary" className="h-9 px-3 text-xs" disabled={compareDisabled} onClick={() => void onCompareImages()} title={compareDisabled ? "Select between 2 and 4 images to compare" : "Open selected images in the comparison studio"}><ImageIcon size={14} /> Images</Button><Button variant="secondary" className="h-9 px-3 text-xs" disabled={stackDisabled} onClick={() => void onCreateStack()} title={stackDisabled ? "Select between 2 and 100 items of one media type" : "Group versions without moving files"}><Layers size={14} /> Stack</Button><Button className="h-9 px-3 text-xs" disabled={disabled} onClick={onMove}><FolderInput size={14} /> Move</Button><Button data-bulk-metadata-trigger variant="secondary" className="h-9 px-3 text-xs" disabled={disabled} onClick={() => setMetadataOpen(true)}><FileImage size={14} /> Metadata</Button><Button variant="secondary" className="h-9 px-3 text-xs" disabled={disabled} onClick={() => void onSetPrivacy(true)}><Lock size={14} /> Make private</Button><Button variant="ghost" className="h-9 px-3 text-xs" disabled={disabled} onClick={() => void onSetPrivacy(false)}>Remove privacy rule</Button><Button variant="secondary" className="h-9 px-3 text-xs" disabled={disabled} onClick={() => void onApply({ type: "setFavorite", favorite: true }, `Marked ${selectedIds.size} item${selectedIds.size === 1 ? "" : "s"} as favorites.`)}><Heart size={14} /> Favorite</Button><Button variant="secondary" className="h-9 px-3 text-xs" disabled={disabled} onClick={() => void onApply({ type: "setFavorite", favorite: false }, `Removed ${selectedIds.size} item${selectedIds.size === 1 ? "" : "s"} from favorites.`)}><Heart size={14} fill="none" /> Unfavorite</Button><label><span className="sr-only">Set rating</span><Select className="h-9 w-32 text-xs" disabled={disabled} defaultValue="" onChange={(event) => { const value = event.target.value; if (value !== "") void onApply({ type: "setRating", rating: value === "clear" ? null : Number(value) }, value === "clear" ? "Cleared selected ratings." : `Rated selected media ${value} stars.`); event.currentTarget.value = ""; }}><option value="" disabled>Set rating</option>{[5, 4, 3, 2, 1].map((rating) => <option key={rating} value={rating}>{rating} star{rating === 1 ? "" : "s"}</option>)}<option value="clear">Clear rating</option></Select></label><label><span className="sr-only">Add to collection</span><Select className="h-9 w-44 text-xs" disabled={disabled || collections.length === 0} defaultValue="" onChange={(event) => { if (event.target.value) void onApply({ type: "addToCollection", collectionId: event.target.value }, "Added selected media to the collection."); event.currentTarget.value = ""; }}><option value="" disabled>{collections.length ? "Add to collection" : "No collections"}</option>{collections.map((collection) => <option key={collection.id} value={collection.id}>{collection.name}</option>)}</Select></label><label><span className="sr-only">Remove from collection</span><Select className="h-9 w-48 text-xs" disabled={disabled || collections.length === 0} defaultValue="" onChange={(event) => { if (event.target.value) void onApply({ type: "removeFromCollection", collectionId: event.target.value }, "Removed selected media from the collection."); event.currentTarget.value = ""; }}><option value="" disabled>{collections.length ? "Remove from collection" : "No collections"}</option>{collections.map((collection) => <option key={collection.id} value={collection.id}>{collection.name}</option>)}</Select></label><div className="flex min-w-48 flex-1"><Input className="h-9 rounded-r-none text-xs" value={tag} onChange={(event) => setTag(event.target.value)} placeholder="Add a tag" /><Button variant="secondary" className="h-9 rounded-l-none px-3 text-xs" disabled={disabled || !tag.trim()} onClick={() => { const value = tag.trim(); if (!value) return; void onApply({ type: "addTags", tags: [value] }, `Added #${value} to selected media.`); setTag(""); }}><Tags size={14} /> Add</Button></div></aside>{metadataOpen ? <BulkMetadataDialog selectedIds={selectedIds} onClose={closeMetadata} /> : null}</>;
+}
+
+function BulkMetadataDialog({ selectedIds, onClose }: { selectedIds: Set<string>; onClose: () => void }) {
+  const setError = useAppStore((state) => state.setError);
+  const setNotice = useAppStore((state) => state.setNotice);
+  const [creator, setCreator] = useState("");
+  const [series, setSeries] = useState("");
+  const [episode, setEpisode] = useState("");
+  const [tags, setTags] = useState("");
+  const [busy, setBusy] = useState(false);
+  const hasChanges = Boolean(creator.trim() || series.trim() || episode.trim() || tags.trim());
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !busy) {
+        event.preventDefault();
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [busy, onClose]);
+
+  async function applyMetadata() {
+    if (!hasChanges || selectedIds.size === 0 || busy) return;
+    setBusy(true);
+    try {
+      await api.applyLibraryBulkMetadata({
+        itemIds: Array.from(selectedIds),
+        creator: creator.trim() || null,
+        series: series.trim() || null,
+        episode: episode.trim() || null,
+        tags: tags.split(",").map((tag) => tag.trim()).filter(Boolean).slice(0, 20),
+      });
+      window.dispatchEvent(new Event("nice-downloader:library-items-changed"));
+      setNotice({ message: `Updated metadata for ${selectedIds.size} selected item${selectedIds.size === 1 ? "" : "s"}. Untouched fields were preserved.`, view: "library" });
+      onClose();
+    } catch (error) {
+      setError(normalizeError(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function trapFocus(event: React.KeyboardEvent<HTMLElement>) {
+    if (event.key !== "Tab") return;
+    const controls = Array.from(event.currentTarget.querySelectorAll<HTMLElement>("button:not(:disabled), input:not(:disabled), [tabindex]:not([tabindex='-1'])"));
+    const first = controls[0];
+    const last = controls.at(-1);
+    if (!first || !last) return;
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+
+  return <div className="fixed inset-0 z-[80] grid place-items-center bg-black/70 p-5 backdrop-blur-sm" onMouseDown={() => { if (!busy) onClose(); }}><section className="panel-shadow w-full max-w-2xl overflow-hidden rounded-[14px] border border-line bg-panel" role="dialog" aria-modal="true" aria-labelledby="bulk-metadata-title" aria-describedby="bulk-metadata-description" aria-busy={busy} onKeyDown={trapFocus} onMouseDown={(event) => event.stopPropagation()}><header className="flex items-start gap-4 border-b border-line/70 px-5 py-4"><div className="grid size-10 shrink-0 place-items-center rounded-[9px] bg-accent/10 text-accent"><FileImage size={18} /></div><div className="min-w-0 flex-1"><p className="text-[10px] font-semibold uppercase tracking-[0.1em] text-accent">Catalog presentation</p><h2 id="bulk-metadata-title" className="mt-1 text-xl font-semibold tracking-[-0.03em]">Edit {selectedIds.size} selected item{selectedIds.size === 1 ? "" : "s"}</h2><p id="bulk-metadata-description" className="mt-1.5 text-xs leading-5 text-muted">Only entered values are applied. Titles, descriptions, dates, URLs, artwork, and all other metadata remain unchanged.</p></div><button autoFocus className="grid size-8 shrink-0 place-items-center rounded-[7px] text-muted hover:bg-elevated hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70" disabled={busy} onClick={onClose} aria-label="Close bulk metadata editor"><X size={17} /></button></header><div className="grid gap-3 p-5 sm:grid-cols-2"><Field label="Creator or channel" hint="Leave blank to preserve each current creator."><Input value={creator} maxLength={200} onChange={(event) => setCreator(event.target.value)} placeholder="Apply one creator" /></Field><Field label="Series" hint="Useful for grouping episodes into a shelf."><Input value={series} maxLength={200} onChange={(event) => setSeries(event.target.value)} placeholder="Apply one series" /></Field><Field label="Episode label"><Input value={episode} maxLength={200} onChange={(event) => setEpisode(event.target.value)} placeholder="Special, S01E04, Part 2" /></Field><Field label="Add tags" hint="Comma-separated; existing tags stay in place."><Input value={tags} onChange={(event) => setTags(event.target.value)} placeholder="archive, tutorial" /></Field></div><footer className="flex flex-wrap items-center justify-between gap-3 border-t border-line/70 bg-elevated/25 px-5 py-4"><p className="text-[10px] text-muted">Original files and sidecars are never modified.</p><div className="flex gap-2"><Button variant="ghost" disabled={busy} onClick={onClose}>Cancel</Button><Button disabled={!hasChanges || busy} onClick={() => void applyMetadata()}>{busy ? <LoaderCircle className="animate-spin" size={14} /> : <Save size={14} />} Apply metadata</Button></div></footer></section></div>;
 }
 
 function BulkMoveDialog({ selectedIds, onClose, onComplete }: { selectedIds: Set<string>; onClose: () => void; onComplete: (result: LibraryBulkMoveResult) => void }) {
@@ -4592,7 +5560,76 @@ function SourceForm({ onClose, onSaved }: { onClose: () => void; onSaved: (sourc
 
 function SourceSection({ sources, scanJobs, onJob, onRemoved }: { sources: LibrarySource[]; scanJobs: LibraryScanJob[]; onJob: (job: LibraryScanJob) => void; onRemoved: (id: string) => void }) {
   if (sources.length === 0) return <div className="border border-dashed border-line/70 bg-panel/30 px-5 py-8 text-center text-xs text-muted">No folders are indexed yet.</div>;
-  return <section aria-labelledby="library-sources-title"><div className="mb-3 flex items-center justify-between"><div><h2 id="library-sources-title" className="text-lg font-semibold tracking-[-0.025em]">Folders</h2><p className="mt-1 text-xs text-muted">Scans index media in place.</p></div><span className="text-[11px] text-muted">{sources.length} source{sources.length === 1 ? "" : "s"}</span></div><div className="grid gap-3 lg:grid-cols-2 2xl:grid-cols-3">{sources.map((source) => <SourceCard key={source.id} source={source} latestJob={scanJobs.find((job) => job.sourceId === source.id)} onJob={onJob} onRemoved={() => onRemoved(source.id)} />)}</div></section>;
+  return <section aria-labelledby="library-sources-title"><div className="mb-3 flex items-center justify-between"><div><h2 id="library-sources-title" className="text-lg font-semibold tracking-[-0.025em]">Folders</h2><p className="mt-1 text-xs text-muted">Scans index media in place. Watched folders can organize newly discovered media automatically.</p></div><span className="text-[11px] text-muted">{sources.length} source{sources.length === 1 ? "" : "s"}</span></div><div className="grid items-start gap-3 lg:grid-cols-2 2xl:grid-cols-3">{sources.map((source) => <SourceCard key={source.id} source={source} latestJob={scanJobs.find((job) => job.sourceId === source.id)} onJob={onJob} onRemoved={() => onRemoved(source.id)} />)}</div></section>;
+}
+
+function WatchAutomationSection({ sources, collections }: { sources: LibrarySource[]; collections: LibraryCollection[] }) {
+  if (sources.length === 0) return null;
+  return <section className="mt-8 border-t border-line/60 pt-7" aria-labelledby="watch-automation-title">
+    <div className="mb-4 flex flex-wrap items-end justify-between gap-3"><div><h2 id="watch-automation-title" className="flex items-center gap-2 text-lg font-semibold tracking-[-0.025em]"><FolderInput className="text-accent" size={19} /> Watch-folder automation</h2><p className="mt-1 max-w-3xl text-xs leading-5 text-muted">Apply typed organization rules only when a folder discovers new media. Existing catalog items and original files stay unchanged.</p></div><span className="rounded-[6px] bg-elevated px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-muted">No scripts</span></div>
+    <div className="grid items-start gap-3 lg:grid-cols-2">{sources.map((source) => <WatchAutomationRule key={source.id} source={source} collections={collections} />)}</div>
+  </section>;
+}
+
+function WatchAutomationRule({ source, collections }: { source: LibrarySource; collections: LibraryCollection[] }) {
+  const setError = useAppStore((state) => state.setError);
+  const setNotice = useAppStore((state) => state.setNotice);
+  const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [automation, setAutomation] = useState<LibrarySourceAutomation | null>(null);
+  const [tags, setTags] = useState("");
+  const [collectionId, setCollectionId] = useState("");
+  const [favorite, setFavorite] = useState(false);
+
+  async function loadAutomation() {
+    setLoading(true);
+    try {
+      const next = await api.getLibrarySourceAutomation(source.id);
+      setAutomation(next);
+      setTags(next.tags.join(", "));
+      setCollectionId(next.collectionId || "");
+      setFavorite(next.favorite);
+    } catch (error) {
+      setError(normalizeError(error));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function toggleOpen() {
+    const next = !open;
+    setOpen(next);
+    if (next && !automation && !loading) void loadAutomation();
+  }
+
+  async function saveAutomation() {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const next = await api.saveLibrarySourceAutomation({
+        sourceId: source.id,
+        tags: tags.split(",").map((tag) => tag.trim()).filter(Boolean).slice(0, 20),
+        collectionId: collectionId || null,
+        favorite,
+      });
+      setAutomation(next);
+      setTags(next.tags.join(", "));
+      setCollectionId(next.collectionId || "");
+      setFavorite(next.favorite);
+      setNotice({ message: next.tags.length || next.collectionId || next.favorite ? `Automation saved for ${source.name}. New media will be organized after indexing.` : `Automation cleared for ${source.name}.`, view: "library" });
+    } catch (error) {
+      setError(normalizeError(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const actionCount = automation ? automation.tags.length + Number(Boolean(automation.collectionId)) + Number(automation.favorite) : 0;
+  return <article className="rounded-[10px] border border-line/60 bg-panel/55">
+    <button className="flex w-full items-center gap-3 p-4 text-left" onClick={toggleOpen} aria-expanded={open} aria-controls={`watch-automation-${source.id}`}><span className={`grid size-9 shrink-0 place-items-center rounded-[8px] ${source.watchEnabled ? "bg-accent/12 text-accent" : "bg-elevated text-muted"}`}><FolderInput size={16} /></span><span className="min-w-0 flex-1"><strong className="block truncate text-sm font-semibold">{source.name}</strong><span className="mt-1 block text-[11px] text-muted">{automation ? actionCount > 0 ? `${actionCount} active action${actionCount === 1 ? "" : "s"}` : "No organization actions" : source.watchEnabled ? "Auto scan enabled" : "Manual scans only"}</span></span><ChevronRight className={`shrink-0 text-muted transition-transform ${open ? "rotate-90" : ""}`} size={15} /></button>
+    {open ? <div id={`watch-automation-${source.id}`} className="border-t border-line/60 p-4">{loading ? <p className="flex items-center gap-2 py-3 text-xs text-muted"><LoaderCircle className="animate-spin" size={14} /> Loading automation…</p> : <><p className="mb-3 text-[11px] leading-5 text-muted">Rules run once for each newly indexed file. {source.watchEnabled ? "Folder changes are watched automatically." : "Enable Auto scan above for immediate folder monitoring."}</p><div className="grid gap-3 sm:grid-cols-2"><Field label="Add tags"><Input value={tags} onChange={(event) => setTags(event.target.value)} placeholder="incoming, archive" /></Field><Field label="Add to collection"><Select value={collectionId} onChange={(event) => setCollectionId(event.target.value)}><option value="">No collection</option>{collections.map((collection) => <option key={collection.id} value={collection.id}>{collection.name}</option>)}</Select></Field></div><label className="mt-3 flex items-center gap-2 text-xs text-muted"><input type="checkbox" checked={favorite} onChange={(event) => setFavorite(event.target.checked)} /> Mark new media as favorite</label><div className="mt-4 flex justify-end"><Button className="h-9 text-xs" disabled={busy} onClick={() => void saveAutomation()}>{busy ? <LoaderCircle className="animate-spin" size={14} /> : <Save size={14} />} Save automation</Button></div></>}</div> : null}
+  </article>;
 }
 
 function SourceCard({ source, latestJob, onJob, onRemoved }: { source: LibrarySource; latestJob?: LibraryScanJob; onJob: (job: LibraryScanJob) => void; onRemoved: () => void }) {

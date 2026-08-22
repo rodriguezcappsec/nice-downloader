@@ -16,9 +16,16 @@ import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboa
 import { useAppStore } from "../stores/app-store";
 import { api } from "../lib/tauri";
 import { allCommandNavigation, primaryNavigation, primaryViewFor, type NavigationItem } from "../lib/navigation";
+import { LIBRARY_WORKSPACE_KEY } from "../features/library/library-workspace";
 import type { LibraryItem, LibraryPrivacyStatus, ViewId } from "../types";
 
+const PRIVACY_LOCK_NOTICE_KEY = "nice-downloader.privacy-lock-notice";
+
 export function AppShell({ children }: { children: ReactNode }) {
+  if (window.sessionStorage.getItem(PRIVACY_LOCK_NOTICE_KEY) === "1") {
+    // Scrub persisted search/detail state before LibraryPage can restore it on the reload.
+    window.localStorage.removeItem(LIBRARY_WORKSPACE_KEY);
+  }
   const [collapsed, setCollapsed] = useState(
     () => window.localStorage.getItem("nice-downloader.sidebar") === "collapsed" || window.matchMedia("(max-width: 1120px)").matches,
   );
@@ -38,6 +45,52 @@ export function AppShell({ children }: { children: ReactNode }) {
   const enqueuePlayNext = useAppStore((state) => state.enqueuePlayNext);
   const setNotice = useAppStore((state) => state.setNotice);
 
+  function clearPrivateUiState() {
+    setCommandMedia([]);
+    setCommandQuery("");
+    setCommandOpen(false);
+    setHelpOpen(false);
+    window.localStorage.removeItem(LIBRARY_WORKSPACE_KEY);
+    setView("home");
+  }
+
+  function focusMainContent() {
+    window.setTimeout(() => document.getElementById("main-content")?.focus(), 0);
+  }
+
+  function panicLockPrivacy() {
+    const status = privacyStatusRef.current;
+    if (!status?.configured) {
+      setNotice({ message: "Set up Private Library in Settings before using the panic-lock shortcut.", view: "settings" });
+      return;
+    }
+    clearPrivateUiState();
+    if (status.locked) {
+      setNotice({ message: "Private Library is already locked.", view: "home" });
+      focusMainContent();
+      return;
+    }
+    window.sessionStorage.setItem(PRIVACY_LOCK_NOTICE_KEY, "1");
+    void api.lockLibraryPrivacy()
+      .then((nextStatus) => {
+        privacyStatusRef.current = nextStatus;
+        setPrivacyStatus(nextStatus);
+        if (nextStatus.locked) window.location.reload();
+      })
+      .catch(() => {
+        window.sessionStorage.removeItem(PRIVACY_LOCK_NOTICE_KEY);
+        setNotice({ message: "Private Library could not be locked. Try again from Library or Settings.", view: "home" });
+        focusMainContent();
+      });
+  }
+
+  useEffect(() => {
+    if (window.sessionStorage.getItem(PRIVACY_LOCK_NOTICE_KEY) !== "1") return;
+    window.sessionStorage.removeItem(PRIVACY_LOCK_NOTICE_KEY);
+    setNotice({ message: "Private Library locked. Private media, searches, and open details were cleared.", view: "home" });
+    focusMainContent();
+  }, [setNotice]);
+
   useEffect(() => {
     const media = window.matchMedia("(max-width: 1120px)");
     const adapt = (event: MediaQueryListEvent) => { if (event.matches) setCollapsed(true); };
@@ -54,7 +107,7 @@ export function AppShell({ children }: { children: ReactNode }) {
       privacyStatusRef.current = status;
       setPrivacyStatus(status);
       if (previous?.configured && !previous.locked && status.locked) {
-        setCommandMedia([]);
+        clearPrivateUiState();
         window.location.reload();
       }
     };
@@ -128,7 +181,10 @@ export function AppShell({ children }: { children: ReactNode }) {
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
-      if ((event.ctrlKey || event.metaKey) && event.key.toLocaleLowerCase() === "k") {
+      if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLocaleLowerCase() === "l") {
+        event.preventDefault();
+        panicLockPrivacy();
+      } else if ((event.ctrlKey || event.metaKey) && event.key.toLocaleLowerCase() === "k") {
         event.preventDefault();
         restoreFocus.current = document.activeElement as HTMLElement | null;
         setCommandQuery("");
@@ -235,6 +291,8 @@ export function AppShell({ children }: { children: ReactNode }) {
           <nav className="min-h-0 flex-1 overflow-y-auto px-3 pb-3 pt-1" aria-label="Primary navigation">
             <NavigationGroup label="Navigate" items={primaryNavigation} view={primaryView} collapsed={collapsed} setView={setView} badgeFor={badgeFor} />
           </nav>
+
+          {privacyStatus?.configured ? <div className="px-3 pb-2"><button className={`flex h-9 w-full items-center gap-3 rounded-[8px] px-3 text-left text-[11px] font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70 ${privacyStatus.locked ? "text-muted" : "bg-accent/[0.07] text-accent hover:bg-accent/[0.12]"} ${collapsed ? "justify-center" : ""}`} onClick={panicLockPrivacy} title={collapsed ? privacyStatus.locked ? "Private Library locked" : "Panic-lock Private Library · Ctrl Shift L" : undefined} aria-label={privacyStatus.locked ? "Private Library locked" : "Panic-lock Private Library, Ctrl Shift L"}><span className={`size-2 shrink-0 rounded-full ${privacyStatus.locked ? "bg-muted/40" : "bg-accent shadow-[0_0_9px_rgb(var(--accent)/0.55)]"}`} aria-hidden="true" /><span className={collapsed ? "hidden" : "flex-1"}>{privacyStatus.locked ? "Vault locked" : "Lock private media"}</span>{!collapsed && !privacyStatus.locked ? <kbd className="text-[9px] text-muted">Ctrl Shift L</kbd> : null}</button></div> : null}
 
           <div className="border-t border-line/45 bg-canvas/20 p-3">
             <button

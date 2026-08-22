@@ -1122,6 +1122,17 @@ pub struct SaveLibraryRichMetadataRequest {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ApplyLibraryBulkMetadataRequest {
+    pub item_ids: Vec<String>,
+    pub creator: Option<String>,
+    pub series: Option<String>,
+    pub episode: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SetLibraryArtworkRequest {
     pub item_id: String,
     pub path: Option<String>,
@@ -1289,7 +1300,10 @@ pub enum EmbeddedMpvControl {
     Pause,
     SeekRelative,
     SeekAbsolute,
+    FrameStep,
+    FrameBackStep,
     SetRate,
+    SetVolume,
     SetMuted,
 }
 
@@ -2069,6 +2083,28 @@ pub struct SaveLibrarySourceRequest {
     pub include_patterns: Vec<String>,
     #[serde(default)]
     pub exclude_patterns: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct LibrarySourceAutomation {
+    pub source_id: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    pub collection_id: Option<String>,
+    #[serde(default)]
+    pub favorite: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveLibrarySourceAutomationRequest {
+    pub source_id: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    pub collection_id: Option<String>,
+    #[serde(default)]
+    pub favorite: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

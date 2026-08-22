@@ -25,25 +25,25 @@ use crate::{
     local_share::LocalShareManager,
     media_server::MediaServerState,
     models::{
-        AuthenticationProfile, BatchAnalysisItem, BatchAnalysisResponse, BatchDownloadFailure,
-        BatchDownloadResult, BrowserProfileInfo, DesktopPreferences, DesktopRuntimeStatus,
-        DiskSpaceInfo, DownloadArchiveMatch, DownloadJob, DownloadState, EngineId, EngineInfo,
-        EnginePreferences, ExportLibraryMomentsRequest, GalleryItemList, LibraryArtworkCacheStatus,
-        LibraryBulkAction, LibraryBulkMovePlan, LibraryBulkMoveResult, LibraryCacheResult,
-        LibraryChange, LibraryChapterSuggestion, LibraryCollection, LibraryCompareSession,
-        LibraryCurationDecision, LibraryCurationState, LibraryDuplicateAnalysisJob,
-        LibraryDuplicateGroup, LibraryDuplicateTrashResult, LibraryFacetRequest, LibraryFacets,
-        LibraryFileOperation, LibraryFileOperationPlan, LibraryFileOperationResult,
-        LibraryHealthSummary, LibraryImageSession, LibraryItem, LibraryLocalInferenceJob,
-        LibraryMediaKind, LibraryMediaStack, LibraryMoment, LibraryMontage,
-        LibraryNearDuplicateMatch, LibraryPlaybackCacheStatus, LibraryPlaybackEntry,
-        LibraryPlaybackPreflight, LibraryPlaybackSession, LibraryPlaybackState,
-        LibraryQueryRequest, LibraryQueryResult, LibraryRichMetadata, LibraryScanJob,
-        LibraryScanResult, LibrarySearchStatus, LibrarySemanticIndexStatus,
-        LibrarySemanticTranscriptMatch, LibrarySmartView, LibrarySource, LibraryStoragePlan,
-        LibraryThemeAnalysis, LibraryThemeIndexStatus, LibraryThemeJob, LibraryThemeProviderStatus,
-        LibraryThemeSettings, LibraryTranscriptIndexStatus, LibraryTranscriptMatch,
-        LibraryTranscriptionProviderStatus, LibraryVisualSimilarityJob,
+        ApplyLibraryBulkMetadataRequest, AuthenticationProfile, BatchAnalysisItem,
+        BatchAnalysisResponse, BatchDownloadFailure, BatchDownloadResult, BrowserProfileInfo,
+        DesktopPreferences, DesktopRuntimeStatus, DiskSpaceInfo, DownloadArchiveMatch, DownloadJob,
+        DownloadState, EngineId, EngineInfo, EnginePreferences, ExportLibraryMomentsRequest,
+        GalleryItemList, LibraryArtworkCacheStatus, LibraryBulkAction, LibraryBulkMovePlan,
+        LibraryBulkMoveResult, LibraryCacheResult, LibraryChange, LibraryChapterSuggestion,
+        LibraryCollection, LibraryCompareSession, LibraryCurationDecision, LibraryCurationState,
+        LibraryDuplicateAnalysisJob, LibraryDuplicateGroup, LibraryDuplicateTrashResult,
+        LibraryFacetRequest, LibraryFacets, LibraryFileOperation, LibraryFileOperationPlan,
+        LibraryFileOperationResult, LibraryHealthSummary, LibraryImageSession, LibraryItem,
+        LibraryLocalInferenceJob, LibraryMediaKind, LibraryMediaStack, LibraryMoment,
+        LibraryMontage, LibraryNearDuplicateMatch, LibraryPlaybackCacheStatus,
+        LibraryPlaybackEntry, LibraryPlaybackPreflight, LibraryPlaybackSession,
+        LibraryPlaybackState, LibraryQueryRequest, LibraryQueryResult, LibraryRichMetadata,
+        LibraryScanJob, LibraryScanResult, LibrarySearchStatus, LibrarySemanticIndexStatus,
+        LibrarySemanticTranscriptMatch, LibrarySmartView, LibrarySource, LibrarySourceAutomation,
+        LibraryStoragePlan, LibraryThemeAnalysis, LibraryThemeIndexStatus, LibraryThemeJob,
+        LibraryThemeProviderStatus, LibraryThemeSettings, LibraryTranscriptIndexStatus,
+        LibraryTranscriptMatch, LibraryTranscriptionProviderStatus, LibraryVisualSimilarityJob,
         LibraryVisualSimilarityMatch, LibraryVisualSimilarityStatus, LocalShareSession,
         MediaAnalysis, NativePlaybackSession, NativePlaybackStatus, OnboardingStatus,
         PostDownloadRecipe, PostDownloadRecipeRun, Preset, PreviewLibraryBulkMoveRequest,
@@ -51,9 +51,9 @@ use crate::{
         SaveAuthenticationProfileRequest, SaveLibraryCollectionRequest,
         SaveLibraryCompareSessionRequest, SaveLibraryMediaStackRequest, SaveLibraryMomentRequest,
         SaveLibraryMontageRequest, SaveLibraryPlaybackRequest, SaveLibraryRichMetadataRequest,
-        SaveLibrarySmartViewRequest, SaveLibrarySourceRequest, SavePostDownloadRecipeRequest,
-        SavePresetRequest, SaveSitePresetRuleRequest, SaveSubscriptionRequest,
-        SetLibraryArtworkRequest, SitePresetRule, StartDownloadRequest,
+        SaveLibrarySmartViewRequest, SaveLibrarySourceAutomationRequest, SaveLibrarySourceRequest,
+        SavePostDownloadRecipeRequest, SavePresetRequest, SaveSitePresetRuleRequest,
+        SaveSubscriptionRequest, SetLibraryArtworkRequest, SitePresetRule, StartDownloadRequest,
         StartLibraryClipExportRequest, StartLibraryMontageExportRequest,
         StartLibrarySemanticIndexRequest, StartLibraryThemeAnalysisRequest,
         StartLibraryTranscriptionRequest, StartLocalShareRequest, StartTransformationRequest,
@@ -92,6 +92,81 @@ pub fn start_transformation(
     request: StartTransformationRequest,
 ) -> Result<TransformationTask, AppError> {
     transformations.start(app, request)
+}
+
+#[tauri::command]
+pub fn start_library_optimization(
+    app: AppHandle,
+    database: State<'_, Database>,
+    transformations: State<'_, TransformationManager>,
+    item_ids: Vec<String>,
+    destination_directory: String,
+    overwrite: bool,
+) -> Result<Vec<TransformationTask>, AppError> {
+    if item_ids.is_empty() || item_ids.len() > 100 {
+        return Err(AppError::new(
+            "invalid_optimization_selection",
+            "Choose between 1 and 100 Library videos to optimize.",
+        ));
+    }
+    let destination = std::path::PathBuf::from(destination_directory);
+    let metadata = destination.symlink_metadata().map_err(|_| {
+        AppError::new(
+            "optimization_destination_missing",
+            "Choose an existing output folder for optimized videos.",
+        )
+    })?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(AppError::new(
+            "invalid_optimization_destination",
+            "The optimization output must be a regular folder, not a symlink.",
+        ));
+    }
+    let mut tasks = Vec::with_capacity(item_ids.len());
+    let mut seen = HashSet::new();
+    for item_id in item_ids {
+        if !seen.insert(item_id.clone()) {
+            continue;
+        }
+        let item = database.get_library_item(&item_id)?;
+        if item.missing || item.media_kind != Some(LibraryMediaKind::Video) {
+            return Err(AppError::new(
+                "optimization_video_unavailable",
+                "Every selected optimization item must be an available Library video.",
+            ));
+        }
+        let source = std::path::Path::new(&item.path);
+        let stem = source
+            .file_stem()
+            .and_then(std::ffi::OsStr::to_str)
+            .unwrap_or("video")
+            .chars()
+            .map(|character| {
+                if character.is_control() || matches!(character, '/' | '\\') {
+                    '_'
+                } else {
+                    character
+                }
+            })
+            .take(120)
+            .collect::<String>();
+        let suffix = item_id.get(..8).unwrap_or(&item_id);
+        let output = destination.join(format!("{stem}-compatible-{suffix}.mp4"));
+        tasks.push(transformations.start(
+            app.clone(),
+            StartTransformationRequest {
+                input_path: item.path,
+                output_path: output.to_string_lossy().into_owned(),
+                operation: crate::models::TransformationOperation::Transcode {
+                    container: "mp4".to_owned(),
+                    video_codec: crate::models::TransformVideoCodec::H264,
+                    audio_codec: crate::models::TransformAudioCodec::Aac,
+                },
+                overwrite,
+            },
+        )?);
+    }
+    Ok(tasks)
 }
 
 #[tauri::command]
@@ -661,6 +736,22 @@ pub fn close_embedded_mpv(embedded_mpv: State<'_, EmbeddedMpvManager>) {
 }
 
 #[tauri::command]
+pub async fn capture_library_frame(
+    database: State<'_, Database>,
+    item_id: String,
+    timestamp_seconds: f64,
+    output_path: String,
+) -> Result<String, AppError> {
+    crate::screenshots::capture_library_frame(
+        database.inner().clone(),
+        item_id,
+        timestamp_seconds,
+        output_path,
+    )
+    .await
+}
+
+#[tauri::command]
 pub fn save_library_playback_progress(
     database: State<'_, Database>,
     request: SaveLibraryPlaybackRequest,
@@ -750,6 +841,14 @@ pub fn save_library_rich_metadata(
     request: SaveLibraryRichMetadataRequest,
 ) -> Result<LibraryRichMetadata, AppError> {
     database.save_library_rich_metadata(request)
+}
+
+#[tauri::command]
+pub fn apply_library_bulk_metadata(
+    database: State<'_, Database>,
+    request: ApplyLibraryBulkMetadataRequest,
+) -> Result<Vec<LibraryItem>, AppError> {
+    database.apply_library_bulk_metadata(request)
 }
 
 #[tauri::command]
@@ -1087,6 +1186,14 @@ pub async fn generate_library_storyboard(
 }
 
 #[tauri::command]
+pub async fn load_library_embedded_subtitles(
+    database: State<'_, Database>,
+    item_id: String,
+) -> Result<Vec<crate::models::LibrarySubtitleTrack>, AppError> {
+    crate::subtitles::load_embedded_subtitles(&database, &item_id).await
+}
+
+#[tauri::command]
 pub async fn start_library_clip_export(
     app: AppHandle,
     database: State<'_, Database>,
@@ -1407,6 +1514,22 @@ pub fn save_library_source(
     request: SaveLibrarySourceRequest,
 ) -> Result<LibrarySource, AppError> {
     library.save_source_and_sync_watcher(app, request)
+}
+
+#[tauri::command]
+pub fn get_library_source_automation(
+    library: State<'_, library::LibraryManager>,
+    source_id: String,
+) -> Result<LibrarySourceAutomation, AppError> {
+    library.source_automation(&source_id)
+}
+
+#[tauri::command]
+pub fn save_library_source_automation(
+    library: State<'_, library::LibraryManager>,
+    request: SaveLibrarySourceAutomationRequest,
+) -> Result<LibrarySourceAutomation, AppError> {
+    library.save_source_automation(request)
 }
 
 #[tauri::command]

@@ -15,8 +15,9 @@ use crate::{
         LibraryDuplicateGroup, LibraryDuplicateTrashResult, LibraryFileIdentity, LibraryItem,
         LibraryMediaKind, LibraryMetadataFields, LibraryMetadataState, LibraryProbeResult,
         LibraryRichMetadata, LibraryScanJob, LibraryScanResult, LibraryScanState, LibrarySource,
-        LibrarySourceStatus, LibraryTranscriptIndexStatus, SaveLibraryCollectionRequest,
-        SaveLibraryRichMetadataRequest, SaveLibrarySourceRequest,
+        LibrarySourceAutomation, LibrarySourceStatus, LibraryTranscriptIndexStatus,
+        SaveLibraryCollectionRequest, SaveLibraryRichMetadataRequest,
+        SaveLibrarySourceAutomationRequest, SaveLibrarySourceRequest,
     },
     transcripts,
 };
@@ -52,7 +53,7 @@ const MAX_CONCURRENT_METADATA_PROBES: usize = 3;
 const WATCH_DEBOUNCE: Duration = Duration::from_secs(2);
 const WATCH_SCAN_RETRY: Duration = Duration::from_secs(1);
 const SOURCE_HEALTH_INTERVAL: Duration = Duration::from_secs(10);
-const LIBRARY_BACKUP_VERSION: u32 = 6;
+const LIBRARY_BACKUP_VERSION: u32 = 7;
 const LIBRARY_CATALOG_SCHEMA_VERSION: u32 = 1;
 const LIBRARY_METADATA_SCHEMA_VERSION: u32 = 1;
 const MAX_LIBRARY_BACKUP_BYTES: u64 = 128 * 1024 * 1024;
@@ -152,6 +153,17 @@ impl LibraryManager {
 
     pub fn list_sources(&self) -> Result<Vec<LibrarySource>, AppError> {
         self.database.list_library_sources()
+    }
+
+    pub fn source_automation(&self, source_id: &str) -> Result<LibrarySourceAutomation, AppError> {
+        self.database.get_library_source_automation(source_id)
+    }
+
+    pub fn save_source_automation(
+        &self,
+        request: SaveLibrarySourceAutomationRequest,
+    ) -> Result<LibrarySourceAutomation, AppError> {
+        self.database.save_library_source_automation(request)
     }
 
     pub fn list_items(&self, app: AppHandle) -> Result<Vec<LibraryItem>, AppError> {
@@ -1080,6 +1092,9 @@ impl LibraryManager {
         let Some((input_size, input_modified_at)) = file_fingerprint(&input) else {
             return Ok(None);
         };
+        // Keep the cache generation stable so an artwork-quality improvement does not
+        // force a large existing library to synchronously regenerate every thumbnail.
+        // Clearing the derived artwork cache remains the explicit way to refresh it.
         let output =
             cache_directory.join(format!("{item_id}-v1-{input_size}-{input_modified_at}.jpg"));
         let mut generated = false;
@@ -1102,10 +1117,19 @@ impl LibraryManager {
                 .await
                 .map_err(|_| library_unavailable())?;
             if !cache_is_current(&input, &output) {
+                let source_kind = if input == media_path
+                    && media_kind_for_path(&media_path) == Some(LibraryMediaKind::Video)
+                {
+                    ArtworkSourceKind::Video {
+                        duration_seconds: item
+                            .duration_seconds
+                            .filter(|duration| duration.is_finite() && *duration > 0.1),
+                    }
+                } else {
+                    ArtworkSourceKind::StillImage
+                };
+                generate_artwork(&ffmpeg, &input, &output, source_kind).await?;
                 remove_stale_artwork(&cache_directory, item_id, &output);
-                let seek_video = input == media_path
-                    && media_kind_for_path(&media_path) == Some(LibraryMediaKind::Video);
-                generate_artwork(&ffmpeg, &input, &output, seek_video).await?;
                 generated = true;
             }
         }
@@ -1356,6 +1380,7 @@ impl LibraryManager {
     ) -> Result<LibraryItem, AppError> {
         let identity = file_identity(Path::new(&item.path));
         let previous = self.database.get_library_item_by_path(&item.path)?;
+        let is_new = previous.is_none();
         if previous.is_none() {
             if let Some(identity) = identity {
                 let missing_candidates = self
@@ -1404,6 +1429,13 @@ impl LibraryManager {
         if let Some(change) = change {
             self.record_change(app, &stored, change, None);
         }
+        let stored = if is_new {
+            self.database
+                .apply_library_source_automation(&source.id, &stored.id)?;
+            self.database.get_library_item(&stored.id)?
+        } else {
+            stored
+        };
         self.refresh_transcript_index(&stored)?;
         Ok(stored)
     }
@@ -2111,45 +2143,136 @@ fn cache_is_current(input: &Path, output: &Path) -> bool {
         .is_ok_and(|output_modified| output_modified >= input_modified)
 }
 
+const ARTWORK_FRAME_CANDIDATES: u8 = 8;
+const ARTWORK_SAMPLE_WINDOW_SECONDS: f64 = 8.0;
+
+#[derive(Debug, Clone, Copy)]
+enum ArtworkSourceKind {
+    StillImage,
+    Video { duration_seconds: Option<f64> },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ArtworkSamplingWindow {
+    start_seconds: f64,
+    duration_seconds: f64,
+    frames_per_second: f64,
+}
+
+fn artwork_sampling_window(duration_seconds: f64) -> Option<ArtworkSamplingWindow> {
+    if !duration_seconds.is_finite() || duration_seconds <= 0.1 {
+        return None;
+    }
+    let start_seconds = duration_seconds * 0.08;
+    let end_seconds = duration_seconds * 0.94;
+    let sample_duration = (end_seconds - start_seconds).min(ARTWORK_SAMPLE_WINDOW_SECONDS);
+    if sample_duration <= 0.05 {
+        return None;
+    }
+    Some(ArtworkSamplingWindow {
+        start_seconds,
+        duration_seconds: sample_duration,
+        frames_per_second: f64::from(ARTWORK_FRAME_CANDIDATES) / sample_duration,
+    })
+}
+
 async fn generate_artwork(
     ffmpeg: &Path,
     input: &Path,
     output: &Path,
-    seek_video: bool,
+    source_kind: ArtworkSourceKind,
 ) -> Result<(), AppError> {
+    let output_parent = output.parent().ok_or_else(|| {
+        AppError::new(
+            "library_artwork_cache_unavailable",
+            "The artwork cache location is unavailable.",
+        )
+    })?;
+    let staging = output_parent.join(format!(".artwork-{}.part.jpg", Uuid::new_v4()));
     let mut command = Command::new(ffmpeg);
     crate::utils::process::sanitize_tokio_command(&mut command);
-    command.arg("-hide_banner").arg("-loglevel").arg("error");
-    if seek_video {
-        command.arg("-ss").arg("1");
-    }
     command
-        .arg("-i")
-        .arg(input)
+        .arg("-hide_banner")
+        .arg("-loglevel")
+        .arg("error")
+        .arg("-nostdin");
+    let sampling = match source_kind {
+        ArtworkSourceKind::StillImage => None,
+        ArtworkSourceKind::Video {
+            duration_seconds: Some(duration_seconds),
+        } => artwork_sampling_window(duration_seconds),
+        ArtworkSourceKind::Video {
+            duration_seconds: None,
+        } => {
+            command.arg("-ss").arg("1");
+            None
+        }
+    };
+    if let Some(sampling) = sampling {
+        command
+            .arg("-ss")
+            .arg(format!("{:.6}", sampling.start_seconds));
+    }
+    command.arg("-i").arg(input);
+    if let Some(sampling) = sampling {
+        command
+            .arg("-t")
+            .arg(format!("{:.6}", sampling.duration_seconds));
+    }
+    let video_filter = if let Some(sampling) = sampling {
+        format!(
+            "fps={:.8},thumbnail={},scale=640:-2:force_original_aspect_ratio=decrease",
+            sampling.frames_per_second, ARTWORK_FRAME_CANDIDATES
+        )
+    } else {
+        "scale=640:-2:force_original_aspect_ratio=decrease".to_owned()
+    };
+    command
         .arg("-frames:v")
         .arg("1")
         .arg("-vf")
-        .arg("scale=640:-2:force_original_aspect_ratio=decrease")
+        .arg(video_filter)
         .arg("-q:v")
         .arg("4")
         .arg("-y")
-        .arg(output)
+        .arg(&staging)
         .kill_on_drop(true);
     let result = timeout(Duration::from_secs(20), command.output())
         .await
         .map_err(|_| {
+            let _ = std::fs::remove_file(&staging);
             AppError::new(
                 "library_artwork_timeout",
                 "Creating artwork for this media item took too long.",
             )
         })?
-        .map_err(|error| AppError::internal("could not start FFmpeg for library artwork", error))?;
-    if !result.status.success() || !output.is_file() {
-        let _ = std::fs::remove_file(output);
+        .map_err(|error| {
+            let _ = std::fs::remove_file(&staging);
+            AppError::internal("could not start FFmpeg for library artwork", error)
+        })?;
+    if !result.status.success() || !staging.is_file() {
+        let _ = std::fs::remove_file(&staging);
         return Err(AppError::new(
             "library_artwork_failed",
             "FFmpeg could not create artwork for this media item.",
         ));
+    }
+    if let Err(first_error) = std::fs::rename(&staging, output) {
+        if !output.exists() {
+            let _ = std::fs::remove_file(&staging);
+            return Err(AppError::internal(
+                "could not publish cached artwork",
+                first_error,
+            ));
+        }
+        std::fs::remove_file(output).map_err(|error| {
+            let _ = std::fs::remove_file(&staging);
+            AppError::internal("could not replace cached artwork", error)
+        })?;
+        std::fs::rename(&staging, output).map_err(|error| {
+            let _ = std::fs::remove_file(&staging);
+            AppError::internal("could not publish cached artwork", error)
+        })?;
     }
     Ok(())
 }
@@ -2527,6 +2650,8 @@ struct LibraryBackup {
     exported_at: chrono::DateTime<Utc>,
     #[serde(default)]
     sources: Vec<LibrarySource>,
+    #[serde(default)]
+    source_automations: Vec<LibrarySourceAutomation>,
     items: Vec<LibraryItem>,
     #[serde(default)]
     collections: Vec<LibraryCollection>,
@@ -2546,12 +2671,29 @@ struct LibraryBackup {
 
 pub fn export_backup(database: &Database, path: &str) -> Result<(), AppError> {
     let path = validate_json_output(path)?;
+    let sources = database.list_library_sources()?;
+    let source_automations = sources
+        .iter()
+        .map(|source| database.get_library_source_automation(&source.id))
+        .filter_map(|result| match result {
+            Ok(automation)
+                if !automation.tags.is_empty()
+                    || automation.collection_id.is_some()
+                    || automation.favorite =>
+            {
+                Some(Ok(automation))
+            }
+            Ok(_) => None,
+            Err(error) => Some(Err(error)),
+        })
+        .collect::<Result<Vec<_>, AppError>>()?;
     let backup = LibraryBackup {
         version: LIBRARY_BACKUP_VERSION,
         catalog_schema_version: LIBRARY_CATALOG_SCHEMA_VERSION,
         metadata_schema_version: LIBRARY_METADATA_SCHEMA_VERSION,
         exported_at: Utc::now(),
-        sources: database.list_library_sources()?,
+        sources,
+        source_automations,
         items: database.list_library_items_for_backup(MAX_LIBRARY_BACKUP_ITEMS + 1)?,
         collections: database.list_library_collections()?,
         playlists: database.list_library_playlists()?,
@@ -2606,6 +2748,8 @@ pub fn restore_backup(database: &Database, path: &str) -> Result<Vec<LibraryItem
     validate_backup_shape(&backup)?;
 
     let (source_requests, source_id_map) = prepare_backup_sources(database, &backup)?;
+    let prepared_source_automations =
+        prepare_backup_source_automations(backup.source_automations, &source_id_map)?;
     let mut prepared_items =
         prepare_backup_items(database, backup.items, &source_id_map, backup.version)?;
     let prepared_collections = prepare_backup_collections(backup.collections)?;
@@ -2732,6 +2876,9 @@ pub fn restore_backup(database: &Database, path: &str) -> Result<Vec<LibraryItem
                 },
             )?;
         }
+    }
+    for automation in prepared_source_automations {
+        database.save_library_source_automation_internal(automation)?;
     }
     for playlist in prepared_playlists {
         let stored = database.save_library_playlist(SaveLibraryPlaylistRequest {
@@ -2861,6 +3008,7 @@ fn validate_backup_shape(backup: &LibraryBackup) -> Result<(), AppError> {
     if !supported_version
         || backup.items.len() > MAX_LIBRARY_BACKUP_ITEMS
         || backup.sources.len() > MAX_LIBRARY_BACKUP_SOURCES
+        || backup.source_automations.len() > MAX_LIBRARY_BACKUP_SOURCES
         || backup.collections.len() > MAX_LIBRARY_BACKUP_COLLECTIONS
         || backup.playlists.len() > MAX_LIBRARY_BACKUP_PLAYLISTS
         || backup.media_stacks.len() > MAX_LIBRARY_BACKUP_STACKS
@@ -2946,6 +3094,61 @@ fn prepare_backup_sources(
         });
     }
     Ok((requests, id_map))
+}
+
+fn prepare_backup_source_automations(
+    automations: Vec<LibrarySourceAutomation>,
+    source_id_map: &HashMap<String, String>,
+) -> Result<Vec<SaveLibrarySourceAutomationRequest>, AppError> {
+    let mut source_ids = HashSet::new();
+    automations
+        .into_iter()
+        .map(|automation| {
+            if !source_ids.insert(automation.source_id.clone()) {
+                return Err(invalid_backup(
+                    "Folder automation must reference each source at most once.",
+                ));
+            }
+            let source_id = source_id_map.get(&automation.source_id).ok_or_else(|| {
+                invalid_backup("Folder automation must reference a backed-up source.")
+            })?;
+            if automation.tags.len() > 20 {
+                return Err(invalid_backup(
+                    "Folder automation can contain at most 20 tags.",
+                ));
+            }
+            let mut tags = Vec::with_capacity(automation.tags.len());
+            for tag in automation.tags {
+                let tag = tag.trim();
+                if tag.is_empty() || tag.chars().count() > 40 || tag.chars().any(char::is_control) {
+                    return Err(invalid_backup(
+                        "Folder automation contains an invalid media tag.",
+                    ));
+                }
+                if !tags
+                    .iter()
+                    .any(|existing: &String| existing.eq_ignore_ascii_case(tag))
+                {
+                    tags.push(tag.to_owned());
+                }
+            }
+            if automation
+                .collection_id
+                .as_ref()
+                .is_some_and(|id| Uuid::parse_str(id).is_err())
+            {
+                return Err(invalid_backup(
+                    "Folder automation contains an invalid collection identifier.",
+                ));
+            }
+            Ok(SaveLibrarySourceAutomationRequest {
+                source_id: source_id.clone(),
+                tags,
+                collection_id: automation.collection_id,
+                favorite: automation.favorite,
+            })
+        })
+        .collect()
 }
 
 fn prepare_backup_items(
@@ -3633,10 +3836,18 @@ mod tests {
             .apply_library_bulk_action(
                 vec![item.id.clone()],
                 LibraryBulkAction::AddToCollection {
-                    collection_id: collection.id,
+                    collection_id: collection.id.clone(),
                 },
             )
             .expect("collection membership");
+        source_database
+            .save_library_source_automation_internal(SaveLibrarySourceAutomationRequest {
+                source_id: source.id.clone(),
+                tags: vec!["Incoming".to_owned()],
+                collection_id: Some(collection.id.clone()),
+                favorite: true,
+            })
+            .expect("source automation");
         let playlist = source_database
             .save_library_playlist(SaveLibraryPlaylistRequest {
                 id: None,
@@ -3705,12 +3916,21 @@ mod tests {
         assert_eq!(restored_sources.len(), 1);
         assert!(restored_sources[0].private);
         assert_eq!(restored_sources[0].include_patterns, ["*.mp4"]);
+        let restored_automation = restored_database
+            .get_library_source_automation(&restored_sources[0].id)
+            .expect("source automation");
+        assert_eq!(restored_automation.tags, ["Incoming"]);
+        assert!(restored_automation.favorite);
         let restored_collections = restored_database
             .list_library_collections()
             .expect("collections");
         assert_eq!(restored_collections.len(), 1);
         assert_eq!(restored_collections[0].name, "Watch later");
         assert_eq!(restored_collections[0].item_ids, [restored[0].id.clone()]);
+        assert_eq!(
+            restored_automation.collection_id.as_deref(),
+            Some(restored_collections[0].id.as_str())
+        );
         let restored_playlists = restored_database
             .list_library_playlists()
             .expect("playlists");
@@ -3816,6 +4036,7 @@ mod tests {
             metadata_schema_version: LIBRARY_METADATA_SCHEMA_VERSION,
             exported_at: Utc::now(),
             sources: Vec::new(),
+            source_automations: Vec::new(),
             items: Vec::new(),
             collections: Vec::new(),
             playlists: Vec::new(),
@@ -4055,6 +4276,19 @@ mod tests {
         assert_eq!(error.code, "duplicate_group_stale");
     }
 
+    #[test]
+    fn representative_artwork_sampling_skips_video_edges() {
+        let sampling = artwork_sampling_window(100.0).expect("sampling window");
+        assert!((sampling.start_seconds - 8.0).abs() < f64::EPSILON);
+        assert!((sampling.duration_seconds - 8.0).abs() < f64::EPSILON);
+        assert!((sampling.frames_per_second - 1.0).abs() < f64::EPSILON);
+        let short = artwork_sampling_window(2.0).expect("short sampling window");
+        assert!(short.duration_seconds < ARTWORK_SAMPLE_WINDOW_SECONDS);
+        assert!(short.start_seconds > 0.0);
+        assert!(artwork_sampling_window(0.0).is_none());
+        assert!(artwork_sampling_window(f64::NAN).is_none());
+    }
+
     #[tokio::test]
     async fn generates_bounded_jpeg_artwork_when_ffmpeg_is_available() {
         let Some(ffmpeg) = managed::resolve("ffmpeg") else {
@@ -4067,9 +4301,52 @@ mod tests {
         ppm.extend_from_slice(&[255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255]);
         std::fs::write(&input, ppm).expect("test image");
 
-        generate_artwork(&ffmpeg, &input, &output, false)
+        generate_artwork(&ffmpeg, &input, &output, ArtworkSourceKind::StillImage)
             .await
             .expect("generated artwork");
+
+        assert!(output.is_file());
+        assert!(std::fs::metadata(output).expect("artwork metadata").len() > 0);
+    }
+
+    #[tokio::test]
+    async fn generates_representative_video_artwork_when_ffmpeg_is_available() {
+        let Some(ffmpeg) = managed::resolve("ffmpeg") else {
+            return;
+        };
+        let directory = tempdir().expect("temporary directory");
+        let input = directory.path().join("source.mkv");
+        let output = directory.path().join("artwork.jpg");
+        let generated = Command::new(&ffmpeg)
+            .arg("-hide_banner")
+            .arg("-loglevel")
+            .arg("error")
+            .arg("-f")
+            .arg("lavfi")
+            .arg("-i")
+            .arg("testsrc2=duration=2:size=64x64:rate=10")
+            .arg("-c:v")
+            .arg("ffv1")
+            .arg("-y")
+            .arg(&input)
+            .output()
+            .await
+            .expect("create test video");
+        assert!(
+            generated.status.success(),
+            "FFmpeg could not create the test video"
+        );
+
+        generate_artwork(
+            &ffmpeg,
+            &input,
+            &output,
+            ArtworkSourceKind::Video {
+                duration_seconds: Some(2.0),
+            },
+        )
+        .await
+        .expect("generated representative artwork");
 
         assert!(output.is_file());
         assert!(std::fs::metadata(output).expect("artwork metadata").len() > 0);

@@ -77,6 +77,7 @@ import type {
   LibraryPlaybackCacheStatus,
   LibraryPlaybackSession,
   LibraryPlaybackState,
+  LibrarySubtitleTrack,
   LibraryTranscriptIndexStatus,
   LibraryTranscriptMatch,
   LibraryLocalInferenceJob,
@@ -109,9 +110,12 @@ import type {
   LibraryScanJob,
   LibraryScanResult,
   LibrarySource,
+  LibrarySourceAutomation,
   SaveLibrarySourceRequest,
+  SaveLibrarySourceAutomationRequest,
   UpdateLibraryItemRequest,
   SaveLibraryRichMetadataRequest,
+  ApplyLibraryBulkMetadataRequest,
   SaveLibrarySmartViewRequest,
   SetLibraryArtworkRequest,
   SaveLibraryCollectionRequest,
@@ -199,6 +203,8 @@ export const api = {
   listTransformationTasks: () => invoke<TransformationTask[]>("list_transformation_tasks"),
   startTransformation: (request: StartTransformationRequest) =>
     invoke<TransformationTask>("start_transformation", { request }),
+  startLibraryOptimization: (itemIds: string[], destinationDirectory: string, overwrite = false) =>
+    invoke<TransformationTask[]>("start_library_optimization", { itemIds, destinationDirectory, overwrite }),
   cancelTransformation: (id: string) => invoke<void>("cancel_transformation", { id }),
   suggestPrivacyRedactions: (request: PrivacyDetectionRequest) => invoke<PrivacyRedactionSuggestion[]>("suggest_privacy_redactions", { request }),
   listLibraryItems: () => invoke<LibraryItem[]>("list_library_items"),
@@ -301,6 +307,7 @@ export const api = {
   updateLibraryItem: (request: UpdateLibraryItemRequest) => invoke<LibraryItem>("update_library_item", { request }),
   getLibraryRichMetadata: (itemId: string) => invoke<LibraryRichMetadata>("get_library_rich_metadata", { itemId }),
   saveLibraryRichMetadata: (request: SaveLibraryRichMetadataRequest) => invoke<LibraryRichMetadata>("save_library_rich_metadata", { request }),
+  applyLibraryBulkMetadata: (request: ApplyLibraryBulkMetadataRequest) => invoke<LibraryItem[]>("apply_library_bulk_metadata", { request }),
   resetLibraryRichMetadata: (itemId: string) => invoke<LibraryRichMetadata>("reset_library_rich_metadata", { itemId }),
   setLibraryArtwork: (request: SetLibraryArtworkRequest) => invoke<LibraryItem>("set_library_artwork", { request }),
   getLibrarySearchStatus: () => invoke<LibrarySearchStatus>("get_library_search_status"),
@@ -359,6 +366,8 @@ export const api = {
     invoke<number>("export_library_moments", { request }),
   generateLibraryStoryboard: (itemId: string, frameCount = 12) =>
     invoke<LibraryStoryboard>("generate_library_storyboard", { itemId, frameCount }),
+  loadLibraryEmbeddedSubtitles: (itemId: string) =>
+    invoke<LibrarySubtitleTrack[]>("load_library_embedded_subtitles", { itemId }),
   startLibraryClipExport: (request: StartLibraryClipExportRequest) =>
     invoke<TransformationTask>("start_library_clip_export", { request }),
   applyLibraryBulkAction: (ids: string[], action: LibraryBulkAction) => invoke<LibraryItem[]>("apply_library_bulk_action", { ids, action }),
@@ -392,6 +401,8 @@ export const api = {
   controlEmbeddedMpv: (request: EmbeddedMpvControlRequest) =>
     invoke<void>("control_embedded_mpv", { request }),
   closeEmbeddedMpv: () => invoke<void>("close_embedded_mpv"),
+  captureLibraryFrame: (itemId: string, timestampSeconds: number, outputPath: string) =>
+    invoke<string>("capture_library_frame", { itemId, timestampSeconds, outputPath }),
   getLibraryPlaybackCacheStatus: () => invoke<LibraryPlaybackCacheStatus>("get_library_playback_cache_status"),
   openLibraryItem: (id: string) => invoke<void>("open_library_item", { id }),
   reconcileLibrary: () => invoke<LibraryScanResult>("reconcile_library"),
@@ -409,6 +420,8 @@ export const api = {
   setLibraryFolderPrivate: (request: SetLibraryFolderPrivacyRequest) => invoke<LibraryPrivacyRules>("set_library_folder_private", { request }),
   listLibrarySources: () => invoke<LibrarySource[]>("list_library_sources"),
   saveLibrarySource: (request: SaveLibrarySourceRequest) => invoke<LibrarySource>("save_library_source", { request }),
+  getLibrarySourceAutomation: (sourceId: string) => invoke<LibrarySourceAutomation>("get_library_source_automation", { sourceId }),
+  saveLibrarySourceAutomation: (request: SaveLibrarySourceAutomationRequest) => invoke<LibrarySourceAutomation>("save_library_source_automation", { request }),
   removeLibrarySource: (id: string) => invoke<void>("remove_library_source", { id }),
   listLibraryScanJobs: () => invoke<LibraryScanJob[]>("list_library_scan_jobs"),
   startLibraryScan: (sourceId: string) => invoke<LibraryScanJob>("start_library_scan", { sourceId }),

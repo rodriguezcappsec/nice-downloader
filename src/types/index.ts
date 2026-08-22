@@ -730,6 +730,14 @@ export interface SaveLibraryRichMetadataRequest extends LibraryMetadataFields {
   itemId: string;
 }
 
+export interface ApplyLibraryBulkMetadataRequest {
+  itemIds: string[];
+  creator?: string | null;
+  series?: string | null;
+  episode?: string | null;
+  tags: string[];
+}
+
 export interface SetLibraryArtworkRequest {
   itemId: string;
   path?: string | null;
@@ -972,7 +980,10 @@ export type EmbeddedMpvControl =
   | "pause"
   | "seekRelative"
   | "seekAbsolute"
+  | "frameStep"
+  | "frameBackStep"
   | "setRate"
+  | "setVolume"
   | "setMuted";
 
 export interface EmbeddedMpvControlRequest {
@@ -1365,6 +1376,15 @@ export interface SaveLibrarySourceRequest {
   includePatterns: string[];
   excludePatterns: string[];
 }
+
+export interface LibrarySourceAutomation {
+  sourceId: string;
+  tags: string[];
+  collectionId?: string | null;
+  favorite: boolean;
+}
+
+export type SaveLibrarySourceAutomationRequest = LibrarySourceAutomation;
 
 export interface LibraryPrivacyStatus {
   configured: boolean;

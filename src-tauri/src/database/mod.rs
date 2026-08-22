@@ -1,35 +1,37 @@
 use crate::{
     errors::AppError,
     models::{
-        AuthenticationProfile, BrowserCookieSource, DesktopPreferences, DownloadArchiveMatch,
-        DownloadJob, DownloadState, EnginePreferences, LibraryAvailabilityFilter,
-        LibraryBulkAction, LibraryChange, LibraryChangeKind, LibraryCollection,
-        LibraryCompareSession, LibraryCompareSessionItem, LibraryCurationDecision,
-        LibraryCurationState, LibraryFacetRequest, LibraryFacets, LibraryFileIdentity,
-        LibraryFileOperation, LibraryFileOperationKind, LibraryFileOperationState,
-        LibraryFolderFacet, LibraryFolderScope, LibraryHealthIssue, LibraryHealthIssueKind,
-        LibraryHealthSummary, LibraryItem, LibraryMediaKind, LibraryMediaStack,
-        LibraryMediaStackMember, LibraryMediaStackRole, LibraryMetadataFields,
+        ApplyLibraryBulkMetadataRequest, AuthenticationProfile, BrowserCookieSource,
+        DesktopPreferences, DownloadArchiveMatch, DownloadJob, DownloadState, EnginePreferences,
+        LibraryAvailabilityFilter, LibraryBulkAction, LibraryChange, LibraryChangeKind,
+        LibraryCollection, LibraryCompareSession, LibraryCompareSessionItem,
+        LibraryCurationDecision, LibraryCurationState, LibraryFacetRequest, LibraryFacets,
+        LibraryFileIdentity, LibraryFileOperation, LibraryFileOperationKind,
+        LibraryFileOperationState, LibraryFolderFacet, LibraryFolderScope, LibraryHealthIssue,
+        LibraryHealthIssueKind, LibraryHealthSummary, LibraryItem, LibraryMediaKind,
+        LibraryMediaStack, LibraryMediaStackMember, LibraryMediaStackRole, LibraryMetadataFields,
         LibraryMetadataState, LibraryMoment, LibraryMontage, LibraryMontageSegment,
         LibraryNearDuplicateMatch, LibraryPlaybackEntry, LibraryPlaybackState, LibraryPlaylist,
         LibraryPrivacyRules, LibraryPrivacyStatus, LibraryPrivateFolder, LibraryProbeResult,
         LibraryQueryRequest, LibraryQueryResult, LibraryRichMetadata, LibraryScanJob,
         LibraryScanState, LibrarySearchStatus, LibrarySemanticIndexStatus, LibrarySmartView,
-        LibrarySmartViewQuery, LibrarySort, LibrarySource, LibrarySourceStatus,
-        LibraryStorageBucket, LibraryStoragePlan, LibraryStorageSource, LibraryThemeAnalysis,
-        LibraryThemeAnalysisMode, LibraryThemeAnalysisScope, LibraryThemeAssignment,
-        LibraryThemeFacet, LibraryThemeIndexStatus, LibraryThemeSettings, LibraryTranscriptCue,
-        LibraryTranscriptIndexStatus, LibraryTranscriptMatch, LibraryVisualSimilarityMatch,
-        LibraryVisualSimilarityStatus, LibraryWatchState, PostDownloadRecipe,
-        PostDownloadRecipeRun, PostDownloadRecipeRunState, PostDownloadRecipeStep, Preset,
-        PresetIntent, QueueSettings, SaveAuthenticationProfileRequest,
-        SaveLibraryCollectionRequest, SaveLibraryCompareSessionRequest,
-        SaveLibraryMediaStackRequest, SaveLibraryMomentRequest, SaveLibraryMontageRequest,
-        SaveLibraryPlaybackRequest, SaveLibraryPlaylistRequest, SaveLibraryRichMetadataRequest,
-        SaveLibrarySmartViewRequest, SaveLibrarySourceRequest, SavePostDownloadRecipeRequest,
-        SavePresetRequest, SaveSitePresetRuleRequest, SaveSubscriptionRequest, SitePresetRule,
-        StartDownloadRequest, StartLibraryThemeAnalysisRequest, Subscription,
-        TransformationOperation, TransformationState, TransformationTask, UpdateLibraryItemRequest,
+        LibrarySmartViewQuery, LibrarySort, LibrarySource, LibrarySourceAutomation,
+        LibrarySourceStatus, LibraryStorageBucket, LibraryStoragePlan, LibraryStorageSource,
+        LibraryThemeAnalysis, LibraryThemeAnalysisMode, LibraryThemeAnalysisScope,
+        LibraryThemeAssignment, LibraryThemeFacet, LibraryThemeIndexStatus, LibraryThemeSettings,
+        LibraryTranscriptCue, LibraryTranscriptIndexStatus, LibraryTranscriptMatch,
+        LibraryVisualSimilarityMatch, LibraryVisualSimilarityStatus, LibraryWatchState,
+        PostDownloadRecipe, PostDownloadRecipeRun, PostDownloadRecipeRunState,
+        PostDownloadRecipeStep, Preset, PresetIntent, QueueSettings,
+        SaveAuthenticationProfileRequest, SaveLibraryCollectionRequest,
+        SaveLibraryCompareSessionRequest, SaveLibraryMediaStackRequest, SaveLibraryMomentRequest,
+        SaveLibraryMontageRequest, SaveLibraryPlaybackRequest, SaveLibraryPlaylistRequest,
+        SaveLibraryRichMetadataRequest, SaveLibrarySmartViewRequest,
+        SaveLibrarySourceAutomationRequest, SaveLibrarySourceRequest,
+        SavePostDownloadRecipeRequest, SavePresetRequest, SaveSitePresetRuleRequest,
+        SaveSubscriptionRequest, SitePresetRule, StartDownloadRequest,
+        StartLibraryThemeAnalysisRequest, Subscription, TransformationOperation,
+        TransformationState, TransformationTask, UpdateLibraryItemRequest,
     },
     utils::validation::{
         normalize_engine_preferences, validate_destination, validate_engine_preferences,
@@ -81,6 +83,7 @@ const MIGRATION_0028: &str = include_str!("migrations/0028_gallery_file_progress
 const MIGRATION_0029: &str = include_str!("migrations/0029_library_privacy.sql");
 const MIGRATION_0030: &str = include_str!("migrations/0030_library_semantic_transcripts.sql");
 const MIGRATION_0031: &str = include_str!("migrations/0031_post_download_recipes.sql");
+const MIGRATION_0032: &str = include_str!("migrations/0032_library_source_automation.sql");
 const ENGINE_PREFERENCES_KEY: &str = "engine.preferences";
 const QUEUE_SETTINGS_KEY: &str = "queue.settings";
 const DESKTOP_PREFERENCES_KEY: &str = "desktop.preferences";
@@ -226,6 +229,7 @@ impl Database {
             (29, MIGRATION_0029),
             (30, MIGRATION_0030),
             (31, MIGRATION_0031),
+            (32, MIGRATION_0032),
         ] {
             let migrated: bool = transaction.query_row(
                 "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = ?1)",
@@ -4013,6 +4017,51 @@ impl Database {
         self.get_library_rich_metadata(&request.item_id)
     }
 
+    pub fn apply_library_bulk_metadata(
+        &self,
+        request: ApplyLibraryBulkMetadataRequest,
+    ) -> Result<Vec<LibraryItem>, AppError> {
+        let ids = validate_library_item_ids(request.item_ids)?;
+        let fields = validate_library_metadata_fields(LibraryMetadataFields {
+            creator: request.creator,
+            series: request.series,
+            episode: request.episode,
+            ..LibraryMetadataFields::default()
+        })?;
+        let tags = normalize_library_tags(request.tags)?;
+        if fields.creator.is_none()
+            && fields.series.is_none()
+            && fields.episode.is_none()
+            && tags.is_empty()
+        {
+            return Err(AppError::new(
+                "empty_library_bulk_metadata",
+                "Enter at least one creator, series, episode, or tag to apply.",
+            ));
+        }
+        for id in &ids {
+            self.get_library_item(id)?;
+        }
+        if fields.creator.is_some() || fields.series.is_some() || fields.episode.is_some() {
+            for id in &ids {
+                let current = self.get_library_rich_metadata(id)?;
+                self.save_library_rich_metadata(SaveLibraryRichMetadataRequest {
+                    item_id: id.clone(),
+                    creator: fields.creator.clone().or(current.overrides.creator),
+                    description: current.overrides.description,
+                    upload_date: current.overrides.upload_date,
+                    series: fields.series.clone().or(current.overrides.series),
+                    episode: fields.episode.clone().or(current.overrides.episode),
+                    original_url: current.overrides.original_url,
+                })?;
+            }
+        }
+        if !tags.is_empty() {
+            self.apply_library_bulk_action(ids.clone(), LibraryBulkAction::AddTags { tags })?;
+        }
+        self.list_library_items_by_ids(ids)
+    }
+
     pub fn reset_library_rich_metadata(
         &self,
         item_id: &str,
@@ -7148,6 +7197,174 @@ impl Database {
         self.get_library_source(&id)
     }
 
+    pub fn get_library_source_automation(
+        &self,
+        source_id: &str,
+    ) -> Result<LibrarySourceAutomation, AppError> {
+        validate_uuid(source_id, "library source")?;
+        let source = self.get_library_source(source_id)?;
+        if source.private && self.is_library_privacy_locked() {
+            return Err(library_locked_error());
+        }
+        self.get_library_source_automation_internal(source_id)
+    }
+
+    fn get_library_source_automation_internal(
+        &self,
+        source_id: &str,
+    ) -> Result<LibrarySourceAutomation, AppError> {
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "Folder automation is unavailable.")
+        })?;
+        connection
+            .query_row(
+                "SELECT source_id, tags_json, collection_id, favorite
+                 FROM library_source_automation WHERE source_id = ?1",
+                [source_id],
+                |row| {
+                    let tags_json: String = row.get(1)?;
+                    Ok(LibrarySourceAutomation {
+                        source_id: row.get(0)?,
+                        tags: serde_json::from_str(&tags_json).unwrap_or_default(),
+                        collection_id: row.get(2)?,
+                        favorite: row.get(3)?,
+                    })
+                },
+            )
+            .optional()
+            .map(|automation| {
+                automation.unwrap_or_else(|| LibrarySourceAutomation {
+                    source_id: source_id.to_owned(),
+                    ..LibrarySourceAutomation::default()
+                })
+            })
+            .map_err(Into::into)
+    }
+
+    pub fn save_library_source_automation(
+        &self,
+        request: SaveLibrarySourceAutomationRequest,
+    ) -> Result<LibrarySourceAutomation, AppError> {
+        validate_uuid(&request.source_id, "library source")?;
+        let source = self.get_library_source(&request.source_id)?;
+        if source.private && self.is_library_privacy_locked() {
+            return Err(library_locked_error());
+        }
+        self.save_library_source_automation_internal(request)
+    }
+
+    pub(crate) fn save_library_source_automation_internal(
+        &self,
+        request: SaveLibrarySourceAutomationRequest,
+    ) -> Result<LibrarySourceAutomation, AppError> {
+        validate_uuid(&request.source_id, "library source")?;
+        self.get_library_source(&request.source_id)?;
+        let source_id = request.source_id.clone();
+        let tags = normalize_library_tags(request.tags)?;
+        let collection_id = request.collection_id.filter(|id| !id.trim().is_empty());
+        let now = Utc::now().timestamp_millis();
+        let mut connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "Folder automation is unavailable.")
+        })?;
+        let transaction = connection.transaction()?;
+        if let Some(collection_id) = collection_id.as_deref() {
+            ensure_collection_exists(&transaction, collection_id)?;
+        }
+        if tags.is_empty() && collection_id.is_none() && !request.favorite {
+            transaction.execute(
+                "DELETE FROM library_source_automation WHERE source_id = ?1",
+                [&request.source_id],
+            )?;
+        } else {
+            let tags_json = serde_json::to_string(&tags).map_err(|error| {
+                AppError::internal("could not serialize folder automation tags", error)
+            })?;
+            transaction.execute(
+                "INSERT INTO library_source_automation
+                    (source_id, tags_json, collection_id, favorite, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+                 ON CONFLICT(source_id) DO UPDATE SET
+                    tags_json = excluded.tags_json,
+                    collection_id = excluded.collection_id,
+                    favorite = excluded.favorite,
+                    updated_at = excluded.updated_at",
+                params![
+                    request.source_id,
+                    tags_json,
+                    collection_id,
+                    request.favorite,
+                    now
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        drop(connection);
+        self.get_library_source_automation_internal(&source_id)
+    }
+
+    pub fn apply_library_source_automation(
+        &self,
+        source_id: &str,
+        item_id: &str,
+    ) -> Result<(), AppError> {
+        let automation = self.get_library_source_automation_internal(source_id)?;
+        if automation.tags.is_empty() && automation.collection_id.is_none() && !automation.favorite
+        {
+            return Ok(());
+        }
+        let mut connection = self.connection.lock().map_err(|_| {
+            AppError::new("database_unavailable", "Folder automation is unavailable.")
+        })?;
+        let transaction = connection.transaction()?;
+        ensure_library_item_exists(&transaction, item_id)?;
+        let now = Utc::now().timestamp_millis();
+        if automation.favorite {
+            transaction.execute(
+                "UPDATE media_library SET favorite = 1, updated_at = ?2 WHERE id = ?1",
+                params![item_id, now],
+            )?;
+        }
+        if !automation.tags.is_empty() {
+            let current: String = transaction.query_row(
+                "SELECT tags_json FROM media_library WHERE id = ?1",
+                [item_id],
+                |row| row.get(0),
+            )?;
+            let mut tags: Vec<String> = serde_json::from_str(&current).unwrap_or_default();
+            for tag in automation.tags {
+                if !tags.iter().any(|value| value.eq_ignore_ascii_case(&tag)) {
+                    tags.push(tag);
+                }
+            }
+            tags.truncate(20);
+            transaction.execute(
+                "UPDATE media_library SET tags_json = ?2, updated_at = ?3 WHERE id = ?1",
+                params![
+                    item_id,
+                    serde_json::to_string(&tags).map_err(|error| AppError::internal(
+                        "could not serialize media tags",
+                        error
+                    ))?,
+                    now
+                ],
+            )?;
+        }
+        if let Some(collection_id) = automation.collection_id {
+            ensure_collection_exists(&transaction, &collection_id)?;
+            transaction.execute(
+                "INSERT OR IGNORE INTO library_collection_items (collection_id, item_id, added_at)
+                 VALUES (?1, ?2, ?3)",
+                params![collection_id, item_id, now],
+            )?;
+            transaction.execute(
+                "UPDATE library_collections SET updated_at = ?2 WHERE id = ?1",
+                params![collection_id, now],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn remove_library_source(&self, id: &str) -> Result<(), AppError> {
         let mut connection = self.connection.lock().map_err(|_| {
             AppError::new("database_unavailable", "Library sources are unavailable.")
@@ -10066,7 +10283,7 @@ mod tests {
                 row.get(0)
             })
             .expect("recovered migration version");
-        assert_eq!(latest_version, 31);
+        assert_eq!(latest_version, 32);
         let has_playback: bool = connection
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'library_playback')",
@@ -10244,6 +10461,28 @@ mod tests {
                 name: "Watch later".to_owned(),
             })
             .expect("collection");
+        let automation = database
+            .save_library_source_automation(SaveLibrarySourceAutomationRequest {
+                source_id: source.id.clone(),
+                tags: vec!["Incoming".to_owned(), "incoming".to_owned()],
+                collection_id: Some(collection.id.clone()),
+                favorite: true,
+            })
+            .expect("source automation");
+        assert_eq!(automation.tags, ["Incoming"]);
+        database
+            .apply_library_source_automation(&source.id, &changed.id)
+            .expect("apply source automation");
+        let automated = database
+            .get_library_item(&changed.id)
+            .expect("automated item");
+        assert!(automated.favorite);
+        assert!(automated.tags.iter().any(|tag| tag == "Incoming"));
+        assert!(database
+            .list_library_collections()
+            .expect("automated collection")
+            .iter()
+            .any(|entry| entry.id == collection.id && entry.item_ids.contains(&changed.id)));
         database
             .apply_library_bulk_action(
                 vec![changed.id.clone()],
@@ -10501,6 +10740,125 @@ mod tests {
             refreshed.effective.creator.as_deref(),
             Some("My channel name")
         );
+    }
+
+    #[test]
+    fn bulk_metadata_updates_only_entered_fields_and_merges_tags() {
+        let directory = tempdir().expect("temporary directory");
+        let database =
+            Database::open(&directory.path().join("bulk-metadata.sqlite3")).expect("database");
+        let mut first =
+            media_stack_test_item(directory.path(), "First episode", LibraryMediaKind::Video);
+        first.tags = vec!["existing".to_owned()];
+        let mut second =
+            media_stack_test_item(directory.path(), "Second episode", LibraryMediaKind::Video);
+        second.tags = vec!["archive".to_owned()];
+        database.upsert_library_item(&first).expect("first item");
+        database.upsert_library_item(&second).expect("second item");
+
+        database
+            .save_library_rich_metadata(SaveLibraryRichMetadataRequest {
+                item_id: first.id.clone(),
+                creator: Some("First creator".to_owned()),
+                description: Some("First description".to_owned()),
+                upload_date: Some("2026-02-03".to_owned()),
+                series: Some("Original series".to_owned()),
+                episode: Some("Episode one".to_owned()),
+                original_url: Some("https://example.com/first".to_owned()),
+            })
+            .expect("first metadata");
+        database
+            .save_library_rich_metadata(SaveLibraryRichMetadataRequest {
+                item_id: second.id.clone(),
+                creator: Some("Second creator".to_owned()),
+                description: Some("Second description".to_owned()),
+                upload_date: None,
+                series: Some("Other series".to_owned()),
+                episode: Some("Episode two".to_owned()),
+                original_url: None,
+            })
+            .expect("second metadata");
+
+        let changed = database
+            .apply_library_bulk_metadata(ApplyLibraryBulkMetadataRequest {
+                item_ids: vec![first.id.clone(), second.id.clone()],
+                creator: None,
+                series: Some("Shared series".to_owned()),
+                episode: None,
+                tags: vec!["curated".to_owned(), "EXISTING".to_owned()],
+            })
+            .expect("bulk metadata");
+        assert_eq!(changed.len(), 2);
+
+        let first_metadata = database
+            .get_library_rich_metadata(&first.id)
+            .expect("updated first metadata");
+        assert_eq!(
+            first_metadata.effective.creator.as_deref(),
+            Some("First creator")
+        );
+        assert_eq!(
+            first_metadata.effective.series.as_deref(),
+            Some("Shared series")
+        );
+        assert_eq!(
+            first_metadata.effective.episode.as_deref(),
+            Some("Episode one")
+        );
+        assert_eq!(
+            first_metadata.effective.description.as_deref(),
+            Some("First description")
+        );
+        assert_eq!(
+            first_metadata.effective.original_url.as_deref(),
+            Some("https://example.com/first")
+        );
+
+        let second_metadata = database
+            .get_library_rich_metadata(&second.id)
+            .expect("updated second metadata");
+        assert_eq!(
+            second_metadata.effective.creator.as_deref(),
+            Some("Second creator")
+        );
+        assert_eq!(
+            second_metadata.effective.series.as_deref(),
+            Some("Shared series")
+        );
+        assert_eq!(
+            second_metadata.effective.episode.as_deref(),
+            Some("Episode two")
+        );
+
+        let changed_by_id = changed
+            .into_iter()
+            .map(|item| (item.id.clone(), item))
+            .collect::<HashMap<_, _>>();
+        let first_changed = changed_by_id.get(&first.id).expect("first changed item");
+        assert!(first_changed.tags.iter().any(|tag| tag == "existing"));
+        assert!(first_changed.tags.iter().any(|tag| tag == "curated"));
+        assert_eq!(
+            first_changed
+                .tags
+                .iter()
+                .filter(|tag| tag.eq_ignore_ascii_case("existing"))
+                .count(),
+            1
+        );
+        let second_changed = changed_by_id.get(&second.id).expect("second changed item");
+        assert!(second_changed.tags.iter().any(|tag| tag == "archive"));
+        assert!(second_changed.tags.iter().any(|tag| tag == "curated"));
+
+        let empty = database
+            .apply_library_bulk_metadata(ApplyLibraryBulkMetadataRequest {
+                item_ids: vec![first.id],
+                creator: None,
+                series: None,
+                episode: None,
+                tags: Vec::new(),
+            })
+            .expect_err("empty bulk metadata");
+        assert_eq!(empty.code, "empty_library_bulk_metadata");
     }
 
     #[test]
