@@ -85,3 +85,13 @@ test("playback diagnostics explain the active renderer without exposing paths", 
   await expect(page.getByText("H.264 and AAC in MP4 are expected to play directly.", { exact: true })).toBeVisible();
   await expect(page.getByText("/tmp/media/playwright-clip.mp4", { exact: true })).toHaveCount(0);
 });
+
+test("Library activity inbox links attention counts to existing workspaces", async ({ page }) => {
+  const inbox = page.locator("details").filter({ hasText: "Library activity" });
+  await expect(inbox).toContainText("1 attention signal");
+  await inbox.locator("summary").click();
+  const curation = inbox.getByRole("button", { name: /Curation queue/ });
+  await expect(curation).toContainText("1");
+  await curation.click();
+  await expect(page.getByRole("heading", { name: "Review your library quickly" })).toBeVisible();
+});

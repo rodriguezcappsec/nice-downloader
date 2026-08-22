@@ -96,6 +96,7 @@ export async function installTauriMock(page: Page) {
         case "get_library_transcription_provider_status": return { available: false, executable: null, detail: "Test transcription provider unavailable" };
         case "get_library_semantic_transcript_index_status": return { model: "", indexedItems: 0, staleItems: 0 };
         case "get_library_local_inference_job": return null;
+        case "list_library_curation_queue": return args?.reviewLater ? [] : [testItem];
         case "query_library_items": return { ...emptyQuery, items: [testItem], totalItems: 1 };
         case "get_library_facets": return emptyFacets;
         case "get_library_artwork": return null;

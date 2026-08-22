@@ -94,6 +94,7 @@ import type {
   LibraryCollection,
   LibraryFacets,
   LibraryFolderFacet,
+  LibraryHealthSummary,
   LibraryMediaKind,
   LibraryMediaStack,
   LibraryMediaStackRole,
@@ -278,6 +279,8 @@ export function LibraryPage({ active = true, workspace = "library" }: { active?:
   const [playbackContext, setPlaybackContext] = useState<LibraryItem[] | null>(null);
   const [playNextItems, setPlayNextQueueItems] = useState<LibraryItem[]>([]);
   const [changes, setChanges] = useState<LibraryChange[]>([]);
+  const [healthSummary, setHealthSummary] = useState<LibraryHealthSummary | null>(null);
+  const [curationQueueSummary, setCurationQueueSummary] = useState({ count: 0, capped: false });
   const [duplicateJob, setDuplicateJob] = useState<LibraryDuplicateAnalysisJob | null>(null);
   const [duplicateGroups, setDuplicateGroups] = useState<LibraryDuplicateGroup[]>([]);
   const [fileOperations, setFileOperations] = useState<LibraryFileOperation[]>([]);
@@ -1125,6 +1128,23 @@ export function LibraryPage({ active = true, workspace = "library" }: { active?:
   }, [availabilityFilter, libraryRevision, setError, sourceFilter]);
 
   useEffect(() => {
+    let disposed = false;
+    void Promise.all([
+      api.getLibraryHealthSummary(),
+      api.listLibraryCurationQueue(false, 500),
+      api.listLibraryCurationQueue(true, 500),
+    ]).then(([health, unreviewed, reviewLater]) => {
+      if (disposed) return;
+      setHealthSummary(health);
+      setCurationQueueSummary({
+        count: unreviewed.length + reviewLater.length,
+        capped: unreviewed.length === 500 || reviewLater.length === 500,
+      });
+    }).catch((error) => { if (!disposed) setError(normalizeError(error)); });
+    return () => { disposed = true; };
+  }, [libraryRevision, setError]);
+
+  useEffect(() => {
     if (!manageOpen) return;
     const ids = Array.from(new Set([
       ...changes.map((change) => change.itemId),
@@ -1138,6 +1158,16 @@ export function LibraryPage({ active = true, workspace = "library" }: { active?:
   }, [changes, duplicateGroups, libraryRevision, manageOpen, setError]);
 
 const sourceNames = useMemo(() => new Map(sources.map((source) => [source.id, source.name])), [sources]);
+const latestScanWarningCount = useMemo(() => {
+    const visibleSourceIds = new Set(sources.map((source) => source.id));
+    const latestBySource = new Map<string, LibraryScanJob>();
+    for (const job of scanJobs) {
+      if (!visibleSourceIds.has(job.sourceId)) continue;
+      const current = latestBySource.get(job.sourceId);
+      if (!current || Date.parse(job.updatedAt) > Date.parse(current.updatedAt)) latestBySource.set(job.sourceId, job);
+    }
+    return Array.from(latestBySource.values()).reduce((total, job) => total + job.warningCount, 0);
+  }, [scanJobs, sources]);
 const collectionNames = useMemo(() => new Map(collections.map((collection) => [collection.id, collection.name])), [collections]);
 const smartCollectionCards = useMemo(() => visibleSmartViews.map((view) => ({
     view,
@@ -1597,6 +1627,27 @@ const resultTitle = search.trim()
     if (section === "videos") setMediaFilter("video");
     if (section === "images") setMediaFilter("image");
     if (section === "private") setPrivacyOnly(true);
+  }
+
+  function openLibraryManagerSection(targetId: string) {
+    setManageOpen(true);
+    window.setTimeout(() => {
+      const target = document.getElementById(targetId);
+      if (target) target.tabIndex = -1;
+      target?.scrollIntoView({ block: "start" });
+      target?.focus();
+    }, 0);
+  }
+
+  function openMissingMedia() {
+    setWorkspaceSection("all");
+    setActivePlaylist(null);
+    setActivePlaylistItems([]);
+    setSearch("");
+    resetFilters();
+    setAvailabilityFilter("missing");
+    setResultPage(1);
+    setView("library");
   }
 
   const previousWorkspace = useRef(workspace);
@@ -2099,6 +2150,19 @@ const resultTitle = search.trim()
         {folderFilter !== "all" && privacyStatus?.configured && !privacyStatus.locked ? <><Button variant="ghost" disabled={busy} onClick={() => void setCurrentFolderPrivacy(true)}><Lock size={14} /> Make current folder private</Button><Button variant="ghost" disabled={busy} onClick={() => void setCurrentFolderPrivacy(false)}>Remove folder privacy rule</Button></> : null}
       </div>
 
+      {workspaceSection === "home" ? <LibraryActivityInbox
+        curationCount={curationQueueSummary.count}
+        curationCapped={curationQueueSummary.capped}
+        changeCount={changes.length}
+        scanWarningCount={latestScanWarningCount}
+        health={healthSummary}
+        onOpenCuration={() => setView("curation")}
+        onOpenChanges={() => openLibraryManagerSection("library-review-title")}
+        onOpenScans={() => openLibraryManagerSection("library-sources-title")}
+        onOpenMissing={openMissingMedia}
+        onOpenHealth={() => setView("health")}
+      /> : null}
+
       <div className={workspaceSection === "home" ? "hidden" : ""}>
       <section className="mt-4 rounded-panel bg-panel/55 p-4 shadow-control" aria-labelledby="smart-collections-heading">
         <div className="flex flex-wrap items-start justify-between gap-3">
@@ -2512,6 +2576,39 @@ function PlaylistWorkspace({ playlist, items, loading, busy, sourceNames, onBack
     <header className="mb-6 flex flex-wrap items-end justify-between gap-4 border-b border-line/60 pb-6"><div className="flex items-start gap-4"><button className="mt-1 grid size-9 place-items-center rounded-[7px] bg-elevated text-muted hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70" onClick={onBack} aria-label="Back to library"><ChevronRight className="rotate-180" size={16} /></button><div><p className="text-[10px] font-medium uppercase tracking-[0.14em] text-accent">Playlist</p><h2 id="library-playlist-title" tabIndex={-1} className="mt-1 text-[30px] font-semibold tracking-[-0.04em] outline-none">{playlist.name}</h2><p className="mt-2 max-w-2xl text-xs leading-5 text-muted">{playlist.description || "An ordered local playback queue."}</p><p className="number-font mt-2 text-[10px] text-muted">{items.length} video{items.length === 1 ? "" : "s"}</p></div></div><Button disabled={!firstAvailable} onClick={() => firstAvailable && onPlay(firstAvailable)}><Play size={15} fill="currentColor" /> Play all</Button></header>
     {loading ? <div className="flex items-center justify-center gap-2 py-16 text-sm text-muted" role="status"><LoaderCircle className="animate-spin text-accent" size={17} /> Loading playlist…</div> : items.length === 0 ? <div className="border border-dashed border-line/70 px-6 py-14 text-center"><ListPlus className="mx-auto text-muted/40" size={30} /><p className="mt-3 text-sm font-semibold">This playlist is empty</p><p className="mt-1 text-xs text-muted">Open a video and choose Add to playlist.</p></div> : <ol className="space-y-2" aria-busy={busy}>{items.map((item, index) => <li key={item.id} className="grid grid-cols-[36px_150px_minmax(0,1fr)_auto] items-center gap-3 rounded-[10px] border border-line/55 bg-panel/55 p-2.5"><span className="number-font text-center text-xs text-muted">{index + 1}</span><button className="relative aspect-video overflow-hidden rounded-[7px] bg-elevated focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70" disabled={item.missing} onClick={() => onPlay(item)}><MediaArtwork item={item} /></button><button className="min-w-0 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70" onClick={() => onDetails(item)}><strong className="block truncate text-xs font-semibold">{item.title}</strong><span className="mt-1 block truncate text-[10px] text-muted">{item.missing ? "Missing file" : `${sourceLabel(item, sourceNames)}${item.durationSeconds != null ? ` · ${formatDuration(item.durationSeconds)}` : ""}`}</span></button><div className="flex items-center gap-1"><button className="grid size-8 place-items-center rounded-[6px] text-muted hover:bg-elevated hover:text-ink disabled:opacity-30" disabled={busy || index === 0} onClick={() => onMove(item.id, index - 1)} aria-label={`Move ${item.title} up`}><ArrowRight className="-rotate-90" size={14} /></button><button className="grid size-8 place-items-center rounded-[6px] text-muted hover:bg-elevated hover:text-ink disabled:opacity-30" disabled={busy || index + 1 === items.length} onClick={() => onMove(item.id, index + 1)} aria-label={`Move ${item.title} down`}><ArrowRight className="rotate-90" size={14} /></button><button className="grid size-8 place-items-center rounded-[6px] text-muted hover:bg-elevated hover:text-red-300 disabled:opacity-30" disabled={busy} onClick={() => onRemove(item.id)} aria-label={`Remove ${item.title} from playlist`}><X size={14} /></button></div></li>)}</ol>}
   </section>;
+}
+
+function LibraryActivityInbox({ curationCount, curationCapped, changeCount, scanWarningCount, health, onOpenCuration, onOpenChanges, onOpenScans, onOpenMissing, onOpenHealth }: { curationCount: number; curationCapped: boolean; changeCount: number; scanWarningCount: number; health: LibraryHealthSummary | null; onOpenCuration: () => void; onOpenChanges: () => void; onOpenScans: () => void; onOpenMissing: () => void; onOpenHealth: () => void }) {
+  const activities = [
+    { key: "curation", label: "Curation queue", detail: "New and saved-for-later media awaiting a decision", count: curationCount, countLabel: curationCapped ? `${curationCount}+` : String(curationCount), action: onOpenCuration },
+    { key: "changes", label: "Library changes", detail: "Added, moved, restored, or changed files to review", count: changeCount, countLabel: String(changeCount), action: onOpenChanges },
+    { key: "scans", label: "Scan warnings", detail: "Warnings from the latest scan of each watched folder", count: scanWarningCount, countLabel: String(scanWarningCount), action: onOpenScans },
+    { key: "missing", label: "Missing media", detail: "Catalog entries whose original file is unavailable", count: health?.missingItems || 0, countLabel: String(health?.missingItems || 0), action: onOpenMissing },
+    { key: "metadata", label: "Inspection failures", detail: "Files whose technical metadata could not be inspected", count: health?.metadataFailedItems || 0, countLabel: String(health?.metadataFailedItems || 0), action: onOpenHealth },
+    { key: "health", label: "Other health notices", detail: "Pending inspection and conservative playback advisories", count: (health?.metadataPendingItems || 0) + (health?.compatibilityRiskItems || 0), countLabel: String((health?.metadataPendingItems || 0) + (health?.compatibilityRiskItems || 0)), action: onOpenHealth },
+  ].filter((activity) => activity.count > 0);
+  const total = activities.reduce((sum, activity) => sum + activity.count, 0);
+
+  function iconFor(key: string) {
+    if (key === "curation") return <CheckSquare2 size={15} />;
+    if (key === "changes") return <BellDot size={15} />;
+    if (key === "scans") return <FolderSearch size={15} />;
+    if (key === "missing") return <FileVideo size={15} />;
+    if (key === "metadata") return <Database size={15} />;
+    return <Film size={15} />;
+  }
+
+  return <details className="group mt-4 overflow-hidden rounded-[12px] border border-line/55 bg-panel/55 shadow-control">
+    <summary className="flex min-h-12 cursor-pointer list-none items-center gap-3 px-4 py-2.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/70">
+      <span className={`grid size-8 shrink-0 place-items-center rounded-[8px] ${total ? "bg-accent/10 text-accent" : "bg-elevated text-muted"}`}><BellDot size={15} /></span>
+      <span className="min-w-0 flex-1"><strong className="block text-[12px] font-semibold">Library activity</strong><span className="mt-0.5 block truncate text-[10px] text-muted">{total ? `${total.toLocaleString()} attention signal${total === 1 ? "" : "s"} across review and media health` : "Everything visible is reviewed and healthy"}</span></span>
+      {total ? <span className="number-font rounded-[6px] bg-accent/10 px-2 py-1 text-[10px] font-semibold text-accent">{total.toLocaleString()}</span> : <Check size={15} className="text-emerald-300" />}
+      <ChevronRight className="text-muted transition-transform group-open:rotate-90" size={15} />
+    </summary>
+    <div className="border-t border-line/50 p-3">
+      {activities.length ? <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">{activities.map((activity) => <button key={activity.key} className="flex min-h-16 items-center gap-3 rounded-[9px] bg-elevated/40 px-3 py-2.5 text-left transition hover:bg-elevated/75 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70" onClick={activity.action}><span className="grid size-8 shrink-0 place-items-center rounded-[7px] bg-panel text-accent">{iconFor(activity.key)}</span><span className="min-w-0 flex-1"><strong className="block text-[11px] font-semibold">{activity.label}</strong><span className="mt-0.5 block text-[9px] leading-4 text-muted">{activity.detail}</span></span><span className="number-font shrink-0 text-xs font-semibold text-accent">{activity.countLabel}</span></button>)}</div> : <div className="flex items-center gap-3 px-2 py-3 text-[11px] text-muted"><Check className="text-emerald-300" size={16} /><span>No visible media needs review. Private activity remains hidden while the vault is locked.</span></div>}
+    </div>
+  </details>;
 }
 
 function MediaSection({ title, subtitle, items, sourceNames, onSelect, onSeeAll, progress, horizontal = false, selectionMode = false, selectedIds = new Set(), onToggleSelection, privateItemIds = new Set(), viewMode = "grid" }: { title: string; subtitle: string; items: LibraryItem[]; sourceNames: Map<string, string>; onSelect: (item: LibraryItem) => void; onSeeAll?: () => void; progress?: Map<string, number>; horizontal?: boolean; selectionMode?: boolean; selectedIds?: Set<string>; onToggleSelection?: (id: string) => void; privateItemIds?: Set<string>; viewMode?: "grid" | "list" }) {
