@@ -155,6 +155,36 @@ const EMPTY_LIBRARY_FACETS: LibraryFacets = { totalItems: 0, availableItems: 0, 
 type LiveAnnouncement = { signature: string; message: string; assertive?: boolean };
 type TranscriptSeekRequest = { id: number; itemId: string; seconds: number };
 
+function smartCollectionRules(
+  query: LibrarySmartViewQuery,
+  sourceNames: Map<string, string>,
+  collectionNames: Map<string, string>,
+): string[] {
+  const rules: string[] = [];
+  if (query.search) rules.push(`Search “${query.search}”`);
+  if (query.mediaKind === "video") rules.push("Videos");
+  if (query.mediaKind === "image") rules.push("Images");
+  if (query.sourceId) rules.push(`Source: ${sourceNames.get(query.sourceId) || "Saved source"}`);
+  if (query.folderPath != null) rules.push(query.folderPath ? `Folder: ${query.folderPath}` : "Source root only");
+  if (query.resolution) rules.push(`${query.resolution} resolution`);
+  if (query.container) rules.push(query.container.toLocaleUpperCase());
+  if (query.duration) rules.push(`${query.duration} duration`);
+  if (query.dateAdded) rules.push(`Added: ${query.dateAdded}`);
+  if (query.datePublished) rules.push(`Published: ${query.datePublished}`);
+  if (query.availability !== "available") rules.push(query.availability === "missing" ? "Missing files" : "Any availability");
+  rules.push(...query.tags.map((tag) => `#${tag}`));
+  rules.push(...query.creators.map((creator) => `Creator: ${creator}`));
+  rules.push(...query.series.map((series) => `Series: ${series}`));
+  rules.push(...query.sites.map((site) => `Site: ${site}`));
+  if (query.theme) rules.push(`Theme: ${query.theme}`);
+  if (query.rating) rules.push(`Rating: ${query.rating}`);
+  if (query.collectionId) rules.push(`Collection: ${collectionNames.get(query.collectionId) || "Saved collection"}`);
+  if (query.favoriteOnly) rules.push("Favorites");
+  if (query.privateOnly) rules.push("Private media");
+  if (query.sort !== "recent") rules.push(`Sort: ${query.sort}`);
+  return rules.length > 0 ? rules : ["All available media"];
+}
+
 function readMiniPlayerLayout(): MiniPlayerLayout | null {
   try {
     const parsed = JSON.parse(window.localStorage.getItem(MINI_PLAYER_LAYOUT_KEY) || "null") as Partial<MiniPlayerLayout> | null;
@@ -223,6 +253,8 @@ export function LibraryPage({ active = true, workspace = "library" }: { active?:
   const [smartViewFormOpen, setSmartViewFormOpen] = useState(false);
   const [smartViewBusy, setSmartViewBusy] = useState(false);
   const [confirmDeleteSmartViewId, setConfirmDeleteSmartViewId] = useState<string | null>(null);
+  const [smartViewCounts, setSmartViewCounts] = useState<Record<string, number>>({});
+  const [smartViewCountsLoading, setSmartViewCountsLoading] = useState(false);
   const [searchStatus, setSearchStatus] = useState<LibrarySearchStatus | null>(null);
   const [transcriptStatus, setTranscriptStatus] = useState<LibraryTranscriptIndexStatus | null>(null);
   const [transcriptMatches, setTranscriptMatches] = useState<LibraryTranscriptMatch[]>([]);
@@ -959,6 +991,39 @@ export function LibraryPage({ active = true, workspace = "library" }: { active?:
     return { ...query, search: search.trim() || null };
   }, [libraryRequest, search]);
 
+  const visibleSmartViews = useMemo(
+    () => smartViews.filter((view) => !view.query.privateOnly || Boolean(privacyStatus?.configured && !privacyStatus.locked)),
+    [privacyStatus?.configured, privacyStatus?.locked, smartViews],
+  );
+
+  useEffect(() => {
+    if (!active || visibleSmartViews.length === 0) {
+      setSmartViewCounts({});
+      setSmartViewCountsLoading(false);
+      return;
+    }
+    let disposed = false;
+    setSmartViewCountsLoading(true);
+    void (async () => {
+      const nextCounts: Record<string, number> = {};
+      for (let index = 0; index < visibleSmartViews.length; index += 4) {
+        const group = visibleSmartViews.slice(index, index + 4);
+        await Promise.all(group.map(async (view) => {
+          try {
+            const result = await api.queryLibraryItems({ ...view.query, page: 1, pageSize: 1 });
+            nextCounts[view.id] = result.totalItems;
+          } catch {
+            // A stale saved rule must not prevent the rest of Library from loading.
+          }
+        }));
+        if (disposed) return;
+      }
+      setSmartViewCounts(nextCounts);
+      setSmartViewCountsLoading(false);
+    })();
+    return () => { disposed = true; };
+  }, [active, libraryRevision, visibleSmartViews]);
+
   useEffect(() => {
     if (!activeSmartViewId) return;
     const activeView = smartViews.find((view) => view.id === activeSmartViewId);
@@ -1066,6 +1131,11 @@ export function LibraryPage({ active = true, workspace = "library" }: { active?:
   }, [changes, duplicateGroups, libraryRevision, manageOpen, setError]);
 
 const sourceNames = useMemo(() => new Map(sources.map((source) => [source.id, source.name])), [sources]);
+const collectionNames = useMemo(() => new Map(collections.map((collection) => [collection.id, collection.name])), [collections]);
+const smartCollectionCards = useMemo(() => visibleSmartViews.map((view) => ({
+    view,
+    rules: smartCollectionRules(view.query, sourceNames, collectionNames),
+  })), [collectionNames, sourceNames, visibleSmartViews]);
 const items = queryResult.items;
 const privateMediaIds = useMemo(() => {
     if (!privacyRules || privacyStatus?.locked) return new Set<string>();
@@ -1531,6 +1601,10 @@ const resultTitle = search.trim()
 
   function applySmartView(view: LibrarySmartView) {
     const query = view.query;
+    if (query.privateOnly && (!privacyStatus?.configured || privacyStatus.locked)) {
+      setNotice({ message: "Unlock Private Library in Settings to open this Smart Collection.", view: "library" });
+      return;
+    }
     setActivePlaylist(null);
     setActivePlaylistItems([]);
     setSearch(query.search || "");
@@ -2018,10 +2092,26 @@ const resultTitle = search.trim()
       </div>
 
       <div className={workspaceSection === "home" ? "hidden" : ""}>
-      <section className="mt-3 flex flex-wrap items-center gap-2 border-y border-line/45 py-2.5" aria-label="Automatic collections">
-        <span className="mr-1 inline-flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-muted"><Bookmark size={13} /> Automatic collections</span>
-        {smartViews.length === 0 ? <span className="text-[11px] text-muted">Save the current filters as a collection that updates itself.</span> : smartViews.map((view) => <span key={view.id} className={`inline-flex items-center overflow-hidden rounded-[7px] border ${activeSmartViewId === view.id ? "border-accent/35 bg-accent/12 text-accent" : "border-line/70 bg-elevated/50 text-muted"}`}><button className="h-7 max-w-[220px] truncate px-2.5 text-[11px] font-medium hover:text-ink" onClick={() => applySmartView(view)} title={`Open ${view.name}`}>{view.name}</button><button className={`grid size-7 place-items-center border-l transition ${confirmDeleteSmartViewId === view.id ? "border-red-400/30 bg-red-400/10 text-red-300" : "border-line/60 hover:bg-panel hover:text-ink"}`} disabled={smartViewBusy} onClick={() => void deleteSmartView(view.id)} aria-label={confirmDeleteSmartViewId === view.id ? `Confirm removing ${view.name}` : `Remove ${view.name}`} title={confirmDeleteSmartViewId === view.id ? "Click again to confirm" : "Remove automatic collection"}>{confirmDeleteSmartViewId === view.id ? <Trash2 size={12} /> : <X size={12} />}</button></span>)}
-        <span className="ml-auto flex items-center gap-2">{smartViewFormOpen ? <><Input className="h-8 w-[190px] text-xs" value={smartViewName} maxLength={80} autoFocus placeholder="Collection name" onChange={(event) => setSmartViewName(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void saveCurrentSmartView(); if (event.key === "Escape") { setSmartViewFormOpen(false); setSmartViewName(""); } }} /><Button className="h-8 text-xs" disabled={!smartViewName.trim() || smartViewBusy} onClick={() => void saveCurrentSmartView()}>{smartViewBusy ? <LoaderCircle className="animate-spin" size={13} /> : <Save size={13} />} Save</Button><Button variant="ghost" className="h-8 text-xs" onClick={() => { setSmartViewFormOpen(false); setSmartViewName(""); }}>Cancel</Button></> : <Button variant="ghost" className="h-8 text-xs" onClick={() => setSmartViewFormOpen(true)}><Bookmark size={13} /> Save automatic collection</Button>}<button className={`inline-flex h-8 items-center gap-1.5 rounded-[7px] px-2 text-[10px] transition hover:bg-elevated hover:text-ink ${searchStatus?.consistent === false ? "text-amber-300" : "text-muted"}`} disabled={smartViewBusy} onClick={() => void rebuildSearchIndex()} title="Rebuild the local Library search index"><Database size={12} />{searchStatus?.consistent === false ? "Repair search" : searchStatus ? "Search ready" : "Search index"}</button></span>
+      <section className="mt-4 rounded-panel bg-panel/55 p-4 shadow-control" aria-labelledby="smart-collections-heading">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 id="smart-collections-heading" className="flex items-center gap-2 text-sm font-semibold"><Bookmark className="text-accent" size={16} /> Smart Collections</h2>
+            <p className="mt-1 max-w-2xl text-xs leading-5 text-muted">Saved rules update automatically as media is added, inspected, rated, or organized.</p>
+          </div>
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            {smartViewFormOpen ? <><Input aria-label="Smart Collection name" className="h-9 w-[210px] text-xs" value={smartViewName} maxLength={80} autoFocus placeholder="Collection name" onChange={(event) => setSmartViewName(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void saveCurrentSmartView(); if (event.key === "Escape") { setSmartViewFormOpen(false); setSmartViewName(""); } }} /><Button className="h-9 text-xs" disabled={!smartViewName.trim() || smartViewBusy} onClick={() => void saveCurrentSmartView()}>{smartViewBusy ? <LoaderCircle className="animate-spin" size={13} /> : <Save size={13} />} Save</Button><Button variant="ghost" className="h-9 text-xs" onClick={() => { setSmartViewFormOpen(false); setSmartViewName(""); }}>Cancel</Button></> : <Button variant="secondary" className="h-9 text-xs" onClick={() => setSmartViewFormOpen(true)}><Bookmark size={13} /> Create from current filters</Button>}
+            <button className={`inline-flex h-9 items-center gap-1.5 rounded-[7px] px-2.5 text-[11px] transition hover:bg-elevated hover:text-ink ${searchStatus?.consistent === false ? "text-amber-300" : "text-muted"}`} disabled={smartViewBusy} onClick={() => void rebuildSearchIndex()} title="Rebuild the local Library search index"><Database size={13} />{searchStatus?.consistent === false ? "Repair search" : searchStatus ? "Search ready" : "Search index"}</button>
+          </div>
+        </div>
+        {smartCollectionCards.length === 0 ? <div className="mt-4 rounded-[10px] border border-dashed border-line/70 px-4 py-5 text-center"><p className="text-sm font-medium">Build a shelf around what matters to you</p><p className="mx-auto mt-1 max-w-xl text-xs leading-5 text-muted">Choose any combination of search, creator, folder, theme, format, rating, or availability filters, then save those rules here.</p></div> : <div className="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">{smartCollectionCards.map(({ view, rules }) => {
+          const count = smartViewCounts[view.id];
+          const previewRules = rules.slice(0, 3);
+          return <article key={view.id} className={`group relative min-w-0 rounded-[10px] border p-3 transition ${activeSmartViewId === view.id ? "border-accent/45 bg-accent/10" : "border-line/60 bg-elevated/45 hover:border-line"}`}>
+            <div className="flex items-start gap-3"><button className="min-w-0 flex-1 text-left" onClick={() => applySmartView(view)} aria-label={`Open Smart Collection ${view.name}`}><span className="flex items-center gap-2"><span className="truncate text-sm font-semibold text-ink">{view.name}</span>{view.query.privateOnly ? <Lock className="shrink-0 text-muted" size={12} aria-label="Private rules" /> : null}</span><span className="mt-1 block text-[11px] text-muted">{smartViewCountsLoading && count == null ? "Updating count…" : count == null ? "Count unavailable" : `${count.toLocaleString()} matching item${count === 1 ? "" : "s"}`}</span></button><button className={`grid size-8 shrink-0 place-items-center rounded-[7px] transition ${confirmDeleteSmartViewId === view.id ? "bg-red-400/12 text-red-300" : "text-muted hover:bg-panel hover:text-ink"}`} disabled={smartViewBusy} onClick={() => void deleteSmartView(view.id)} aria-label={confirmDeleteSmartViewId === view.id ? `Confirm removing ${view.name}` : `Remove ${view.name}`} title={confirmDeleteSmartViewId === view.id ? "Click again to confirm" : "Remove Smart Collection"}>{confirmDeleteSmartViewId === view.id ? <Trash2 size={14} /> : <X size={14} />}</button></div>
+            <button className="mt-3 flex w-full flex-wrap gap-1.5 text-left" onClick={() => applySmartView(view)} aria-label={`Apply rules for ${view.name}`}>{previewRules.map((rule) => <span key={rule} className="max-w-full truncate rounded-[6px] bg-panel/75 px-2 py-1 text-[10px] text-muted">{rule}</span>)}{rules.length > previewRules.length ? <span className="rounded-[6px] bg-panel/75 px-2 py-1 text-[10px] text-muted">+{rules.length - previewRules.length} rules</span> : null}</button>
+          </article>;
+        })}</div>}
+        {smartViews.length > visibleSmartViews.length ? <p className="mt-3 flex items-center gap-1.5 text-[11px] text-muted"><Lock size={12} /> Private Smart Collections stay hidden while the Private Library is locked.</p> : null}
       </section>
 
       {searchStatus && !searchStatus.consistent ? <div className="mt-3 flex items-center gap-3 border-l-2 border-amber-400/60 bg-amber-400/5 px-3 py-2 text-xs text-amber-100" role="alert"><span>Search index has {searchStatus.indexedItems.toLocaleString()} of {searchStatus.catalogItems.toLocaleString()} Library items.</span><Button variant="secondary" className="ml-auto h-8 text-xs" disabled={smartViewBusy} onClick={() => void rebuildSearchIndex()}>{smartViewBusy ? <LoaderCircle className="animate-spin" size={13} /> : <RotateCcw size={13} />} Rebuild search</Button></div> : null}

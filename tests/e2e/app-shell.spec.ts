@@ -28,3 +28,11 @@ test("command search opens and closes with focus restoration", async ({ page }) 
   await page.keyboard.press("Escape");
   await expect(trigger).toBeFocused();
 });
+
+test("Library exposes live Smart Collections without crowding the catalog", async ({ page }) => {
+  await page.getByRole("button", { name: "Library" }).click();
+  await expect(page.getByRole("heading", { name: "Smart Collections" })).toBeVisible();
+  await expect(page.getByText("Build a shelf around what matters to you")).toBeVisible();
+  await page.getByRole("button", { name: "Create from current filters" }).click();
+  await expect(page.getByRole("textbox", { name: "Smart Collection name" })).toBeFocused();
+});
