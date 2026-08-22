@@ -972,6 +972,8 @@ export type EmbeddedMpvControl =
   | "pause"
   | "seekRelative"
   | "seekAbsolute"
+  | "frameStep"
+  | "frameBackStep"
   | "setRate"
   | "setMuted";
 

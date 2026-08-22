@@ -399,6 +399,8 @@ export const api = {
   controlEmbeddedMpv: (request: EmbeddedMpvControlRequest) =>
     invoke<void>("control_embedded_mpv", { request }),
   closeEmbeddedMpv: () => invoke<void>("close_embedded_mpv"),
+  captureLibraryFrame: (itemId: string, timestampSeconds: number, outputPath: string) =>
+    invoke<string>("capture_library_frame", { itemId, timestampSeconds, outputPath }),
   getLibraryPlaybackCacheStatus: () => invoke<LibraryPlaybackCacheStatus>("get_library_playback_cache_status"),
   openLibraryItem: (id: string) => invoke<void>("open_library_item", { id }),
   reconcileLibrary: () => invoke<LibraryScanResult>("reconcile_library"),

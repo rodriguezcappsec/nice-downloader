@@ -1289,6 +1289,8 @@ pub enum EmbeddedMpvControl {
     Pause,
     SeekRelative,
     SeekAbsolute,
+    FrameStep,
+    FrameBackStep,
     SetRate,
     SetMuted,
 }

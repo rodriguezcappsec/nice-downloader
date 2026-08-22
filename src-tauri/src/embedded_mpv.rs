@@ -302,7 +302,10 @@ mod linux {
 
     fn validate_control(request: EmbeddedMpvControlRequest) -> Result<(), AppError> {
         let valid = match request.action {
-            EmbeddedMpvControl::Play | EmbeddedMpvControl::Pause => request.value.is_none(),
+            EmbeddedMpvControl::Play
+            | EmbeddedMpvControl::Pause
+            | EmbeddedMpvControl::FrameStep
+            | EmbeddedMpvControl::FrameBackStep => request.value.is_none(),
             EmbeddedMpvControl::SeekRelative => request
                 .value
                 .is_some_and(|value| value.is_finite() && value.abs() <= 3_600.0),
@@ -630,6 +633,8 @@ mod linux {
                 EmbeddedMpvControl::SeekAbsolute => {
                     player.command(&["seek", &format!("{value:.3}"), "absolute+exact"])
                 }
+                EmbeddedMpvControl::FrameStep => player.command(&["frame-step"]),
+                EmbeddedMpvControl::FrameBackStep => player.command(&["frame-back-step"]),
                 EmbeddedMpvControl::SetRate => {
                     player.command(&["set", "speed", &format!("{value:.3}")])
                 }
@@ -1428,6 +1433,16 @@ mod linux {
                 value: Some(2.0),
             })
             .is_ok());
+            assert!(validate_control(EmbeddedMpvControlRequest {
+                action: EmbeddedMpvControl::FrameStep,
+                value: None,
+            })
+            .is_ok());
+            assert!(validate_control(EmbeddedMpvControlRequest {
+                action: EmbeddedMpvControl::FrameBackStep,
+                value: Some(1.0),
+            })
+            .is_err());
             assert_eq!(
                 validate_control(EmbeddedMpvControlRequest {
                     action: EmbeddedMpvControl::SetRate,

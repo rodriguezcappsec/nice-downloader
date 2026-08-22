@@ -7,6 +7,7 @@ import {
   Ban,
   BellDot,
   Bookmark,
+  Camera,
   Captions,
   Check,
   Copy,
@@ -42,6 +43,7 @@ import {
   Minimize2,
   RotateCcw,
   RotateCw,
+  Repeat2,
   Scaling,
   Save,
   Search,
@@ -3247,8 +3249,14 @@ function PlaybackPreviewTimeline({ currentTime, duration, pendingTime, compact, 
   </div>;
 }
 
+function PlaybackTools({ currentTime, loopStart, loopEnd, frameStepDisabled, screenshotBusy, onSetLoopStart, onSetLoopEnd, onClearLoop, onFrameStep, onScreenshot }: { currentTime: number; loopStart: number | null; loopEnd: number | null; frameStepDisabled: boolean; screenshotBusy: boolean; onSetLoopStart: () => void; onSetLoopEnd: () => void; onClearLoop: () => void; onFrameStep: (direction: -1 | 1) => void; onScreenshot: () => void }) {
+  const loopActive = loopStart != null && loopEnd != null && loopEnd > loopStart;
+  return <section className="flex flex-wrap items-center gap-2 border-t border-white/10 bg-[#100e0b] px-5 py-2.5" aria-label="Precision playback tools"><span className="mr-1 inline-flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.1em] text-white/45"><Repeat2 size={13} /> Playback tools</span><button className={`h-8 rounded-[7px] border px-2.5 text-[10px] font-semibold transition ${loopStart != null ? "border-accent/30 bg-accent/10 text-accent" : "border-white/10 bg-white/5 text-white/60 hover:bg-white/10 hover:text-white"}`} onClick={onSetLoopStart} title="Set loop start at current position">A · {loopStart == null ? "Set start" : formatDuration(loopStart)}</button><button className={`h-8 rounded-[7px] border px-2.5 text-[10px] font-semibold transition ${loopEnd != null ? "border-accent/30 bg-accent/10 text-accent" : "border-white/10 bg-white/5 text-white/60 hover:bg-white/10 hover:text-white"}`} disabled={loopStart == null} onClick={onSetLoopEnd} title="Set loop end at current position">B · {loopEnd == null ? "Set end" : formatDuration(loopEnd)}</button>{loopStart != null || loopEnd != null ? <button className="h-8 rounded-[7px] px-2 text-[10px] text-white/45 transition hover:bg-white/10 hover:text-white" onClick={onClearLoop}>Clear loop</button> : null}<span className="mx-1 hidden h-5 w-px bg-white/10 sm:block" /><button className="inline-flex h-8 items-center gap-1.5 rounded-[7px] border border-white/10 bg-white/5 px-2.5 text-[10px] font-semibold text-white/60 transition hover:bg-white/10 hover:text-white disabled:pointer-events-none disabled:opacity-35" disabled={frameStepDisabled} onClick={() => onFrameStep(-1)} title={frameStepDisabled ? "Frame stepping is unavailable for live compatibility streams" : "Previous frame (comma)"}><SkipBack size={12} /> Frame</button><button className="inline-flex h-8 items-center gap-1.5 rounded-[7px] border border-white/10 bg-white/5 px-2.5 text-[10px] font-semibold text-white/60 transition hover:bg-white/10 hover:text-white disabled:pointer-events-none disabled:opacity-35" disabled={frameStepDisabled} onClick={() => onFrameStep(1)} title={frameStepDisabled ? "Frame stepping is unavailable for live compatibility streams" : "Next frame (period)"}>Frame <SkipForward size={12} /></button><button className="ml-auto inline-flex h-8 items-center gap-1.5 rounded-[7px] border border-white/10 bg-white/5 px-2.5 text-[10px] font-semibold text-white/60 transition hover:bg-white/10 hover:text-white disabled:pointer-events-none disabled:opacity-45" disabled={screenshotBusy} onClick={onScreenshot}>{screenshotBusy ? <LoaderCircle className="animate-spin" size={12} /> : <Camera size={12} />} Capture frame</button><span className="number-font w-full text-[9px] text-white/35 sm:w-auto">{loopActive ? `Repeating ${formatDuration(loopStart)}–${formatDuration(loopEnd)}` : `At ${formatDuration(currentTime)}`}</span></section>;
+}
+
 function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = false, seekRequest, onRestore, onClose, onExitLeanBack, onPrevious, onNext, onPlaybackEnded, onMiniPlayerMoveStart, onMiniPlayerMoveKey, onMiniPlayerResizeStart, onMiniPlayerResizeKey, onMiniPlayerReset }: { item: LibraryItem; sourceName: string; compact?: boolean; leanBack?: boolean; seekRequest: TranscriptSeekRequest | null; onRestore?: () => void; onClose: () => void; onExitLeanBack?: () => void; onPrevious?: () => void; onNext?: () => void; onPlaybackEnded?: () => void; onMiniPlayerMoveStart?: (event: ReactPointerEvent<HTMLElement>) => void; onMiniPlayerMoveKey?: (event: ReactKeyboardEvent<HTMLElement>) => void; onMiniPlayerResizeStart?: (event: ReactPointerEvent<HTMLElement>) => void; onMiniPlayerResizeKey?: (event: ReactKeyboardEvent<HTMLElement>) => void; onMiniPlayerReset?: () => void }) {
   const setError = useAppStore((state) => state.setError);
+  const setNotice = useAppStore((state) => state.setNotice);
   const recordEmbeddedPlaybackEvidence = useAppStore((state) => state.recordEmbeddedPlaybackEvidence);
   const playbackFingerprint = embeddedPlaybackFingerprint(item);
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -3292,6 +3300,9 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentPosition, setCurrentPosition] = useState(0);
   const [playbackDuration, setPlaybackDuration] = useState(item.durationSeconds || 0);
+  const [loopStart, setLoopStart] = useState<number | null>(null);
+  const [loopEnd, setLoopEnd] = useState<number | null>(null);
+  const [screenshotBusy, setScreenshotBusy] = useState(false);
   const [pendingNativeSeek, setPendingNativeSeek] = useState<number | null>(null);
   const [previewStoryboard, setPreviewStoryboard] = useState<LibraryStoryboard | null>(null);
   const [previewStoryboardBusy, setPreviewStoryboardBusy] = useState(false);
@@ -3337,6 +3348,9 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
     setIsPlaying(false);
     setCurrentPosition(0);
     setPlaybackDuration(item.durationSeconds || 0);
+    setLoopStart(null);
+    setLoopEnd(null);
+    setScreenshotBusy(false);
     setPendingNativeSeek(null);
     setPreviewStoryboard(null);
     setPreviewStoryboardBusy(false);
@@ -3899,6 +3913,67 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
     setPendingNativeSeek(null);
   }
 
+  function setLoopStartAtCurrentPosition() {
+    const start = Math.max(0, currentPosition);
+    setLoopStart(start);
+    if (loopEnd != null && loopEnd <= start + 0.05) setLoopEnd(null);
+  }
+
+  function setLoopEndAtCurrentPosition() {
+    if (loopStart == null) return;
+    if (currentPosition <= loopStart + 0.05) {
+      setNotice({ message: "Move past point A before setting loop point B.", view: "library" });
+      return;
+    }
+    setLoopEnd(currentPosition);
+  }
+
+  function clearLoop() {
+    setLoopStart(null);
+    setLoopEnd(null);
+  }
+
+  function stepFrame(direction: -1 | 1) {
+    if (session?.liveTranscode) return;
+    const frameSeconds = 1 / (item.fps && item.fps > 0 ? item.fps : 30);
+    if (embeddedMpvSession) {
+      const action = direction < 0 ? "frameBackStep" : "frameStep";
+      void api.controlEmbeddedMpv({ action }).catch((error) => setError(normalizeError(error)));
+      setCurrentPosition((position) => Math.max(0, position + frameSeconds * direction));
+      setIsPlaying(false);
+      return;
+    }
+    const video = videoRef.current;
+    if (!video) return;
+    video.pause();
+    seekTo(currentPosition + frameSeconds * direction);
+  }
+
+  async function captureFrame() {
+    if (screenshotBusy) return;
+    const safeTitle = item.title.replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_").trim().slice(0, 80) || "video";
+    const selected = await save({
+      title: "Save current video frame",
+      defaultPath: `${safeTitle}-frame-${Math.floor(Math.max(0, currentPosition))}.png`,
+      filters: [{ name: "PNG image", extensions: ["png"] }, { name: "JPEG image", extensions: ["jpg", "jpeg"] }],
+    });
+    if (!selected) return;
+    setScreenshotBusy(true);
+    try {
+      await api.captureLibraryFrame(item.id, Math.max(0, currentPosition), selected);
+      setNotice({ message: `Captured frame at ${formatDuration(currentPosition)}.`, view: "library" });
+    } catch (error) {
+      setError(normalizeError(error));
+    } finally {
+      setScreenshotBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!isPlaying || loopStart == null || loopEnd == null || loopEnd <= loopStart) return;
+    if (currentPosition >= loopEnd) seekTo(loopStart);
+  }, [currentPosition, isPlaying, loopEnd, loopStart]);
+
   function requestPreviewStoryboard() {
     if (previewStoryboard || previewStoryboardBusy || previewStoryboardUnavailable || playbackDuration <= 0) return;
     setPreviewStoryboardBusy(true);
@@ -4004,10 +4079,14 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
       }
       else if (key === "m" && videoRef.current) { event.preventDefault(); videoRef.current.muted = !videoRef.current.muted; }
       else if (key === "f") { event.preventDefault(); toggleFullscreen(); }
+      else if (key === ",") { event.preventDefault(); stepFrame(-1); }
+      else if (key === ".") { event.preventDefault(); stepFrame(1); }
+      else if (key === "[") { event.preventDefault(); setLoopStartAtCurrentPosition(); }
+      else if (key === "]") { event.preventDefault(); setLoopEndAtCurrentPosition(); }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [compact, consent, embeddedMpvMuted, embeddedMpvSession, leanBack, onExitLeanBack]);
+  }, [compact, consent, currentPosition, embeddedMpvMuted, embeddedMpvSession, item.fps, leanBack, loopEnd, loopStart, onExitLeanBack, session?.liveTranscode]);
 
   useEffect(() => {
     if (!leanBack || consent || typeof navigator.getGamepads !== "function") return;
@@ -4428,6 +4507,7 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
       <span className="number-font text-[9px] text-white/45">Live compatibility stream</span>
     </div> : null}
     {(embeddedMpvSession || session) && !playbackError && !nativeSession ? <PlaybackPreviewTimeline currentTime={currentPosition} duration={playbackDuration} pendingTime={pendingNativeSeek} compact={compact} storyboard={previewStoryboard} storyboardBusy={previewStoryboardBusy} storyboardUnavailable={previewStoryboardUnavailable} onPreviewRequested={requestPreviewStoryboard} onPendingTime={setPendingNativeSeek} onCommit={commitNativeSeek} /> : null}
+    {!compact && !leanBack && (embeddedMpvSession || session) && !playbackError && !nativeSession ? <PlaybackTools currentTime={currentPosition} loopStart={loopStart} loopEnd={loopEnd} frameStepDisabled={Boolean(session?.liveTranscode)} screenshotBusy={screenshotBusy} onSetLoopStart={setLoopStartAtCurrentPosition} onSetLoopEnd={setLoopEndAtCurrentPosition} onClearLoop={clearLoop} onFrameStep={stepFrame} onScreenshot={() => void captureFrame()} /> : null}
     {subtitleCenterOpen && session && !embeddedMpvSession ? <section id="subtitle-center" className={`border-t border-white/10 bg-[linear-gradient(180deg,#15120e,#0d0c09)] ${compact ? "p-3" : "px-5 py-4"}`} aria-labelledby="subtitle-center-title">
       <div className="flex items-start gap-3"><div className="grid size-8 shrink-0 place-items-center rounded-[7px] bg-accent/10 text-accent"><Captions size={15} /></div><div className="min-w-0 flex-1"><h2 id="subtitle-center-title" className="text-xs font-semibold text-white/85">Subtitle Center</h2>{!compact ? <p className="mt-1 text-[10px] leading-4 text-white/40">Choose a local sidecar track and tune its timing and appearance. The original subtitle file is never modified.</p> : null}</div><button className={nativeControlClass} onClick={() => setSubtitleCenterOpen(false)} aria-label="Close Subtitle Center"><X size={14} /></button></div>
       <div className={`mt-3 grid gap-3 ${compact ? "grid-cols-2" : "sm:grid-cols-2 lg:grid-cols-5"}`}>

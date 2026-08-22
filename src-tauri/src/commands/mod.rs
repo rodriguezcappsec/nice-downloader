@@ -736,6 +736,22 @@ pub fn close_embedded_mpv(embedded_mpv: State<'_, EmbeddedMpvManager>) {
 }
 
 #[tauri::command]
+pub async fn capture_library_frame(
+    database: State<'_, Database>,
+    item_id: String,
+    timestamp_seconds: f64,
+    output_path: String,
+) -> Result<String, AppError> {
+    crate::screenshots::capture_library_frame(
+        database.inner().clone(),
+        item_id,
+        timestamp_seconds,
+        output_path,
+    )
+    .await
+}
+
+#[tauri::command]
 pub fn save_library_playback_progress(
     database: State<'_, Database>,
     request: SaveLibraryPlaybackRequest,

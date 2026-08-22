@@ -13,6 +13,7 @@ mod models;
 mod native_player;
 mod post_download_recipes;
 mod queue;
+mod screenshots;
 mod semantic_transcripts;
 mod subscriptions;
 mod subtitles;
@@ -291,6 +292,7 @@ pub fn run() {
             commands::update_embedded_mpv_bounds,
             commands::control_embedded_mpv,
             commands::close_embedded_mpv,
+            commands::capture_library_frame,
             commands::save_library_playback_progress,
             commands::list_continue_watching,
             commands::get_library_watch_state,
