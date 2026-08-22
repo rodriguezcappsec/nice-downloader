@@ -74,3 +74,14 @@ test("bulk metadata preserves blank fields and restores dialog focus", async ({ 
     tags: ["favorite", "archive"],
   });
 });
+
+test("playback diagnostics explain the active renderer without exposing paths", async ({ page }) => {
+  await page.getByRole("button", { name: "Watch", exact: true }).click();
+  const diagnostics = page.locator("summary").filter({ hasText: "Playback diagnostics" });
+  await expect(diagnostics).toBeVisible();
+  await diagnostics.click();
+  await expect(page.getByText("Direct WebView video", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText("MP4 · H.264 video · AAC audio", { exact: true })).toBeVisible();
+  await expect(page.getByText("H.264 and AAC in MP4 are expected to play directly.", { exact: true })).toBeVisible();
+  await expect(page.getByText("/tmp/media/playwright-clip.mp4", { exact: true })).toHaveCount(0);
+});

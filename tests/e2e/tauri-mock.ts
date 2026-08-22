@@ -69,6 +69,9 @@ export async function installTauriMock(page: Page) {
         case "list_recently_watched": return [];
         case "list_library_sources": return [testSource];
         case "get_library_source_automation": return { sourceId: testSource.id, tags: [], collectionId: null, favorite: false };
+        case "get_library_watch_state": return { itemId: testItem.id, watchLater: false, playback: null };
+        case "inspect_library_playback": return { compatibilityRequired: false, compatibilityCached: false, unusuallyLarge: false, reencodeRequired: false, estimatedCopyBytes: 0, availableSpaceBytes: 10_000_000, reason: "H.264 and AAC in MP4 are expected to play directly.", preference: "ask", requiresConfirmation: false };
+        case "prepare_library_playback": return { item: testItem, url: "data:video/mp4;base64,", playback: null, subtitles: [], compatibilityMode: false, compatibilityTranscoded: false, liveTranscode: false, segmentedStream: false, streamStartSeconds: 0 };
         case "load_library_embedded_subtitles": return [];
         case "get_default_destination": return "/tmp";
         case "get_engine_preferences": return { browserCookieSource: "none", browserProfile: null, proxyUrl: null, enableImpersonation: true, bandwidthLimitKib: null };
@@ -89,6 +92,7 @@ export async function installTauriMock(page: Page) {
         case "get_library_theme_provider_status": return { available: false, installedModels: [], selectedModelAvailable: false, detail: "Test provider unavailable" };
         case "get_library_theme_index_status": return { eligibleItems: 0, indexedItems: 0, staleItems: 0, themeCount: 0 };
         case "get_native_playback_status": return { available: false, active: null, detail: "Test native player unavailable" };
+        case "get_embedded_mpv_status": return { available: false, active: null, detail: "Test embedded player unavailable", lastError: null };
         case "get_library_transcription_provider_status": return { available: false, executable: null, detail: "Test transcription provider unavailable" };
         case "get_library_semantic_transcript_index_status": return { model: "", indexedItems: 0, staleItems: 0 };
         case "get_library_local_inference_job": return null;

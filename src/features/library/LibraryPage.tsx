@@ -3258,6 +3258,71 @@ function PlaybackTools({ currentTime, loopStart, loopEnd, frameStepDisabled, scr
   return <section className="flex flex-wrap items-center gap-2 border-t border-white/10 bg-[#100e0b] px-5 py-2.5" aria-label="Precision playback tools"><span className="mr-1 inline-flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.1em] text-white/45"><Repeat2 size={13} /> Playback tools</span><button className={`h-8 rounded-[7px] border px-2.5 text-[10px] font-semibold transition ${loopStart != null ? "border-accent/30 bg-accent/10 text-accent" : "border-white/10 bg-white/5 text-white/60 hover:bg-white/10 hover:text-white"}`} onClick={onSetLoopStart} title="Set loop start at current position">A · {loopStart == null ? "Set start" : formatDuration(loopStart)}</button><button className={`h-8 rounded-[7px] border px-2.5 text-[10px] font-semibold transition ${loopEnd != null ? "border-accent/30 bg-accent/10 text-accent" : "border-white/10 bg-white/5 text-white/60 hover:bg-white/10 hover:text-white"}`} disabled={loopStart == null} onClick={onSetLoopEnd} title="Set loop end at current position">B · {loopEnd == null ? "Set end" : formatDuration(loopEnd)}</button>{loopStart != null || loopEnd != null ? <button className="h-8 rounded-[7px] px-2 text-[10px] text-white/45 transition hover:bg-white/10 hover:text-white" onClick={onClearLoop}>Clear loop</button> : null}<span className="mx-1 hidden h-5 w-px bg-white/10 sm:block" /><button className="inline-flex h-8 items-center gap-1.5 rounded-[7px] border border-white/10 bg-white/5 px-2.5 text-[10px] font-semibold text-white/60 transition hover:bg-white/10 hover:text-white disabled:pointer-events-none disabled:opacity-35" disabled={frameStepDisabled} onClick={() => onFrameStep(-1)} title={frameStepDisabled ? "Frame stepping is unavailable for live compatibility streams" : "Previous frame (comma)"}><SkipBack size={12} /> Frame</button><button className="inline-flex h-8 items-center gap-1.5 rounded-[7px] border border-white/10 bg-white/5 px-2.5 text-[10px] font-semibold text-white/60 transition hover:bg-white/10 hover:text-white disabled:pointer-events-none disabled:opacity-35" disabled={frameStepDisabled} onClick={() => onFrameStep(1)} title={frameStepDisabled ? "Frame stepping is unavailable for live compatibility streams" : "Next frame (period)"}>Frame <SkipForward size={12} /></button><button className="ml-auto inline-flex h-8 items-center gap-1.5 rounded-[7px] border border-white/10 bg-white/5 px-2.5 text-[10px] font-semibold text-white/60 transition hover:bg-white/10 hover:text-white disabled:pointer-events-none disabled:opacity-45" disabled={screenshotBusy} onClick={onScreenshot}>{screenshotBusy ? <LoaderCircle className="animate-spin" size={12} /> : <Camera size={12} />} Capture frame</button><span className="number-font w-full text-[9px] text-white/35 sm:w-auto">{loopActive ? `Repeating ${formatDuration(loopStart)}–${formatDuration(loopEnd)}` : `At ${formatDuration(currentTime)}`}</span></section>;
 }
 
+function PlaybackDiagnostics({ item, session, preflight, nativeSession, embeddedMpvSession, subtitleCount, error }: { item: LibraryItem; session: LibraryPlaybackSession | null; preflight: LibraryPlaybackPreflight | null; nativeSession: NativePlaybackSession | null; embeddedMpvSession: EmbeddedMpvSession | null; subtitleCount: number; error: AppError | null }) {
+  const renderer = embeddedMpvSession
+    ? "Embedded libmpv"
+    : nativeSession
+      ? "Native mpv window"
+      : session?.segmentedStream
+        ? "HLS compatibility stream"
+        : session?.liveTranscode
+          ? "Fragmented MP4 compatibility stream"
+          : session?.compatibilityTranscoded
+            ? "H.264/AAC compatibility copy"
+            : session?.compatibilityMode
+              ? "Stream-copy compatibility file"
+              : session
+                ? "Direct WebView video"
+                : error
+                  ? "Playback unavailable"
+                  : "Preparing renderer";
+  const delivery = session?.segmentedStream
+    ? "Temporary segmented stream"
+    : session?.liveTranscode
+      ? "Temporary live stream"
+      : session?.compatibilityMode
+        ? preflight?.compatibilityCached
+          ? "Cached playback copy"
+          : "New playback copy"
+        : embeddedMpvSession || nativeSession
+          ? "Original file through mpv"
+          : session
+            ? "Original file through WebView"
+            : "Not started";
+  const processing = session?.compatibilityTranscoded || session?.liveTranscode
+    ? "Video and audio converted to H.264/AAC"
+    : session?.compatibilityMode
+      ? "Streams copied without codec conversion"
+      : "No compatibility conversion";
+  const reason = preflight?.reason || error?.message || (preflight?.compatibilityRequired
+    ? "This file needs a compatibility playback route in the embedded WebView."
+    : "The WebView preflight did not request a compatibility route.");
+
+  return <details className="group border-t border-white/10 bg-[#0d0c09] text-white/70">
+    <summary className="flex min-h-10 cursor-pointer list-none items-center gap-2 px-5 py-2 text-[11px] font-semibold transition hover:bg-white/[0.035] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/70">
+      <Film size={13} className="text-accent" />
+      Playback diagnostics
+      <span className="ml-1 truncate text-[10px] font-normal text-white/40">{renderer}</span>
+      <ChevronRight className="ml-auto transition-transform group-open:rotate-90" size={14} />
+    </summary>
+    <div className="border-t border-white/[0.07] px-5 py-4">
+      <dl className="grid gap-x-8 gap-y-3 text-[11px] sm:grid-cols-2">
+        <div><dt className="text-[9px] font-semibold uppercase tracking-[0.1em] text-white/35">Renderer</dt><dd className="mt-1 font-medium text-white/80">{renderer}</dd></div>
+        <div><dt className="text-[9px] font-semibold uppercase tracking-[0.1em] text-white/35">Delivery</dt><dd className="mt-1 font-medium text-white/80">{delivery}</dd></div>
+        <div><dt className="text-[9px] font-semibold uppercase tracking-[0.1em] text-white/35">Container and codecs</dt><dd className="number-font mt-1 text-white/70">{item.container?.toLocaleUpperCase() || "Unknown container"} · {formatMediaCodec(item.videoCodec)} video · {formatMediaCodec(item.audioCodec)} audio</dd></div>
+        <div><dt className="text-[9px] font-semibold uppercase tracking-[0.1em] text-white/35">Playback processing</dt><dd className="mt-1 text-white/70">{processing}</dd></div>
+        <div><dt className="text-[9px] font-semibold uppercase tracking-[0.1em] text-white/35">Stream start</dt><dd className="number-font mt-1 text-white/70">{session && session.streamStartSeconds > 0 ? formatDuration(session.streamStartSeconds) : "Beginning of media"}</dd></div>
+        <div><dt className="text-[9px] font-semibold uppercase tracking-[0.1em] text-white/35">Subtitles</dt><dd className="number-font mt-1 text-white/70">{subtitleCount} available track{subtitleCount === 1 ? "" : "s"}</dd></div>
+      </dl>
+      <div className="mt-4 border-l-2 border-accent/45 bg-white/[0.025] px-3 py-2.5">
+        <p className="text-[9px] font-semibold uppercase tracking-[0.1em] text-accent">Preflight explanation</p>
+        <p className="mt-1 text-[11px] leading-5 text-white/55">{reason}</p>
+      </div>
+      <p className="mt-3 text-[9px] leading-4 text-white/30">Diagnostics intentionally omit local paths, server tokens, and process arguments.</p>
+    </div>
+  </details>;
+}
+
 function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = false, seekRequest, onRestore, onClose, onExitLeanBack, onPrevious, onNext, onPlaybackEnded, onMiniPlayerMoveStart, onMiniPlayerMoveKey, onMiniPlayerResizeStart, onMiniPlayerResizeKey, onMiniPlayerReset }: { item: LibraryItem; sourceName: string; compact?: boolean; leanBack?: boolean; seekRequest: TranscriptSeekRequest | null; onRestore?: () => void; onClose: () => void; onExitLeanBack?: () => void; onPrevious?: () => void; onNext?: () => void; onPlaybackEnded?: () => void; onMiniPlayerMoveStart?: (event: ReactPointerEvent<HTMLElement>) => void; onMiniPlayerMoveKey?: (event: ReactKeyboardEvent<HTMLElement>) => void; onMiniPlayerResizeStart?: (event: ReactPointerEvent<HTMLElement>) => void; onMiniPlayerResizeKey?: (event: ReactKeyboardEvent<HTMLElement>) => void; onMiniPlayerReset?: () => void }) {
   const setError = useAppStore((state) => state.setError);
   const setNotice = useAppStore((state) => state.setNotice);
@@ -4524,6 +4589,7 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
         <div className="flex items-end"><Button variant="ghost" className="h-9 w-full text-[10px] text-white/55" onClick={() => { setSubtitleOffsetSeconds(0); setSubtitleSizePercent(100); setSubtitlePosition("bottom"); setSubtitleColor("white"); setSubtitleBackground("soft"); }}>Reset tuning</Button></div>
       </div>
     </section> : null}
+    {!compact && !leanBack ? <PlaybackDiagnostics item={item} session={session} preflight={preflight} nativeSession={nativeSession} embeddedMpvSession={embeddedMpvSession} subtitleCount={subtitleTracks.length} error={playbackError} /> : null}
     <footer className={`${compact ? "hidden" : "flex"} flex-wrap items-center gap-3 border-t border-white/10 bg-[#100e0b] ${leanBack ? "justify-center px-5 py-4" : "px-5 py-3"}`}>
       {leanBack ? <><Button variant="ghost" className="h-14 min-w-32 text-base text-white/75" disabled={!onPrevious} onClick={() => changeVideo(onPrevious)}><SkipBack size={21} /> Previous</Button><Button className="h-14 min-w-44 text-base" disabled={(!videoRef.current && !embeddedMpvSession) || Boolean(playbackError) || Boolean(nativeSession)} onClick={togglePlayback}>{isPlaying ? <Pause size={22} /> : <Play size={22} fill="currentColor" />} {isPlaying ? "Pause" : "Play"}</Button><Button variant="ghost" className="h-14 min-w-32 text-base text-white/75" disabled={!onNext} onClick={() => changeVideo(onNext)}>Next <SkipForward size={21} /></Button><Button variant="secondary" className="h-14 min-w-28 border-white/10 bg-white/10 text-white" onClick={onExitLeanBack}><Minimize2 size={19} /> Exit</Button><p className="w-full text-center text-[11px] text-white/45">Gamepad: A/Start play · B exit · D-pad browse · LB/RB seek · Keyboard: Space/K · J/L · M · F · Esc</p></> : <><Button variant="ghost" className="h-9 text-white/70" disabled={!onPrevious} onClick={() => changeVideo(onPrevious)}><ChevronRight className="rotate-180" size={15} /> Previous</Button><Button variant="ghost" className="h-9 text-white/70" disabled={!onNext} onClick={() => changeVideo(onNext)}>Next <ChevronRight size={15} /></Button><span className="h-5 w-px bg-white/10" /><label className="flex items-center gap-2 text-xs text-white/55"><span>Speed</span><Select className="h-8 w-24 border-white/10 bg-white/5 text-xs text-white" value={playbackRate} onChange={(event) => { const rate = Number(event.target.value); setPlaybackRate(rate); if (embeddedMpvSession) void api.controlEmbeddedMpv({ action: "setRate", value: rate }).catch((error) => setError(normalizeError(error))); else if (videoRef.current) videoRef.current.playbackRate = rate; }}><option value={0.5}>0.5×</option><option value={0.75}>0.75×</option><option value={1}>1×</option><option value={1.25}>1.25×</option><option value={1.5}>1.5×</option><option value={2}>2×</option></Select></label><p className="ml-auto text-[10px] text-white/40">Space/K play · J/L seek · M mute · F fullscreen · Esc close</p></>}
       {resumedAt != null ? <p className="w-full text-[10px] text-accent" role="status">{seekRequest?.itemId === item.id ? "Started from transcript" : "Resumed"} at {formatDuration(resumedAt)}</p> : null}
