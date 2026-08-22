@@ -757,7 +757,11 @@ export function LibraryPage({ active = true, workspace = "library" }: { active?:
   useEffect(() => {
     const refreshWatchShelves = () => scheduleLibraryRefresh(0);
     window.addEventListener("nice-downloader:library-watch-state", refreshWatchShelves);
-    return () => window.removeEventListener("nice-downloader:library-watch-state", refreshWatchShelves);
+    window.addEventListener("nice-downloader:library-items-changed", refreshWatchShelves);
+    return () => {
+      window.removeEventListener("nice-downloader:library-watch-state", refreshWatchShelves);
+      window.removeEventListener("nice-downloader:library-items-changed", refreshWatchShelves);
+    };
   }, []);
 
   useEffect(() => {
@@ -4921,10 +4925,75 @@ function PrivacyManagerDialog({ status, rules, sources, busy, onClose, onShowPri
 
 function BulkActionBar({ selectedIds, collections, busy, onCompare, onCompareImages, onCreateStack, onMove, onSetPrivacy, onApply, onClose }: { selectedIds: Set<string>; collections: LibraryCollection[]; busy: boolean; onCompare: () => Promise<void>; onCompareImages: () => Promise<void>; onCreateStack: () => Promise<void>; onMove: () => void; onSetPrivacy: (isPrivate: boolean) => Promise<void>; onApply: (action: LibraryBulkAction, message: string) => Promise<void>; onClose: () => void }) {
   const [tag, setTag] = useState("");
+  const [metadataOpen, setMetadataOpen] = useState(false);
   const disabled = busy || selectedIds.size === 0;
   const compareDisabled = busy || selectedIds.size < 2 || selectedIds.size > 4;
   const stackDisabled = busy || selectedIds.size < 2 || selectedIds.size > 100;
-  return <aside className="panel-shadow fixed bottom-6 left-1/2 z-40 flex max-h-[calc(100dvh-3rem)] w-[min(1280px,calc(100vw-300px))] -translate-x-1/2 flex-wrap items-center gap-2 overflow-y-auto rounded-[14px] border border-line/80 bg-panel/95 p-3 backdrop-blur-xl" aria-label="Bulk library actions"><div className="mr-2 min-w-24"><p className="number-font text-sm font-semibold">{selectedIds.size} selected</p><button className="mt-0.5 text-[10px] font-medium text-muted hover:text-ink" onClick={onClose}>Clear selection</button></div><Button className="h-9 px-3 text-xs" disabled={compareDisabled} onClick={() => void onCompare()} title={compareDisabled ? "Select between 2 and 4 videos to compare" : "Open selected videos in the comparison grid"}><LayoutGrid size={14} /> Videos</Button><Button variant="secondary" className="h-9 px-3 text-xs" disabled={compareDisabled} onClick={() => void onCompareImages()} title={compareDisabled ? "Select between 2 and 4 images to compare" : "Open selected images in the comparison studio"}><ImageIcon size={14} /> Images</Button><Button variant="secondary" className="h-9 px-3 text-xs" disabled={stackDisabled} onClick={() => void onCreateStack()} title={stackDisabled ? "Select between 2 and 100 items of one media type" : "Group versions without moving files"}><Layers size={14} /> Stack</Button><Button className="h-9 px-3 text-xs" disabled={disabled} onClick={onMove}><FolderInput size={14} /> Move</Button><Button variant="secondary" className="h-9 px-3 text-xs" disabled={disabled} onClick={() => void onSetPrivacy(true)}><Lock size={14} /> Make private</Button><Button variant="ghost" className="h-9 px-3 text-xs" disabled={disabled} onClick={() => void onSetPrivacy(false)}>Remove privacy rule</Button><Button variant="secondary" className="h-9 px-3 text-xs" disabled={disabled} onClick={() => void onApply({ type: "setFavorite", favorite: true }, `Marked ${selectedIds.size} item${selectedIds.size === 1 ? "" : "s"} as favorites.`)}><Heart size={14} /> Favorite</Button><Button variant="secondary" className="h-9 px-3 text-xs" disabled={disabled} onClick={() => void onApply({ type: "setFavorite", favorite: false }, `Removed ${selectedIds.size} item${selectedIds.size === 1 ? "" : "s"} from favorites.`)}><Heart size={14} fill="none" /> Unfavorite</Button><label><span className="sr-only">Set rating</span><Select className="h-9 w-32 text-xs" disabled={disabled} defaultValue="" onChange={(event) => { const value = event.target.value; if (value !== "") void onApply({ type: "setRating", rating: value === "clear" ? null : Number(value) }, value === "clear" ? "Cleared selected ratings." : `Rated selected media ${value} stars.`); event.currentTarget.value = ""; }}><option value="" disabled>Set rating</option>{[5, 4, 3, 2, 1].map((rating) => <option key={rating} value={rating}>{rating} star{rating === 1 ? "" : "s"}</option>)}<option value="clear">Clear rating</option></Select></label><label><span className="sr-only">Add to collection</span><Select className="h-9 w-44 text-xs" disabled={disabled || collections.length === 0} defaultValue="" onChange={(event) => { if (event.target.value) void onApply({ type: "addToCollection", collectionId: event.target.value }, "Added selected media to the collection."); event.currentTarget.value = ""; }}><option value="" disabled>{collections.length ? "Add to collection" : "No collections"}</option>{collections.map((collection) => <option key={collection.id} value={collection.id}>{collection.name}</option>)}</Select></label><label><span className="sr-only">Remove from collection</span><Select className="h-9 w-48 text-xs" disabled={disabled || collections.length === 0} defaultValue="" onChange={(event) => { if (event.target.value) void onApply({ type: "removeFromCollection", collectionId: event.target.value }, "Removed selected media from the collection."); event.currentTarget.value = ""; }}><option value="" disabled>{collections.length ? "Remove from collection" : "No collections"}</option>{collections.map((collection) => <option key={collection.id} value={collection.id}>{collection.name}</option>)}</Select></label><div className="flex min-w-48 flex-1"><Input className="h-9 rounded-r-none text-xs" value={tag} onChange={(event) => setTag(event.target.value)} placeholder="Add a tag" /><Button variant="secondary" className="h-9 rounded-l-none px-3 text-xs" disabled={disabled || !tag.trim()} onClick={() => { const value = tag.trim(); if (!value) return; void onApply({ type: "addTags", tags: [value] }, `Added #${value} to selected media.`); setTag(""); }}><Tags size={14} /> Add</Button></div></aside>;
+  function closeMetadata() {
+    setMetadataOpen(false);
+    window.requestAnimationFrame(() => document.querySelector<HTMLButtonElement>("[data-bulk-metadata-trigger]")?.focus());
+  }
+  return <><aside className="panel-shadow fixed bottom-6 left-1/2 z-40 flex max-h-[calc(100dvh-3rem)] w-[min(1280px,calc(100vw-300px))] -translate-x-1/2 flex-wrap items-center gap-2 overflow-y-auto rounded-[14px] border border-line/80 bg-panel/95 p-3 backdrop-blur-xl" aria-label="Bulk library actions"><div className="mr-2 min-w-24"><p className="number-font text-sm font-semibold">{selectedIds.size} selected</p><button className="mt-0.5 text-[10px] font-medium text-muted hover:text-ink" onClick={onClose}>Clear selection</button></div><Button className="h-9 px-3 text-xs" disabled={compareDisabled} onClick={() => void onCompare()} title={compareDisabled ? "Select between 2 and 4 videos to compare" : "Open selected videos in the comparison grid"}><LayoutGrid size={14} /> Videos</Button><Button variant="secondary" className="h-9 px-3 text-xs" disabled={compareDisabled} onClick={() => void onCompareImages()} title={compareDisabled ? "Select between 2 and 4 images to compare" : "Open selected images in the comparison studio"}><ImageIcon size={14} /> Images</Button><Button variant="secondary" className="h-9 px-3 text-xs" disabled={stackDisabled} onClick={() => void onCreateStack()} title={stackDisabled ? "Select between 2 and 100 items of one media type" : "Group versions without moving files"}><Layers size={14} /> Stack</Button><Button className="h-9 px-3 text-xs" disabled={disabled} onClick={onMove}><FolderInput size={14} /> Move</Button><Button data-bulk-metadata-trigger variant="secondary" className="h-9 px-3 text-xs" disabled={disabled} onClick={() => setMetadataOpen(true)}><FileImage size={14} /> Metadata</Button><Button variant="secondary" className="h-9 px-3 text-xs" disabled={disabled} onClick={() => void onSetPrivacy(true)}><Lock size={14} /> Make private</Button><Button variant="ghost" className="h-9 px-3 text-xs" disabled={disabled} onClick={() => void onSetPrivacy(false)}>Remove privacy rule</Button><Button variant="secondary" className="h-9 px-3 text-xs" disabled={disabled} onClick={() => void onApply({ type: "setFavorite", favorite: true }, `Marked ${selectedIds.size} item${selectedIds.size === 1 ? "" : "s"} as favorites.`)}><Heart size={14} /> Favorite</Button><Button variant="secondary" className="h-9 px-3 text-xs" disabled={disabled} onClick={() => void onApply({ type: "setFavorite", favorite: false }, `Removed ${selectedIds.size} item${selectedIds.size === 1 ? "" : "s"} from favorites.`)}><Heart size={14} fill="none" /> Unfavorite</Button><label><span className="sr-only">Set rating</span><Select className="h-9 w-32 text-xs" disabled={disabled} defaultValue="" onChange={(event) => { const value = event.target.value; if (value !== "") void onApply({ type: "setRating", rating: value === "clear" ? null : Number(value) }, value === "clear" ? "Cleared selected ratings." : `Rated selected media ${value} stars.`); event.currentTarget.value = ""; }}><option value="" disabled>Set rating</option>{[5, 4, 3, 2, 1].map((rating) => <option key={rating} value={rating}>{rating} star{rating === 1 ? "" : "s"}</option>)}<option value="clear">Clear rating</option></Select></label><label><span className="sr-only">Add to collection</span><Select className="h-9 w-44 text-xs" disabled={disabled || collections.length === 0} defaultValue="" onChange={(event) => { if (event.target.value) void onApply({ type: "addToCollection", collectionId: event.target.value }, "Added selected media to the collection."); event.currentTarget.value = ""; }}><option value="" disabled>{collections.length ? "Add to collection" : "No collections"}</option>{collections.map((collection) => <option key={collection.id} value={collection.id}>{collection.name}</option>)}</Select></label><label><span className="sr-only">Remove from collection</span><Select className="h-9 w-48 text-xs" disabled={disabled || collections.length === 0} defaultValue="" onChange={(event) => { if (event.target.value) void onApply({ type: "removeFromCollection", collectionId: event.target.value }, "Removed selected media from the collection."); event.currentTarget.value = ""; }}><option value="" disabled>{collections.length ? "Remove from collection" : "No collections"}</option>{collections.map((collection) => <option key={collection.id} value={collection.id}>{collection.name}</option>)}</Select></label><div className="flex min-w-48 flex-1"><Input className="h-9 rounded-r-none text-xs" value={tag} onChange={(event) => setTag(event.target.value)} placeholder="Add a tag" /><Button variant="secondary" className="h-9 rounded-l-none px-3 text-xs" disabled={disabled || !tag.trim()} onClick={() => { const value = tag.trim(); if (!value) return; void onApply({ type: "addTags", tags: [value] }, `Added #${value} to selected media.`); setTag(""); }}><Tags size={14} /> Add</Button></div></aside>{metadataOpen ? <BulkMetadataDialog selectedIds={selectedIds} onClose={closeMetadata} /> : null}</>;
+}
+
+function BulkMetadataDialog({ selectedIds, onClose }: { selectedIds: Set<string>; onClose: () => void }) {
+  const setError = useAppStore((state) => state.setError);
+  const setNotice = useAppStore((state) => state.setNotice);
+  const [creator, setCreator] = useState("");
+  const [series, setSeries] = useState("");
+  const [episode, setEpisode] = useState("");
+  const [tags, setTags] = useState("");
+  const [busy, setBusy] = useState(false);
+  const hasChanges = Boolean(creator.trim() || series.trim() || episode.trim() || tags.trim());
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !busy) {
+        event.preventDefault();
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [busy, onClose]);
+
+  async function applyMetadata() {
+    if (!hasChanges || selectedIds.size === 0 || busy) return;
+    setBusy(true);
+    try {
+      await api.applyLibraryBulkMetadata({
+        itemIds: Array.from(selectedIds),
+        creator: creator.trim() || null,
+        series: series.trim() || null,
+        episode: episode.trim() || null,
+        tags: tags.split(",").map((tag) => tag.trim()).filter(Boolean).slice(0, 20),
+      });
+      window.dispatchEvent(new Event("nice-downloader:library-items-changed"));
+      setNotice({ message: `Updated metadata for ${selectedIds.size} selected item${selectedIds.size === 1 ? "" : "s"}. Untouched fields were preserved.`, view: "library" });
+      onClose();
+    } catch (error) {
+      setError(normalizeError(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function trapFocus(event: React.KeyboardEvent<HTMLElement>) {
+    if (event.key !== "Tab") return;
+    const controls = Array.from(event.currentTarget.querySelectorAll<HTMLElement>("button:not(:disabled), input:not(:disabled), [tabindex]:not([tabindex='-1'])"));
+    const first = controls[0];
+    const last = controls.at(-1);
+    if (!first || !last) return;
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+
+  return <div className="fixed inset-0 z-[80] grid place-items-center bg-black/70 p-5 backdrop-blur-sm" onMouseDown={() => { if (!busy) onClose(); }}><section className="panel-shadow w-full max-w-2xl overflow-hidden rounded-[14px] border border-line bg-panel" role="dialog" aria-modal="true" aria-labelledby="bulk-metadata-title" aria-describedby="bulk-metadata-description" aria-busy={busy} onKeyDown={trapFocus} onMouseDown={(event) => event.stopPropagation()}><header className="flex items-start gap-4 border-b border-line/70 px-5 py-4"><div className="grid size-10 shrink-0 place-items-center rounded-[9px] bg-accent/10 text-accent"><FileImage size={18} /></div><div className="min-w-0 flex-1"><p className="text-[10px] font-semibold uppercase tracking-[0.1em] text-accent">Catalog presentation</p><h2 id="bulk-metadata-title" className="mt-1 text-xl font-semibold tracking-[-0.03em]">Edit {selectedIds.size} selected item{selectedIds.size === 1 ? "" : "s"}</h2><p id="bulk-metadata-description" className="mt-1.5 text-xs leading-5 text-muted">Only entered values are applied. Titles, descriptions, dates, URLs, artwork, and all other metadata remain unchanged.</p></div><button autoFocus className="grid size-8 shrink-0 place-items-center rounded-[7px] text-muted hover:bg-elevated hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70" disabled={busy} onClick={onClose} aria-label="Close bulk metadata editor"><X size={17} /></button></header><div className="grid gap-3 p-5 sm:grid-cols-2"><Field label="Creator or channel" hint="Leave blank to preserve each current creator."><Input value={creator} maxLength={200} onChange={(event) => setCreator(event.target.value)} placeholder="Apply one creator" /></Field><Field label="Series" hint="Useful for grouping episodes into a shelf."><Input value={series} maxLength={200} onChange={(event) => setSeries(event.target.value)} placeholder="Apply one series" /></Field><Field label="Episode label"><Input value={episode} maxLength={200} onChange={(event) => setEpisode(event.target.value)} placeholder="Special, S01E04, Part 2" /></Field><Field label="Add tags" hint="Comma-separated; existing tags stay in place."><Input value={tags} onChange={(event) => setTags(event.target.value)} placeholder="archive, tutorial" /></Field></div><footer className="flex flex-wrap items-center justify-between gap-3 border-t border-line/70 bg-elevated/25 px-5 py-4"><p className="text-[10px] text-muted">Original files and sidecars are never modified.</p><div className="flex gap-2"><Button variant="ghost" disabled={busy} onClick={onClose}>Cancel</Button><Button disabled={!hasChanges || busy} onClick={() => void applyMetadata()}>{busy ? <LoaderCircle className="animate-spin" size={14} /> : <Save size={14} />} Apply metadata</Button></div></footer></section></div>;
 }
 
 function BulkMoveDialog({ selectedIds, onClose, onComplete }: { selectedIds: Set<string>; onClose: () => void; onComplete: (result: LibraryBulkMoveResult) => void }) {

@@ -1,15 +1,15 @@
 use crate::{
     errors::AppError,
     models::{
-        AuthenticationProfile, BrowserCookieSource, DesktopPreferences, DownloadArchiveMatch,
-        DownloadJob, DownloadState, EnginePreferences, LibraryAvailabilityFilter,
-        LibraryBulkAction, LibraryChange, LibraryChangeKind, LibraryCollection,
-        LibraryCompareSession, LibraryCompareSessionItem, LibraryCurationDecision,
-        LibraryCurationState, LibraryFacetRequest, LibraryFacets, LibraryFileIdentity,
-        LibraryFileOperation, LibraryFileOperationKind, LibraryFileOperationState,
-        LibraryFolderFacet, LibraryFolderScope, LibraryHealthIssue, LibraryHealthIssueKind,
-        LibraryHealthSummary, LibraryItem, LibraryMediaKind, LibraryMediaStack,
-        LibraryMediaStackMember, LibraryMediaStackRole, LibraryMetadataFields,
+        ApplyLibraryBulkMetadataRequest, AuthenticationProfile, BrowserCookieSource,
+        DesktopPreferences, DownloadArchiveMatch, DownloadJob, DownloadState, EnginePreferences,
+        LibraryAvailabilityFilter, LibraryBulkAction, LibraryChange, LibraryChangeKind,
+        LibraryCollection, LibraryCompareSession, LibraryCompareSessionItem,
+        LibraryCurationDecision, LibraryCurationState, LibraryFacetRequest, LibraryFacets,
+        LibraryFileIdentity, LibraryFileOperation, LibraryFileOperationKind,
+        LibraryFileOperationState, LibraryFolderFacet, LibraryFolderScope, LibraryHealthIssue,
+        LibraryHealthIssueKind, LibraryHealthSummary, LibraryItem, LibraryMediaKind,
+        LibraryMediaStack, LibraryMediaStackMember, LibraryMediaStackRole, LibraryMetadataFields,
         LibraryMetadataState, LibraryMoment, LibraryMontage, LibraryMontageSegment,
         LibraryNearDuplicateMatch, LibraryPlaybackEntry, LibraryPlaybackState, LibraryPlaylist,
         LibraryPrivacyRules, LibraryPrivacyStatus, LibraryPrivateFolder, LibraryProbeResult,
@@ -4015,6 +4015,51 @@ impl Database {
         )?;
         drop(connection);
         self.get_library_rich_metadata(&request.item_id)
+    }
+
+    pub fn apply_library_bulk_metadata(
+        &self,
+        request: ApplyLibraryBulkMetadataRequest,
+    ) -> Result<Vec<LibraryItem>, AppError> {
+        let ids = validate_library_item_ids(request.item_ids)?;
+        let fields = validate_library_metadata_fields(LibraryMetadataFields {
+            creator: request.creator,
+            series: request.series,
+            episode: request.episode,
+            ..LibraryMetadataFields::default()
+        })?;
+        let tags = normalize_library_tags(request.tags)?;
+        if fields.creator.is_none()
+            && fields.series.is_none()
+            && fields.episode.is_none()
+            && tags.is_empty()
+        {
+            return Err(AppError::new(
+                "empty_library_bulk_metadata",
+                "Enter at least one creator, series, episode, or tag to apply.",
+            ));
+        }
+        for id in &ids {
+            self.get_library_item(id)?;
+        }
+        if fields.creator.is_some() || fields.series.is_some() || fields.episode.is_some() {
+            for id in &ids {
+                let current = self.get_library_rich_metadata(id)?;
+                self.save_library_rich_metadata(SaveLibraryRichMetadataRequest {
+                    item_id: id.clone(),
+                    creator: fields.creator.clone().or(current.overrides.creator),
+                    description: current.overrides.description,
+                    upload_date: current.overrides.upload_date,
+                    series: fields.series.clone().or(current.overrides.series),
+                    episode: fields.episode.clone().or(current.overrides.episode),
+                    original_url: current.overrides.original_url,
+                })?;
+            }
+        }
+        if !tags.is_empty() {
+            self.apply_library_bulk_action(ids.clone(), LibraryBulkAction::AddTags { tags })?;
+        }
+        self.list_library_items_by_ids(ids)
     }
 
     pub fn reset_library_rich_metadata(
@@ -10695,6 +10740,125 @@ mod tests {
             refreshed.effective.creator.as_deref(),
             Some("My channel name")
         );
+    }
+
+    #[test]
+    fn bulk_metadata_updates_only_entered_fields_and_merges_tags() {
+        let directory = tempdir().expect("temporary directory");
+        let database =
+            Database::open(&directory.path().join("bulk-metadata.sqlite3")).expect("database");
+        let mut first =
+            media_stack_test_item(directory.path(), "First episode", LibraryMediaKind::Video);
+        first.tags = vec!["existing".to_owned()];
+        let mut second =
+            media_stack_test_item(directory.path(), "Second episode", LibraryMediaKind::Video);
+        second.tags = vec!["archive".to_owned()];
+        database.upsert_library_item(&first).expect("first item");
+        database.upsert_library_item(&second).expect("second item");
+
+        database
+            .save_library_rich_metadata(SaveLibraryRichMetadataRequest {
+                item_id: first.id.clone(),
+                creator: Some("First creator".to_owned()),
+                description: Some("First description".to_owned()),
+                upload_date: Some("2026-02-03".to_owned()),
+                series: Some("Original series".to_owned()),
+                episode: Some("Episode one".to_owned()),
+                original_url: Some("https://example.com/first".to_owned()),
+            })
+            .expect("first metadata");
+        database
+            .save_library_rich_metadata(SaveLibraryRichMetadataRequest {
+                item_id: second.id.clone(),
+                creator: Some("Second creator".to_owned()),
+                description: Some("Second description".to_owned()),
+                upload_date: None,
+                series: Some("Other series".to_owned()),
+                episode: Some("Episode two".to_owned()),
+                original_url: None,
+            })
+            .expect("second metadata");
+
+        let changed = database
+            .apply_library_bulk_metadata(ApplyLibraryBulkMetadataRequest {
+                item_ids: vec![first.id.clone(), second.id.clone()],
+                creator: None,
+                series: Some("Shared series".to_owned()),
+                episode: None,
+                tags: vec!["curated".to_owned(), "EXISTING".to_owned()],
+            })
+            .expect("bulk metadata");
+        assert_eq!(changed.len(), 2);
+
+        let first_metadata = database
+            .get_library_rich_metadata(&first.id)
+            .expect("updated first metadata");
+        assert_eq!(
+            first_metadata.effective.creator.as_deref(),
+            Some("First creator")
+        );
+        assert_eq!(
+            first_metadata.effective.series.as_deref(),
+            Some("Shared series")
+        );
+        assert_eq!(
+            first_metadata.effective.episode.as_deref(),
+            Some("Episode one")
+        );
+        assert_eq!(
+            first_metadata.effective.description.as_deref(),
+            Some("First description")
+        );
+        assert_eq!(
+            first_metadata.effective.original_url.as_deref(),
+            Some("https://example.com/first")
+        );
+
+        let second_metadata = database
+            .get_library_rich_metadata(&second.id)
+            .expect("updated second metadata");
+        assert_eq!(
+            second_metadata.effective.creator.as_deref(),
+            Some("Second creator")
+        );
+        assert_eq!(
+            second_metadata.effective.series.as_deref(),
+            Some("Shared series")
+        );
+        assert_eq!(
+            second_metadata.effective.episode.as_deref(),
+            Some("Episode two")
+        );
+
+        let changed_by_id = changed
+            .into_iter()
+            .map(|item| (item.id.clone(), item))
+            .collect::<HashMap<_, _>>();
+        let first_changed = changed_by_id.get(&first.id).expect("first changed item");
+        assert!(first_changed.tags.iter().any(|tag| tag == "existing"));
+        assert!(first_changed.tags.iter().any(|tag| tag == "curated"));
+        assert_eq!(
+            first_changed
+                .tags
+                .iter()
+                .filter(|tag| tag.eq_ignore_ascii_case("existing"))
+                .count(),
+            1
+        );
+        let second_changed = changed_by_id.get(&second.id).expect("second changed item");
+        assert!(second_changed.tags.iter().any(|tag| tag == "archive"));
+        assert!(second_changed.tags.iter().any(|tag| tag == "curated"));
+
+        let empty = database
+            .apply_library_bulk_metadata(ApplyLibraryBulkMetadataRequest {
+                item_ids: vec![first.id],
+                creator: None,
+                series: None,
+                episode: None,
+                tags: Vec::new(),
+            })
+            .expect_err("empty bulk metadata");
+        assert_eq!(empty.code, "empty_library_bulk_metadata");
     }
 
     #[test]

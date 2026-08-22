@@ -730,6 +730,14 @@ export interface SaveLibraryRichMetadataRequest extends LibraryMetadataFields {
   itemId: string;
 }
 
+export interface ApplyLibraryBulkMetadataRequest {
+  itemIds: string[];
+  creator?: string | null;
+  series?: string | null;
+  episode?: string | null;
+  tags: string[];
+}
+
 export interface SetLibraryArtworkRequest {
   itemId: string;
   path?: string | null;

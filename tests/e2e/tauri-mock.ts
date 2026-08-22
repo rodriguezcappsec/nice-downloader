@@ -6,8 +6,8 @@ export async function installTauriMock(page: Page) {
     let nextCallbackId = 1;
     const emptyQuery = { items: [], totalItems: 0, page: 1, pageSize: 60, totalPages: 1 };
     const emptyFacets = {
-      totalItems: 0,
-      availableItems: 0,
+      totalItems: 1,
+      availableItems: 1,
       missingItems: 0,
       containers: [],
       tags: [],
@@ -17,8 +17,38 @@ export async function installTauriMock(page: Page) {
       themes: [],
       folders: [],
     };
-    const testSource = { id: "00000000-0000-4000-8000-000000000001", name: "Playwright media", path: "/tmp/media", mediaKind: "both", recursive: true, watchEnabled: true, private: false, includePatterns: [], excludePatterns: [], status: "online", lastError: null, lastScannedAt: null, itemCount: 0, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z" };
-    const invoke = async (command: string) => {
+    const testSource = { id: "00000000-0000-4000-8000-000000000001", name: "Playwright media", path: "/tmp/media", mediaKind: "both", recursive: true, watchEnabled: true, private: false, includePatterns: [], excludePatterns: [], status: "online", lastError: null, lastScannedAt: null, itemCount: 1, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z" };
+    const testItem = {
+      id: "00000000-0000-4000-8000-000000000002",
+      path: "/tmp/media/playwright-clip.mp4",
+      sourceId: testSource.id,
+      relativePath: "playwright-clip.mp4",
+      mediaKind: "video",
+      title: "Playwright clip",
+      sourceUrl: null,
+      thumbnail: null,
+      durationSeconds: 95,
+      site: "Local",
+      tags: ["existing"],
+      metadata: {},
+      fileSizeBytes: 1_048_576,
+      modifiedAtMs: Date.parse("2026-01-01T00:00:00Z"),
+      width: 1920,
+      height: 1080,
+      fps: 30,
+      videoCodec: "h264",
+      audioCodec: "aac",
+      container: "mp4",
+      dynamicRange: null,
+      metadataState: "ready",
+      metadataError: null,
+      favorite: false,
+      rating: null,
+      missing: false,
+      addedAt: "2026-01-01T00:00:00Z",
+      updatedAt: "2026-01-01T00:00:00Z",
+    };
+    const invoke = async (command: string, args?: Record<string, unknown>) => {
       switch (command) {
         case "plugin:event|listen": return nextCallbackId++;
         case "plugin:event|unlisten":
@@ -62,8 +92,12 @@ export async function installTauriMock(page: Page) {
         case "get_library_transcription_provider_status": return { available: false, executable: null, detail: "Test transcription provider unavailable" };
         case "get_library_semantic_transcript_index_status": return { model: "", indexedItems: 0, staleItems: 0 };
         case "get_library_local_inference_job": return null;
-        case "query_library_items": return emptyQuery;
+        case "query_library_items": return { ...emptyQuery, items: [testItem], totalItems: 1 };
         case "get_library_facets": return emptyFacets;
+        case "get_library_artwork": return null;
+        case "apply_library_bulk_metadata":
+          Object.assign(window, { __PLAYWRIGHT_BULK_METADATA_REQUEST__: args?.request });
+          return [testItem];
         default:
           if (command.startsWith("list_")) return [];
           throw new Error(`Unhandled Playwright Tauri command: ${command}`);

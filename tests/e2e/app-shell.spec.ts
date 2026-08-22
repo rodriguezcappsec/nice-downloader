@@ -45,3 +45,32 @@ test("watched folders expose typed automation controls", async ({ page }) => {
   await expect(page.getByLabel("Add tags")).toBeVisible();
   await expect(page.getByRole("button", { name: "Save automation" })).toBeVisible();
 });
+
+test("bulk metadata preserves blank fields and restores dialog focus", async ({ page }) => {
+  await page.getByRole("button", { name: "Library" }).click();
+  await page.getByRole("button", { name: "Select" }).click();
+  await page.getByRole("button", { name: /Playwright clip/ }).click();
+
+  const metadataTrigger = page.getByRole("button", { name: "Metadata" });
+  await metadataTrigger.click();
+  const dialog = page.getByRole("dialog", { name: /Edit 1 selected item/ });
+  await expect(dialog).toBeVisible();
+  await expect(page.getByText("Only entered values are applied.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Close bulk metadata editor" })).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(metadataTrigger).toBeFocused();
+
+  await metadataTrigger.click();
+  await page.getByLabel("Creator or channel").fill("Curated creator");
+  await page.getByLabel("Add tags").fill("favorite, archive");
+  await page.getByRole("button", { name: "Apply metadata" }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(page.getByText(/Updated metadata for 1 selected item/)).toBeVisible();
+  await expect.poll(async () => page.evaluate(() => (window as typeof window & { __PLAYWRIGHT_BULK_METADATA_REQUEST__?: unknown }).__PLAYWRIGHT_BULK_METADATA_REQUEST__)).toEqual({
+    itemIds: ["00000000-0000-4000-8000-000000000002"],
+    creator: "Curated creator",
+    series: null,
+    episode: null,
+    tags: ["favorite", "archive"],
+  });
+});

@@ -304,6 +304,7 @@ pub fn run() {
             commands::update_library_item,
             commands::get_library_rich_metadata,
             commands::save_library_rich_metadata,
+            commands::apply_library_bulk_metadata,
             commands::reset_library_rich_metadata,
             commands::set_library_artwork,
             commands::get_library_search_status,

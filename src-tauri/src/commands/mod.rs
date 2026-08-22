@@ -25,21 +25,21 @@ use crate::{
     local_share::LocalShareManager,
     media_server::MediaServerState,
     models::{
-        AuthenticationProfile, BatchAnalysisItem, BatchAnalysisResponse, BatchDownloadFailure,
-        BatchDownloadResult, BrowserProfileInfo, DesktopPreferences, DesktopRuntimeStatus,
-        DiskSpaceInfo, DownloadArchiveMatch, DownloadJob, DownloadState, EngineId, EngineInfo,
-        EnginePreferences, ExportLibraryMomentsRequest, GalleryItemList, LibraryArtworkCacheStatus,
-        LibraryBulkAction, LibraryBulkMovePlan, LibraryBulkMoveResult, LibraryCacheResult,
-        LibraryChange, LibraryChapterSuggestion, LibraryCollection, LibraryCompareSession,
-        LibraryCurationDecision, LibraryCurationState, LibraryDuplicateAnalysisJob,
-        LibraryDuplicateGroup, LibraryDuplicateTrashResult, LibraryFacetRequest, LibraryFacets,
-        LibraryFileOperation, LibraryFileOperationPlan, LibraryFileOperationResult,
-        LibraryHealthSummary, LibraryImageSession, LibraryItem, LibraryLocalInferenceJob,
-        LibraryMediaKind, LibraryMediaStack, LibraryMoment, LibraryMontage,
-        LibraryNearDuplicateMatch, LibraryPlaybackCacheStatus, LibraryPlaybackEntry,
-        LibraryPlaybackPreflight, LibraryPlaybackSession, LibraryPlaybackState,
-        LibraryQueryRequest, LibraryQueryResult, LibraryRichMetadata, LibraryScanJob,
-        LibraryScanResult, LibrarySearchStatus, LibrarySemanticIndexStatus,
+        ApplyLibraryBulkMetadataRequest, AuthenticationProfile, BatchAnalysisItem,
+        BatchAnalysisResponse, BatchDownloadFailure, BatchDownloadResult, BrowserProfileInfo,
+        DesktopPreferences, DesktopRuntimeStatus, DiskSpaceInfo, DownloadArchiveMatch, DownloadJob,
+        DownloadState, EngineId, EngineInfo, EnginePreferences, ExportLibraryMomentsRequest,
+        GalleryItemList, LibraryArtworkCacheStatus, LibraryBulkAction, LibraryBulkMovePlan,
+        LibraryBulkMoveResult, LibraryCacheResult, LibraryChange, LibraryChapterSuggestion,
+        LibraryCollection, LibraryCompareSession, LibraryCurationDecision, LibraryCurationState,
+        LibraryDuplicateAnalysisJob, LibraryDuplicateGroup, LibraryDuplicateTrashResult,
+        LibraryFacetRequest, LibraryFacets, LibraryFileOperation, LibraryFileOperationPlan,
+        LibraryFileOperationResult, LibraryHealthSummary, LibraryImageSession, LibraryItem,
+        LibraryLocalInferenceJob, LibraryMediaKind, LibraryMediaStack, LibraryMoment,
+        LibraryMontage, LibraryNearDuplicateMatch, LibraryPlaybackCacheStatus,
+        LibraryPlaybackEntry, LibraryPlaybackPreflight, LibraryPlaybackSession,
+        LibraryPlaybackState, LibraryQueryRequest, LibraryQueryResult, LibraryRichMetadata,
+        LibraryScanJob, LibraryScanResult, LibrarySearchStatus, LibrarySemanticIndexStatus,
         LibrarySemanticTranscriptMatch, LibrarySmartView, LibrarySource, LibrarySourceAutomation,
         LibraryStoragePlan, LibraryThemeAnalysis, LibraryThemeIndexStatus, LibraryThemeJob,
         LibraryThemeProviderStatus, LibraryThemeSettings, LibraryTranscriptIndexStatus,
@@ -841,6 +841,14 @@ pub fn save_library_rich_metadata(
     request: SaveLibraryRichMetadataRequest,
 ) -> Result<LibraryRichMetadata, AppError> {
     database.save_library_rich_metadata(request)
+}
+
+#[tauri::command]
+pub fn apply_library_bulk_metadata(
+    database: State<'_, Database>,
+    request: ApplyLibraryBulkMetadataRequest,
+) -> Result<Vec<LibraryItem>, AppError> {
+    database.apply_library_bulk_metadata(request)
 }
 
 #[tauri::command]

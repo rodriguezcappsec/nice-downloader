@@ -1122,6 +1122,17 @@ pub struct SaveLibraryRichMetadataRequest {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ApplyLibraryBulkMetadataRequest {
+    pub item_ids: Vec<String>,
+    pub creator: Option<String>,
+    pub series: Option<String>,
+    pub episode: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SetLibraryArtworkRequest {
     pub item_id: String,
     pub path: Option<String>,
