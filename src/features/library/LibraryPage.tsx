@@ -19,6 +19,7 @@ import {
   FolderPlus,
   FolderSearch,
   FolderInput,
+  GripHorizontal,
   HardDrive,
   Heart,
   ListPlus,
@@ -41,6 +42,7 @@ import {
   Minimize2,
   RotateCcw,
   RotateCw,
+  Scaling,
   Save,
   Search,
   ScanSearch,
@@ -59,7 +61,7 @@ import {
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { Button, Field, Input, Select, Textarea } from "../../components/ui";
 import { formatBytes, formatDuration } from "../../lib/format";
 import { assessEmbeddedCompatibility, embeddedPlaybackFingerprint, formatMediaCodec } from "../../lib/media-compatibility";
@@ -124,12 +126,61 @@ type AvailabilityFilter = "all" | "available" | "missing";
 type FolderScope = "tree" | "direct";
 type FolderSelection = { sourceId: string; path: string };
 type FolderOption = FolderSelection & { value: string; label: string; directCount: number; treeCount: number };
+type MiniPlayerLayout = { x: number; y: number; width: number };
+type MiniPlayerGesture = {
+  kind: "move" | "resize";
+  pointerId: number;
+  startClientX: number;
+  startClientY: number;
+  startFrame: MiniPlayerLayout;
+  startHeight: number;
+  previousCursor: string;
+  previousUserSelect: string;
+};
 const LIBRARY_PAGE_SIZE = 60;
 const WATCH_BROWSE_PAGE_SIZE = 24;
+const MINI_PLAYER_LAYOUT_KEY = "nice-downloader.mini-player-layout";
+const MINI_PLAYER_MARGIN = 16;
+const MINI_PLAYER_DEFAULT_WIDTH = 420;
+const MINI_PLAYER_MIN_WIDTH = 340;
+const MINI_PLAYER_MAX_WIDTH = 720;
 const EMPTY_LIBRARY_RESULT: LibraryQueryResult = { items: [], totalItems: 0, page: 1, pageSize: LIBRARY_PAGE_SIZE, totalPages: 1 };
 const EMPTY_LIBRARY_FACETS: LibraryFacets = { totalItems: 0, availableItems: 0, missingItems: 0, containers: [], tags: [], creators: [], series: [], sites: [], themes: [], folders: [] };
 type LiveAnnouncement = { signature: string; message: string; assertive?: boolean };
 type TranscriptSeekRequest = { id: number; itemId: string; seconds: number };
+
+function readMiniPlayerLayout(): MiniPlayerLayout | null {
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(MINI_PLAYER_LAYOUT_KEY) || "null") as Partial<MiniPlayerLayout> | null;
+    if (!parsed || !Number.isFinite(parsed.x) || !Number.isFinite(parsed.y) || !Number.isFinite(parsed.width)) return null;
+    return { x: Number(parsed.x), y: Number(parsed.y), width: Number(parsed.width) };
+  } catch {
+    return null;
+  }
+}
+
+function clampMiniPlayerLayout(layout: MiniPlayerLayout, height: number): MiniPlayerLayout {
+  const viewportWidth = Math.max(0, window.innerWidth);
+  const viewportHeight = Math.max(0, window.innerHeight);
+  const availableWidth = Math.max(0, viewportWidth - MINI_PLAYER_MARGIN * 2);
+  const minimumWidth = Math.min(MINI_PLAYER_MIN_WIDTH, availableWidth);
+  const width = Math.min(Math.max(minimumWidth, layout.width), Math.min(MINI_PLAYER_MAX_WIDTH, availableWidth));
+  const maximumX = Math.max(MINI_PLAYER_MARGIN, viewportWidth - width - MINI_PLAYER_MARGIN);
+  const visibleHeight = Math.min(Math.max(0, height), Math.max(0, viewportHeight - MINI_PLAYER_MARGIN * 2));
+  const maximumY = Math.max(MINI_PLAYER_MARGIN, viewportHeight - visibleHeight - MINI_PLAYER_MARGIN);
+  return {
+    x: Math.min(Math.max(MINI_PLAYER_MARGIN, layout.x), maximumX),
+    y: Math.min(Math.max(MINI_PLAYER_MARGIN, layout.y), maximumY),
+    width,
+  };
+}
+
+function sameMiniPlayerLayout(left: MiniPlayerLayout | null, right: MiniPlayerLayout) {
+  return Boolean(left
+    && Math.abs(left.x - right.x) < 0.5
+    && Math.abs(left.y - right.y) < 0.5
+    && Math.abs(left.width - right.width) < 0.5);
+}
 
 type LibraryWorkspaceSection = "home" | "all" | "videos" | "images" | "playlists" | "watchLater" | "private";
 
@@ -2727,6 +2778,9 @@ function WatchWorkspace({ item, sourceName, browseItems, browseTotal, browsePage
 }) {
   const [leanBack, setLeanBack] = useState(false);
   const leanBackReturnFocus = useRef<HTMLElement | null>(null);
+  const miniPlayerRef = useRef<HTMLElement | null>(null);
+  const miniPlayerGesture = useRef<MiniPlayerGesture | null>(null);
+  const [miniPlayerLayout, setMiniPlayerLayout] = useState<MiniPlayerLayout | null>(readMiniPlayerLayout);
 
   function enterLeanBack() {
     leanBackReturnFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -2754,7 +2808,174 @@ function WatchWorkspace({ item, sourceName, browseItems, browseTotal, browsePage
     if (compact) setLeanBack(false);
   }, [compact]);
 
-  return <section className={leanBack ? "fixed inset-0 z-[80] flex min-h-0 flex-col bg-[#080705] px-5 pb-5 text-white sm:px-8 sm:pb-8" : compact ? "fixed bottom-5 right-5 z-[65] w-[min(420px,calc(100vw-32px))]" : "mx-auto w-full max-w-[1640px] px-6 pb-12 pt-5 xl:px-8"} aria-label={leanBack ? "Lean-back player" : compact ? "Mini player" : "Watch workspace"}>
+  useEffect(() => {
+    if (!miniPlayerLayout) return;
+    window.localStorage.setItem(MINI_PLAYER_LAYOUT_KEY, JSON.stringify(miniPlayerLayout));
+  }, [miniPlayerLayout]);
+
+  useEffect(() => {
+    if (!compact) return;
+    const frame = window.requestAnimationFrame(() => {
+      const element = miniPlayerRef.current;
+      if (!element) return;
+      const rect = element.getBoundingClientRect();
+      const next = clampMiniPlayerLayout(
+        miniPlayerLayout || { x: rect.left, y: rect.top, width: rect.width },
+        rect.height,
+      );
+      setMiniPlayerLayout((current) => sameMiniPlayerLayout(current, next) ? current : next);
+    });
+    const keepInsideViewport = () => {
+      const element = miniPlayerRef.current;
+      if (!element) return;
+      const rect = element.getBoundingClientRect();
+      setMiniPlayerLayout((current) => {
+        const next = clampMiniPlayerLayout(current || { x: rect.left, y: rect.top, width: rect.width }, rect.height);
+        return sameMiniPlayerLayout(current, next) ? current : next;
+      });
+    };
+    const observer = new ResizeObserver(keepInsideViewport);
+    if (miniPlayerRef.current) observer.observe(miniPlayerRef.current);
+    window.addEventListener("resize", keepInsideViewport);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      observer.disconnect();
+      window.removeEventListener("resize", keepInsideViewport);
+    };
+  }, [compact]);
+
+  useEffect(() => {
+    const finishGesture = (pointerId?: number) => {
+      const gesture = miniPlayerGesture.current;
+      if (!gesture || (pointerId != null && pointerId !== gesture.pointerId)) return;
+      document.body.style.cursor = gesture.previousCursor;
+      document.body.style.userSelect = gesture.previousUserSelect;
+      miniPlayerGesture.current = null;
+    };
+    const updateGesture = (event: PointerEvent) => {
+      const gesture = miniPlayerGesture.current;
+      if (!gesture || event.pointerId !== gesture.pointerId) return;
+      event.preventDefault();
+      if (gesture.kind === "move") {
+        const next = clampMiniPlayerLayout({
+          x: gesture.startFrame.x + event.clientX - gesture.startClientX,
+          y: gesture.startFrame.y + event.clientY - gesture.startClientY,
+          width: gesture.startFrame.width,
+        }, gesture.startHeight);
+        setMiniPlayerLayout(next);
+        return;
+      }
+      const horizontalDelta = event.clientX - gesture.startClientX;
+      const chromeHeight = Math.max(0, gesture.startHeight - gesture.startFrame.width * 9 / 16);
+      const maximumHeightWidth = Math.max(MINI_PLAYER_MIN_WIDTH, (window.innerHeight - MINI_PLAYER_MARGIN * 2 - chromeHeight) * 16 / 9);
+      const width = Math.min(
+        MINI_PLAYER_MAX_WIDTH,
+        window.innerWidth - MINI_PLAYER_MARGIN * 2,
+        maximumHeightWidth,
+        Math.max(MINI_PLAYER_MIN_WIDTH, gesture.startFrame.width + horizontalDelta * 2),
+      );
+      const estimatedHeight = chromeHeight + width * 9 / 16;
+      setMiniPlayerLayout(clampMiniPlayerLayout({
+        x: gesture.startFrame.x + (gesture.startFrame.width - width) / 2,
+        y: gesture.startFrame.y + (gesture.startHeight - estimatedHeight) / 2,
+        width,
+      }, estimatedHeight));
+    };
+    const endGesture = (event: PointerEvent) => finishGesture(event.pointerId);
+    window.addEventListener("pointermove", updateGesture, { passive: false });
+    window.addEventListener("pointerup", endGesture);
+    window.addEventListener("pointercancel", endGesture);
+    return () => {
+      finishGesture();
+      window.removeEventListener("pointermove", updateGesture);
+      window.removeEventListener("pointerup", endGesture);
+      window.removeEventListener("pointercancel", endGesture);
+    };
+  }, []);
+
+  function startMiniPlayerGesture(kind: MiniPlayerGesture["kind"], event: ReactPointerEvent<HTMLElement>) {
+    if (!compact || event.button !== 0) return;
+    const element = miniPlayerRef.current;
+    if (!element) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const rect = element.getBoundingClientRect();
+    const startFrame = clampMiniPlayerLayout({ x: rect.left, y: rect.top, width: rect.width }, rect.height);
+    setMiniPlayerLayout(startFrame);
+    miniPlayerGesture.current = {
+      kind,
+      pointerId: event.pointerId,
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      startFrame,
+      startHeight: rect.height,
+      previousCursor: document.body.style.cursor,
+      previousUserSelect: document.body.style.userSelect,
+    };
+    document.body.style.cursor = kind === "move" ? "grabbing" : "ew-resize";
+    document.body.style.userSelect = "none";
+  }
+
+  function moveMiniPlayerBy(deltaX: number, deltaY: number) {
+    const element = miniPlayerRef.current;
+    if (!element) return;
+    const rect = element.getBoundingClientRect();
+    setMiniPlayerLayout(clampMiniPlayerLayout({ x: rect.left + deltaX, y: rect.top + deltaY, width: rect.width }, rect.height));
+  }
+
+  function resizeMiniPlayerBy(deltaWidth: number) {
+    const element = miniPlayerRef.current;
+    if (!element) return;
+    const rect = element.getBoundingClientRect();
+    const width = Math.min(MINI_PLAYER_MAX_WIDTH, Math.max(MINI_PLAYER_MIN_WIDTH, rect.width + deltaWidth));
+    const estimatedHeight = rect.height + (width - rect.width) * 9 / 16;
+    setMiniPlayerLayout(clampMiniPlayerLayout({
+      x: rect.left + (rect.width - width) / 2,
+      y: rect.top + (rect.height - estimatedHeight) / 2,
+      width,
+    }, estimatedHeight));
+  }
+
+  function handleMiniPlayerMoveKey(event: ReactKeyboardEvent<HTMLElement>) {
+    const amount = event.shiftKey ? 48 : 16;
+    if (event.key === "ArrowLeft") moveMiniPlayerBy(-amount, 0);
+    else if (event.key === "ArrowRight") moveMiniPlayerBy(amount, 0);
+    else if (event.key === "ArrowUp") moveMiniPlayerBy(0, -amount);
+    else if (event.key === "ArrowDown") moveMiniPlayerBy(0, amount);
+    else return;
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
+  function handleMiniPlayerResizeKey(event: ReactKeyboardEvent<HTMLElement>) {
+    const amount = event.shiftKey ? 80 : 32;
+    if (event.key === "ArrowRight" || event.key === "ArrowUp") resizeMiniPlayerBy(amount);
+    else if (event.key === "ArrowLeft" || event.key === "ArrowDown") resizeMiniPlayerBy(-amount);
+    else return;
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
+  function resetMiniPlayerLayout() {
+    const element = miniPlayerRef.current;
+    if (!element) return;
+    const rect = element.getBoundingClientRect();
+    const width = Math.min(MINI_PLAYER_DEFAULT_WIDTH, window.innerWidth - MINI_PLAYER_MARGIN * 2);
+    const estimatedHeight = rect.height + (width - rect.width) * 9 / 16;
+    setMiniPlayerLayout(clampMiniPlayerLayout({
+      x: window.innerWidth - width - 20,
+      y: window.innerHeight - estimatedHeight - 20,
+      width,
+    }, estimatedHeight));
+  }
+
+  const miniPlayerStyle = compact
+    ? miniPlayerLayout
+      ? { left: miniPlayerLayout.x, top: miniPlayerLayout.y, width: miniPlayerLayout.width }
+      : { bottom: 20, right: 20, width: `min(${MINI_PLAYER_DEFAULT_WIDTH}px, calc(100vw - 32px))` }
+    : undefined;
+
+  return <section ref={miniPlayerRef} style={miniPlayerStyle} className={leanBack ? "fixed inset-0 z-[80] flex min-h-0 flex-col bg-[#080705] px-5 pb-5 text-white sm:px-8 sm:pb-8" : compact ? "fixed z-[65]" : "mx-auto w-full max-w-[1640px] px-6 pb-12 pt-5 xl:px-8"} aria-label={leanBack ? "Lean-back player" : compact ? "Mini player" : "Watch workspace"}>
     <LibraryLiveRegions polite="" assertive="" />
       <header className={`${compact ? "hidden" : leanBack ? "flex" : "sticky"} top-0 z-10 -mx-2 mb-5 items-center gap-4 px-2 py-3 ${leanBack ? "min-h-20 bg-[#080705]" : "bg-canvas/92 backdrop-blur-xl"}`}>
       {leanBack ? <><div className="grid size-11 shrink-0 place-items-center rounded-full bg-accent/15 text-accent"><Tv size={21} /></div><div className="min-w-0 flex-1"><p className="text-[11px] font-semibold uppercase tracking-[0.15em] text-accent">Lean-back mode</p><h1 className="mt-1 truncate text-lg font-semibold tracking-[-0.025em] sm:text-2xl">{item.title}</h1></div><p className="hidden text-xs text-white/45 lg:block">Keyboard or gamepad supported</p><Button data-lean-back-exit variant="secondary" className="h-12 shrink-0 border-white/10 bg-white/10 px-5 text-white hover:bg-white/15" onClick={exitLeanBack}><Minimize2 size={18} /> Exit</Button></> : <><button autoFocus className="flex h-10 shrink-0 items-center gap-2 rounded-[8px] px-2.5 text-xs font-semibold text-muted transition hover:bg-elevated hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70" onClick={onBack}><ChevronRight className="rotate-180" size={16} /> Library</button><div className="h-6 w-px bg-line/70" /><div className="min-w-0"><p className="text-[10px] font-medium text-accent">Now watching</p><h1 className="max-w-xl truncate text-sm font-semibold tracking-[-0.02em]">{item.title}</h1></div><Button variant="secondary" className="ml-auto h-10 shrink-0" onClick={enterLeanBack}><Tv size={16} /> Lean back</Button><label className="relative w-full max-w-md"><span className="sr-only">Search videos while watching</span><Search className="absolute left-3.5 top-3 text-muted" size={15} /><Input className="h-10 rounded-[9px] bg-panel/85 pl-10 text-xs shadow-control" value={search} onChange={(event) => onSearch(event.target.value)} placeholder="Find another video" /></label></>}
@@ -2762,7 +2983,7 @@ function WatchWorkspace({ item, sourceName, browseItems, browseTotal, browsePage
 
     <div className={leanBack ? "flex min-h-0 flex-1" : compact ? "block" : "grid min-w-0 gap-6 xl:grid-cols-[minmax(0,1fr)_370px] 2xl:grid-cols-[minmax(0,1fr)_410px]"}>
       <article className={leanBack ? "flex min-h-0 min-w-0 flex-1 flex-col" : "min-w-0"}>
-        <EmbeddedVideoPlayer key={item.id} item={item} sourceName={sourceName} compact={compact} leanBack={leanBack} seekRequest={seekRequest} onRestore={onRestore} onClose={onClose} onExitLeanBack={exitLeanBack} onPrevious={onPrevious} onNext={onNext} onPlaybackEnded={onPlaybackEnded} />
+        <EmbeddedVideoPlayer key={item.id} item={item} sourceName={sourceName} compact={compact} leanBack={leanBack} seekRequest={seekRequest} onRestore={onRestore} onClose={onClose} onExitLeanBack={exitLeanBack} onPrevious={onPrevious} onNext={onNext} onPlaybackEnded={onPlaybackEnded} onMiniPlayerMoveStart={(event) => startMiniPlayerGesture("move", event)} onMiniPlayerMoveKey={handleMiniPlayerMoveKey} onMiniPlayerResizeStart={(event) => startMiniPlayerGesture("resize", event)} onMiniPlayerResizeKey={handleMiniPlayerResizeKey} onMiniPlayerReset={resetMiniPlayerLayout} />
         <section className={`${compact || leanBack ? "hidden" : "block"} mt-5 border-b border-line/60 pb-6`} aria-labelledby="watch-title">
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div className="min-w-0 max-w-4xl"><h2 id="watch-title" className="text-[24px] font-semibold leading-tight tracking-[-0.035em] text-balance">{item.title}</h2><p className="mt-2 text-xs text-muted">{sourceName}{item.durationSeconds != null ? ` · ${formatDuration(item.durationSeconds)}` : ""}{item.container ? ` · ${item.container.toLocaleUpperCase()}` : ""}{item.width && item.height ? ` · ${item.width} × ${item.height}` : ""}</p></div>
@@ -2885,7 +3106,7 @@ function PlaybackPreparationStatus({ preparation, reencodeRequired, cancelling }
   </div>;
 }
 
-function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = false, seekRequest, onRestore, onClose, onExitLeanBack, onPrevious, onNext, onPlaybackEnded }: { item: LibraryItem; sourceName: string; compact?: boolean; leanBack?: boolean; seekRequest: TranscriptSeekRequest | null; onRestore?: () => void; onClose: () => void; onExitLeanBack?: () => void; onPrevious?: () => void; onNext?: () => void; onPlaybackEnded?: () => void }) {
+function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = false, seekRequest, onRestore, onClose, onExitLeanBack, onPrevious, onNext, onPlaybackEnded, onMiniPlayerMoveStart, onMiniPlayerMoveKey, onMiniPlayerResizeStart, onMiniPlayerResizeKey, onMiniPlayerReset }: { item: LibraryItem; sourceName: string; compact?: boolean; leanBack?: boolean; seekRequest: TranscriptSeekRequest | null; onRestore?: () => void; onClose: () => void; onExitLeanBack?: () => void; onPrevious?: () => void; onNext?: () => void; onPlaybackEnded?: () => void; onMiniPlayerMoveStart?: (event: ReactPointerEvent<HTMLElement>) => void; onMiniPlayerMoveKey?: (event: ReactKeyboardEvent<HTMLElement>) => void; onMiniPlayerResizeStart?: (event: ReactPointerEvent<HTMLElement>) => void; onMiniPlayerResizeKey?: (event: ReactKeyboardEvent<HTMLElement>) => void; onMiniPlayerReset?: () => void }) {
   const setError = useAppStore((state) => state.setError);
   const recordEmbeddedPlaybackEvidence = useAppStore((state) => state.recordEmbeddedPlaybackEvidence);
   const playbackFingerprint = embeddedPlaybackFingerprint(item);
@@ -3907,7 +4128,7 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
 
   return <><section ref={playerRef} className={`cinematic-player panel-shadow min-w-0 overflow-hidden border border-white/10 text-white ${compact ? "rounded-[10px] shadow-[0_28px_80px_rgb(0_0_0/0.58)]" : leanBack ? "flex min-h-0 flex-1 flex-col rounded-[16px] shadow-[0_30px_120px_rgb(0_0_0/0.8)]" : "flex max-h-[calc(100dvh-96px)] flex-col rounded-[12px]"}`} aria-label={`${leanBack ? "Lean-back player" : compact ? "Mini player" : "Playing"} ${item.title}`}>
     <header className={`flex items-center border-b border-white/10 bg-[linear-gradient(180deg,rgba(20,18,14,0.97),rgba(10,9,7,0.96))] shadow-[inset_0_1px_0_rgba(255,255,255,0.035)] backdrop-blur-xl ${compact ? "min-h-11 gap-1.5 px-2.5 py-1.5" : leanBack ? "min-h-14 gap-3 px-4 py-2" : "min-h-16 gap-3 px-4 py-2.5"}`}>
-      <div className="min-w-0 flex-1"><h1 className={`${compact ? "text-[11px]" : "text-sm"} truncate font-semibold`}>{item.title}</h1>{!compact ? <p className="mt-0.5 truncate text-[11px] text-white/55">{sourceName}{item.container ? ` · ${item.container.toLocaleUpperCase()}` : ""}{item.width && item.height ? ` · ${item.width} × ${item.height}` : ""}</p> : null}</div>
+      {compact ? <button className="flex min-w-0 flex-1 touch-none items-center gap-2 rounded-[7px] px-1.5 py-1 text-left text-white/65 transition hover:bg-white/[0.065] hover:text-white active:cursor-grabbing focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/75" style={{ cursor: "grab" }} onPointerDown={onMiniPlayerMoveStart} onKeyDown={onMiniPlayerMoveKey} onDoubleClick={onMiniPlayerReset} aria-label={`Move mini player for ${item.title}. Use arrow keys to move it; hold Shift for larger steps. Double-click to reset.`} title="Drag to move · Arrow keys move · Double-click resets"><GripHorizontal className="shrink-0 text-white/35" size={14} /><span className="truncate text-[11px] font-semibold">{item.title}</span></button> : <div className="min-w-0 flex-1"><h1 className="truncate text-sm font-semibold">{item.title}</h1><p className="mt-0.5 truncate text-[11px] text-white/55">{sourceName}{item.container ? ` · ${item.container.toLocaleUpperCase()}` : ""}{item.width && item.height ? ` · ${item.width} × ${item.height}` : ""}</p></div>}
       {embeddedMpvStatus?.available && !embeddedMpvSession ? <Button variant="ghost" className={`${compact ? "size-8 px-0" : ""} text-accent hover:text-accent`} disabled={embeddedMpvBusy} onClick={() => void playWithEmbeddedMpv()} aria-label="Use native libmpv player"><MonitorPlay size={15} />{compact ? null : " Use native player"}</Button> : null}
       {embeddedMpvSession ? <div className={`flex shrink-0 items-center ${compact ? "gap-1" : "gap-2"}`} aria-label="Native libmpv controls">
         {!compact ? <span className="inline-flex h-8 items-center gap-1.5 rounded-[8px] border border-accent/20 bg-accent/[0.08] px-2 text-[10px] font-semibold text-accent shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"><span className="size-1.5 rounded-full bg-accent shadow-[0_0_8px_rgb(var(--accent)/0.65)]" /> Native</span> : null}
@@ -3920,6 +4141,7 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
         <button className={`inline-flex h-9 shrink-0 items-center justify-center gap-1.5 rounded-[9px] border border-white/10 bg-white/[0.045] text-[11px] font-semibold text-white/65 transition-[background-color,border-color,color,transform] duration-150 hover:border-white/20 hover:bg-white/[0.09] hover:text-white active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/75 ${compact ? "w-9" : "px-2.5"}`} title="Switch to the WebView player" disabled={embeddedMpvBusy} onClick={() => void closeEmbeddedMpvPlayback()} aria-label="Switch to WebView player"><MonitorPlay size={14} strokeWidth={1.9} />{compact ? null : <span>Web player</span>}</button>
       </div> : null}
       <Button variant="ghost" className={`${compact ? "size-8 px-0" : "h-9 rounded-[9px] border-white/10 bg-white/[0.035] px-3 text-[11px]"} shrink-0 text-white/65 hover:border-white/20 hover:bg-white/[0.08] hover:text-white`} onClick={() => void openExternal()} aria-label="Open in system player"><ExternalLink size={14} strokeWidth={1.9} />{compact ? null : " System player"}</Button>
+      {compact ? <button className={`${nativeControlClass} touch-none cursor-ew-resize`} onPointerDown={onMiniPlayerResizeStart} onKeyDown={onMiniPlayerResizeKey} aria-label="Resize mini player. Drag horizontally or use arrow keys; hold Shift for larger steps." title="Drag horizontally to resize · Arrow keys resize"><Scaling size={15} /></button> : null}
       {compact ? <button className={nativeControlClass} onClick={onRestore} aria-label="Return to full watch page" title="Restore full player"><Maximize size={15} /></button> : <button className="grid size-9 shrink-0 place-items-center rounded-[9px] border border-transparent text-white/60 transition hover:border-white/10 hover:bg-white/[0.07] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70" onClick={toggleFullscreen} aria-label="Toggle fullscreen" title="Fullscreen"><Maximize size={16} strokeWidth={1.9} /></button>}
       {compact ? <button className={nativeControlClass} onClick={closePlayer} aria-label="Close mini player" title="Close player"><X size={16} /></button> : null}
     </header>
