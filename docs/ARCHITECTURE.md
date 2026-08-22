@@ -201,6 +201,8 @@ Migration `0019_library_smart_discovery.sql` adds a trigger-maintained FTS5 tabl
 
 The comparison workspace stores only an ephemeral ordered set of at most four catalog item IDs in Zustand. It does not persist media paths or playback URLs. Each tile independently requests the existing Rust playback preflight and session commands, and Rust continues to validate media kind, availability, paths, compatibility consent, cache limits, and system-player access. Shared play/pause/seek and audio-focus behavior operates on already-authorized HTML video elements. Unmount releases every Rust playback registration; compatibility generation remains serialized by the media-server lock.
 
+Subtitle Center continues to serve validated same-stem WebVTT sidecars through the tokenized loopback media server. Embedded text subtitles are inspected only after the user opens Subtitle Center; a narrow Tauri command resolves the catalog item, rejects missing or symlink sources, limits accepted text codecs and track count, and converts each selected stream to bounded WebVTT data with FFmpeg argument arrays. React receives caption data but never an arbitrary source path.
+
 ## Media organizer boundary
 
 The Library can index multiple user-selected folders independently of download destinations. Sources, durable scan jobs, and catalog items are persisted in SQLite. A Rust-owned scanner performs bounded directory walks, ignores symlinks by default, classifies supported video and image extensions, and emits normalized progress events. Files remain in place; scanning and record removal never mutate external media.

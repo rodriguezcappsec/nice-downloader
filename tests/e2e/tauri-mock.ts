@@ -37,6 +37,7 @@ export async function installTauriMock(page: Page) {
         case "list_continue_watching":
         case "list_library_watch_later":
         case "list_recently_watched": return [];
+        case "load_library_embedded_subtitles": return [];
         case "get_default_destination": return "/tmp";
         case "get_engine_preferences": return { browserCookieSource: "none", browserProfile: null, proxyUrl: null, enableImpersonation: true, bandwidthLimitKib: null };
         case "get_queue_snapshot": return { settings: { concurrentDownloads: 2, paused: false, notifyOnCompletion: true, completionAction: "none" }, orderedJobIds: [], activeJobIds: [], pauseSupported: true, completionNotificationsSupported: true };

@@ -287,6 +287,8 @@ Status: implemented on `feat/library-creative-workspaces`.
 
 Acceptance: mark and revisit a timestamp, save and export a range without changing the original, generate a storyboard, seek from a frame, relaunch with moments intact, and restore them from backup.
 
+Subtitle Center keeps sidecar and embedded text captions local. On demand, FFprobe identifies a bounded set of convertible embedded streams and FFmpeg emits size- and time-bounded WebVTT data without exposing source paths. Users can explicitly select or disable a track and adjust offset, size, color, background, and vertical placement without changing the original media or subtitle file. Bitmap subtitle streams remain excluded because they cannot be represented faithfully as WebVTT text.
+
 ## Milestone 18 - Saved comparison sessions and review annotations
 
 Status: implemented on `feat/library-creative-workspaces`.

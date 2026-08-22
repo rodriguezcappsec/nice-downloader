@@ -61,7 +61,7 @@ import {
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { Button, Field, Input, Select, Textarea } from "../../components/ui";
 import { formatBytes, formatDuration } from "../../lib/format";
 import { assessEmbeddedCompatibility, embeddedPlaybackFingerprint, formatMediaCodec } from "../../lib/media-compatibility";
@@ -111,6 +111,7 @@ import type {
   LibrarySmartView,
   LibrarySmartViewQuery,
   LibraryStoryboard,
+  LibrarySubtitleTrack,
   LibraryWatchState,
   LibraryQueryRequest,
   LibraryQueryResult,
@@ -138,6 +139,10 @@ type MiniPlayerGesture = {
   previousCursor: string;
   previousUserSelect: string;
 };
+type SubtitlePosition = "bottom" | "middle" | "top";
+type SubtitleColor = "white" | "yellow";
+type SubtitleBackground = "none" | "soft" | "strong";
+type SubtitleCueOrigin = { startTime: number; endTime: number; line: number | "auto"; snapToLines: boolean };
 const LIBRARY_PAGE_SIZE = 60;
 const WATCH_BROWSE_PAGE_SIZE = 24;
 const MINI_PLAYER_LAYOUT_KEY = "nice-downloader.mini-player-layout";
@@ -3169,6 +3174,7 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
   const livePlaybackShouldPlay = useRef(false);
   const embeddedMpvStopRequested = useRef(false);
   const nativeInitializationItemId = useRef(item.id);
+  const subtitleCueOrigins = useRef(new WeakMap<TextTrackCue, SubtitleCueOrigin>());
   const [session, setSession] = useState<LibraryPlaybackSession | null>(null);
   const [preflight, setPreflight] = useState<LibraryPlaybackPreflight | null>(null);
   const [consent, setConsent] = useState<LibraryPlaybackPreflight | null>(null);
@@ -3198,6 +3204,17 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
   const [previewStoryboard, setPreviewStoryboard] = useState<LibraryStoryboard | null>(null);
   const [previewStoryboardBusy, setPreviewStoryboardBusy] = useState(false);
   const [previewStoryboardUnavailable, setPreviewStoryboardUnavailable] = useState(false);
+  const [subtitleCenterOpen, setSubtitleCenterOpen] = useState(false);
+  const [subtitleTracks, setSubtitleTracks] = useState<LibrarySubtitleTrack[]>([]);
+  const [embeddedSubtitleBusy, setEmbeddedSubtitleBusy] = useState(false);
+  const [embeddedSubtitleScanned, setEmbeddedSubtitleScanned] = useState(false);
+  const [embeddedSubtitleMessage, setEmbeddedSubtitleMessage] = useState<string | null>(null);
+  const [selectedSubtitleIndex, setSelectedSubtitleIndex] = useState(-1);
+  const [subtitleOffsetSeconds, setSubtitleOffsetSeconds] = useState(0);
+  const [subtitleSizePercent, setSubtitleSizePercent] = useState(100);
+  const [subtitlePosition, setSubtitlePosition] = useState<SubtitlePosition>("bottom");
+  const [subtitleColor, setSubtitleColor] = useState<SubtitleColor>("white");
+  const [subtitleBackground, setSubtitleBackground] = useState<SubtitleBackground>("soft");
 
   function recordDirectPlaybackEvidence(evidence: "played" | "failed") {
     if (!session || session.compatibilityMode || session.liveTranscode) return;
@@ -3232,6 +3249,14 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
     setPreviewStoryboard(null);
     setPreviewStoryboardBusy(false);
     setPreviewStoryboardUnavailable(false);
+    setSubtitleCenterOpen(false);
+    setSubtitleTracks([]);
+    setEmbeddedSubtitleBusy(false);
+    setEmbeddedSubtitleScanned(false);
+    setEmbeddedSubtitleMessage(null);
+    setSelectedSubtitleIndex(-1);
+    setSubtitleOffsetSeconds(0);
+    subtitleCueOrigins.current = new WeakMap<TextTrackCue, SubtitleCueOrigin>();
     webPlaybackHandoff.current = null;
     hlsFallbackAttempted.current = false;
     liveFallbackAttempted.current = false;
@@ -3793,6 +3818,76 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
       .finally(() => setPreviewStoryboardBusy(false));
   }
 
+  function applySubtitleSettings() {
+    const video = videoRef.current;
+    if (!video || !session) return;
+    for (let index = 0; index < video.textTracks.length; index += 1) {
+      const textTrack = video.textTracks[index];
+      const selected = index === selectedSubtitleIndex;
+      textTrack.mode = selected ? "showing" : "disabled";
+      if (!selected || !textTrack.cues) continue;
+      for (const cue of Array.from(textTrack.cues)) {
+        let origin = subtitleCueOrigins.current.get(cue);
+        if (!origin) {
+          const visualCue = typeof VTTCue !== "undefined" && cue instanceof VTTCue ? cue : null;
+          origin = {
+            startTime: cue.startTime,
+            endTime: cue.endTime,
+            line: visualCue?.line ?? "auto",
+            snapToLines: visualCue?.snapToLines ?? true,
+          };
+          subtitleCueOrigins.current.set(cue, origin);
+        }
+        cue.startTime = Math.max(0, origin.startTime - session.streamStartSeconds + subtitleOffsetSeconds);
+        cue.endTime = Math.max(cue.startTime + 0.05, origin.endTime - session.streamStartSeconds + subtitleOffsetSeconds);
+        if (typeof VTTCue !== "undefined" && cue instanceof VTTCue) {
+          cue.snapToLines = false;
+          cue.line = subtitlePosition === "top" ? 12 : subtitlePosition === "middle" ? 50 : 88;
+        }
+      }
+    }
+  }
+
+  function onSubtitleTrackLoaded() {
+    window.requestAnimationFrame(applySubtitleSettings);
+  }
+
+  useEffect(() => {
+    if (!session) return;
+    setSubtitleTracks(session.subtitles);
+    setSelectedSubtitleIndex(-1);
+    setEmbeddedSubtitleScanned(false);
+    setEmbeddedSubtitleMessage(null);
+  }, [session?.item.id]);
+
+  function toggleSubtitleCenter() {
+    const opening = !subtitleCenterOpen;
+    setSubtitleCenterOpen(opening);
+    if (!opening || embeddedSubtitleScanned || embeddedSubtitleBusy) return;
+    setEmbeddedSubtitleBusy(true);
+    setEmbeddedSubtitleMessage(null);
+    void api.loadLibraryEmbeddedSubtitles(item.id)
+      .then((embedded) => {
+        setSubtitleTracks((current) => [...current, ...embedded.filter((track) => !current.some((candidate) => candidate.url === track.url))]);
+        setEmbeddedSubtitleMessage(embedded.length ? `${embedded.length} embedded text track${embedded.length === 1 ? "" : "s"} ready.` : "No compatible embedded text subtitles were found.");
+      })
+      .catch((error) => setEmbeddedSubtitleMessage(normalizeError(error).message))
+      .finally(() => {
+        setEmbeddedSubtitleBusy(false);
+        setEmbeddedSubtitleScanned(true);
+      });
+  }
+
+  useEffect(() => {
+    applySubtitleSettings();
+  }, [selectedSubtitleIndex, session?.streamStartSeconds, session?.url, subtitleOffsetSeconds, subtitlePosition, subtitleTracks]);
+
+  const subtitleVideoStyle = {
+    "--subtitle-size": `${subtitleSizePercent}%`,
+    "--subtitle-color": subtitleColor === "yellow" ? "#f6df78" : "#fffdf5",
+    "--subtitle-background": subtitleBackground === "none" ? "transparent" : subtitleBackground === "strong" ? "rgba(0, 0, 0, 0.88)" : "rgba(0, 0, 0, 0.62)",
+  } as CSSProperties;
+
   function toggleFullscreen() {
     if (document.fullscreenElement) void document.exitFullscreen();
     else if (playerRef.current) void playerRef.current.requestFullscreen();
@@ -4202,6 +4297,7 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
         <button className={`inline-flex h-9 shrink-0 items-center justify-center gap-1.5 rounded-[9px] border border-white/10 bg-white/[0.045] text-[11px] font-semibold text-white/65 transition-[background-color,border-color,color,transform] duration-150 hover:border-white/20 hover:bg-white/[0.09] hover:text-white active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/75 ${compact ? "w-9" : "px-2.5"}`} title="Switch to the WebView player" disabled={embeddedMpvBusy} onClick={() => void closeEmbeddedMpvPlayback()} aria-label="Switch to WebView player"><MonitorPlay size={14} strokeWidth={1.9} />{compact ? null : <span>Web player</span>}</button>
       </div> : null}
       <Button variant="ghost" className={`${compact ? "size-8 px-0" : "h-9 rounded-[9px] border-white/10 bg-white/[0.035] px-3 text-[11px]"} shrink-0 text-white/65 hover:border-white/20 hover:bg-white/[0.08] hover:text-white`} onClick={() => void openExternal()} aria-label="Open in system player"><ExternalLink size={14} strokeWidth={1.9} />{compact ? null : " System player"}</Button>
+      {compact && session && !embeddedMpvSession ? <button className={`${nativeControlClass} ${subtitleCenterOpen ? "bg-white/10 text-accent" : ""}`} onClick={toggleSubtitleCenter} aria-expanded={subtitleCenterOpen} aria-controls="subtitle-center" aria-label="Open Subtitle Center" title="Subtitle Center"><Captions size={15} /></button> : null}
       {compact ? <button className={`${nativeControlClass} touch-none cursor-ew-resize`} onPointerDown={onMiniPlayerResizeStart} onKeyDown={onMiniPlayerResizeKey} aria-label="Resize mini player. Drag horizontally or use arrow keys; hold Shift for larger steps." title="Drag horizontally to resize · Arrow keys resize"><Scaling size={15} /></button> : null}
       {compact ? <button className={nativeControlClass} onClick={onRestore} aria-label="Return to full watch page" title="Restore full player"><Maximize size={15} /></button> : <button className="grid size-9 shrink-0 place-items-center rounded-[9px] border border-transparent text-white/60 transition hover:border-white/10 hover:bg-white/[0.07] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70" onClick={toggleFullscreen} aria-label="Toggle fullscreen" title="Fullscreen"><Maximize size={16} strokeWidth={1.9} /></button>}
       {compact ? <button className={nativeControlClass} onClick={closePlayer} aria-label="Close mini player" title="Close player"><X size={16} /></button> : null}
@@ -4214,6 +4310,7 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
         {session && !playbackError && !nativeSession && !embeddedMpvSession ? <video
         ref={videoRef}
         className="h-full w-full max-h-full max-w-full bg-black object-contain shadow-[0_30px_100px_rgb(0_0_0/0.65)]"
+        style={subtitleVideoStyle}
         crossOrigin="anonymous"
         src={session.url}
         controls={!session.liveTranscode}
@@ -4229,7 +4326,7 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
         onEnded={() => { recordDirectPlaybackEvidence("played"); setIsPlaying(false); clearPlaybackWatchdog(); persistProgress(true); window.setTimeout(() => onPlaybackEnded?.(), 0); }}
         onError={() => { const video = videoRef.current; recordDirectPlaybackEvidence("failed"); clearPlaybackWatchdog(); if (advanceCompatibilitySource(video, true)) return; setLoading(false); setPlaybackError(createPlaybackError("embedded_playback_decode_failed", session.liveTranscode ? "The available H.264/AAC compatibility streams failed. Try libmpv, a cached playback copy, or your system player." : "The WebView does not support this file's container or codecs. The original file is unchanged and can still be opened with your system player.")); }}
       >
-        {session.subtitles.map((track) => <track key={`${track.url}:${session.streamStartSeconds}`} kind="subtitles" src={track.url} srcLang={track.language || "und"} label={track.label} onLoad={(event) => { if (!session.liveTranscode || session.streamStartSeconds <= 0) return; const cues = event.currentTarget.track.cues; if (!cues) return; for (const cue of Array.from(cues)) { cue.startTime = Math.max(0, cue.startTime - session.streamStartSeconds); cue.endTime = Math.max(0, cue.endTime - session.streamStartSeconds); } }} />)}
+        {subtitleTracks.map((track, index) => <track key={`${track.label}:${index}:${session.streamStartSeconds}`} kind="subtitles" src={track.url} srcLang={track.language || "und"} label={track.label} default={index === selectedSubtitleIndex} onLoad={onSubtitleTrackLoaded} />)}
       </video> : null}
     </div>
     {session?.liveTranscode ? <div className={`flex items-center gap-2 border-t border-white/10 bg-[#100e0b] ${compact ? "px-2 py-1.5" : "px-5 py-2"}`} aria-label="Live compatibility playback controls">
@@ -4239,9 +4336,22 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
       <span className="number-font text-[9px] text-white/45">Live compatibility stream</span>
     </div> : null}
     {(embeddedMpvSession || session) && !playbackError && !nativeSession ? <PlaybackPreviewTimeline currentTime={currentPosition} duration={playbackDuration} pendingTime={pendingNativeSeek} compact={compact} storyboard={previewStoryboard} storyboardBusy={previewStoryboardBusy} storyboardUnavailable={previewStoryboardUnavailable} onPreviewRequested={requestPreviewStoryboard} onPendingTime={setPendingNativeSeek} onCommit={commitNativeSeek} /> : null}
+    {subtitleCenterOpen && session && !embeddedMpvSession ? <section id="subtitle-center" className={`border-t border-white/10 bg-[linear-gradient(180deg,#15120e,#0d0c09)] ${compact ? "p-3" : "px-5 py-4"}`} aria-labelledby="subtitle-center-title">
+      <div className="flex items-start gap-3"><div className="grid size-8 shrink-0 place-items-center rounded-[7px] bg-accent/10 text-accent"><Captions size={15} /></div><div className="min-w-0 flex-1"><h2 id="subtitle-center-title" className="text-xs font-semibold text-white/85">Subtitle Center</h2>{!compact ? <p className="mt-1 text-[10px] leading-4 text-white/40">Choose a local sidecar track and tune its timing and appearance. The original subtitle file is never modified.</p> : null}</div><button className={nativeControlClass} onClick={() => setSubtitleCenterOpen(false)} aria-label="Close Subtitle Center"><X size={14} /></button></div>
+      <div className={`mt-3 grid gap-3 ${compact ? "grid-cols-2" : "sm:grid-cols-2 lg:grid-cols-5"}`}>
+        <label className={compact ? "col-span-2" : "lg:col-span-2"}><span className="text-[9px] font-semibold uppercase tracking-[0.1em] text-white/40">Track</span><Select className="mt-1 h-9 border-white/10 bg-white/5 text-xs text-white" value={selectedSubtitleIndex} onChange={(event) => setSelectedSubtitleIndex(Number(event.target.value))}><option value={-1}>Off</option>{subtitleTracks.map((track, index) => <option key={`${track.label}:${index}`} value={index}>{track.label}{track.language ? ` · ${track.language.toLocaleUpperCase()}` : ""}</option>)}</Select>{embeddedSubtitleBusy ? <span className="mt-1 flex items-center gap-1 text-[9px] text-white/40"><LoaderCircle className="animate-spin" size={10} /> Inspecting embedded tracks…</span> : embeddedSubtitleMessage ? <span className="mt-1 block text-[9px] leading-4 text-white/35">{embeddedSubtitleMessage}</span> : null}</label>
+        <label><span className="text-[9px] font-semibold uppercase tracking-[0.1em] text-white/40">Sync offset</span><div className="mt-1 flex"><Input className="h-9 rounded-r-none border-white/10 bg-white/5 text-xs text-white" type="number" min={-10} max={10} step={0.25} value={subtitleOffsetSeconds} onChange={(event) => setSubtitleOffsetSeconds(Math.min(10, Math.max(-10, Number(event.target.value) || 0)))} /><span className="grid h-9 place-items-center rounded-r-[8px] border border-l-0 border-white/10 bg-white/5 px-2 text-[9px] text-white/40">sec</span></div></label>
+        <label><span className="text-[9px] font-semibold uppercase tracking-[0.1em] text-white/40">Size</span><Select className="mt-1 h-9 border-white/10 bg-white/5 text-xs text-white" value={subtitleSizePercent} onChange={(event) => setSubtitleSizePercent(Number(event.target.value))}><option value={80}>Small</option><option value={100}>Standard</option><option value={125}>Large</option><option value={150}>Extra large</option></Select></label>
+        <label><span className="text-[9px] font-semibold uppercase tracking-[0.1em] text-white/40">Position</span><Select className="mt-1 h-9 border-white/10 bg-white/5 text-xs text-white" value={subtitlePosition} onChange={(event) => setSubtitlePosition(event.target.value as SubtitlePosition)}><option value="bottom">Bottom</option><option value="middle">Middle</option><option value="top">Top</option></Select></label>
+        <label><span className="text-[9px] font-semibold uppercase tracking-[0.1em] text-white/40">Text</span><Select className="mt-1 h-9 border-white/10 bg-white/5 text-xs text-white" value={subtitleColor} onChange={(event) => setSubtitleColor(event.target.value as SubtitleColor)}><option value="white">Ivory</option><option value="yellow">Warm yellow</option></Select></label>
+        <label><span className="text-[9px] font-semibold uppercase tracking-[0.1em] text-white/40">Background</span><Select className="mt-1 h-9 border-white/10 bg-white/5 text-xs text-white" value={subtitleBackground} onChange={(event) => setSubtitleBackground(event.target.value as SubtitleBackground)}><option value="none">None</option><option value="soft">Soft</option><option value="strong">Strong</option></Select></label>
+        <div className="flex items-end"><Button variant="ghost" className="h-9 w-full text-[10px] text-white/55" onClick={() => { setSubtitleOffsetSeconds(0); setSubtitleSizePercent(100); setSubtitlePosition("bottom"); setSubtitleColor("white"); setSubtitleBackground("soft"); }}>Reset tuning</Button></div>
+      </div>
+    </section> : null}
     <footer className={`${compact ? "hidden" : "flex"} flex-wrap items-center gap-3 border-t border-white/10 bg-[#100e0b] ${leanBack ? "justify-center px-5 py-4" : "px-5 py-3"}`}>
       {leanBack ? <><Button variant="ghost" className="h-14 min-w-32 text-base text-white/75" disabled={!onPrevious} onClick={() => changeVideo(onPrevious)}><SkipBack size={21} /> Previous</Button><Button className="h-14 min-w-44 text-base" disabled={(!videoRef.current && !embeddedMpvSession) || Boolean(playbackError) || Boolean(nativeSession)} onClick={togglePlayback}>{isPlaying ? <Pause size={22} /> : <Play size={22} fill="currentColor" />} {isPlaying ? "Pause" : "Play"}</Button><Button variant="ghost" className="h-14 min-w-32 text-base text-white/75" disabled={!onNext} onClick={() => changeVideo(onNext)}>Next <SkipForward size={21} /></Button><Button variant="secondary" className="h-14 min-w-28 border-white/10 bg-white/10 text-white" onClick={onExitLeanBack}><Minimize2 size={19} /> Exit</Button><p className="w-full text-center text-[11px] text-white/45">Gamepad: A/Start play · B exit · D-pad browse · LB/RB seek · Keyboard: Space/K · J/L · M · F · Esc</p></> : <><Button variant="ghost" className="h-9 text-white/70" disabled={!onPrevious} onClick={() => changeVideo(onPrevious)}><ChevronRight className="rotate-180" size={15} /> Previous</Button><Button variant="ghost" className="h-9 text-white/70" disabled={!onNext} onClick={() => changeVideo(onNext)}>Next <ChevronRight size={15} /></Button><span className="h-5 w-px bg-white/10" /><label className="flex items-center gap-2 text-xs text-white/55"><span>Speed</span><Select className="h-8 w-24 border-white/10 bg-white/5 text-xs text-white" value={playbackRate} onChange={(event) => { const rate = Number(event.target.value); setPlaybackRate(rate); if (embeddedMpvSession) void api.controlEmbeddedMpv({ action: "setRate", value: rate }).catch((error) => setError(normalizeError(error))); else if (videoRef.current) videoRef.current.playbackRate = rate; }}><option value={0.5}>0.5×</option><option value={0.75}>0.75×</option><option value={1}>1×</option><option value={1.25}>1.25×</option><option value={1.5}>1.5×</option><option value={2}>2×</option></Select></label><p className="ml-auto text-[10px] text-white/40">Space/K play · J/L seek · M mute · F fullscreen · Esc close</p></>}
       {resumedAt != null ? <p className="w-full text-[10px] text-accent" role="status">{seekRequest?.itemId === item.id ? "Started from transcript" : "Resumed"} at {formatDuration(resumedAt)}</p> : null}
+      {!leanBack && session && !embeddedMpvSession ? <Button variant="ghost" className={`h-8 text-[10px] ${subtitleCenterOpen ? "text-accent" : "text-white/55"}`} onClick={toggleSubtitleCenter} aria-expanded={subtitleCenterOpen} aria-controls="subtitle-center"><Captions size={13} /> Subtitles · {selectedSubtitleIndex < 0 ? "Off" : subtitleTracks[selectedSubtitleIndex]?.label || "On"}</Button> : null}
       {session?.compatibilityMode ? <p className="w-full text-[10px] text-accent" role="status">{session.compatibilityTranscoded ? "Using an H.264/AAC embedded-playback copy." : preflight?.compatibilityCached ? "Using an existing cached compatibility copy. AV1 timing is optimized for the embedded player." : "A lossless AV1 timing copy was created for this playback."} The original is unchanged.</p> : null}
       {session?.liveTranscode ? <p className="w-full text-[10px] text-accent" role="status">{session.segmentedStream ? "Using temporary HLS segments for resilient H.264/AAC playback." : "Streaming a fragmented H.264/AAC compatibility feed without a completed copy."} The original is unchanged.</p> : null}
       {nativeFallbackMessage && session ? <p className="w-full text-[10px] text-white/45" role="status">Native libmpv was unavailable for this playback. Using the web player. {nativeFallbackMessage}</p> : null}

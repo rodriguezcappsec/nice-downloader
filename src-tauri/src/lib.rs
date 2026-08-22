@@ -15,6 +15,7 @@ mod post_download_recipes;
 mod queue;
 mod semantic_transcripts;
 mod subscriptions;
+mod subtitles;
 mod theme_analysis;
 mod transcripts;
 mod transformations;
@@ -337,6 +338,7 @@ pub fn run() {
             commands::set_library_curation_decision,
             commands::export_library_moments,
             commands::generate_library_storyboard,
+            commands::load_library_embedded_subtitles,
             commands::start_library_clip_export,
             commands::apply_library_bulk_action,
             commands::list_library_changes,

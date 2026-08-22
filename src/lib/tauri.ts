@@ -77,6 +77,7 @@ import type {
   LibraryPlaybackCacheStatus,
   LibraryPlaybackSession,
   LibraryPlaybackState,
+  LibrarySubtitleTrack,
   LibraryTranscriptIndexStatus,
   LibraryTranscriptMatch,
   LibraryLocalInferenceJob,
@@ -359,6 +360,8 @@ export const api = {
     invoke<number>("export_library_moments", { request }),
   generateLibraryStoryboard: (itemId: string, frameCount = 12) =>
     invoke<LibraryStoryboard>("generate_library_storyboard", { itemId, frameCount }),
+  loadLibraryEmbeddedSubtitles: (itemId: string) =>
+    invoke<LibrarySubtitleTrack[]>("load_library_embedded_subtitles", { itemId }),
   startLibraryClipExport: (request: StartLibraryClipExportRequest) =>
     invoke<TransformationTask>("start_library_clip_export", { request }),
   applyLibraryBulkAction: (ids: string[], action: LibraryBulkAction) => invoke<LibraryItem[]>("apply_library_bulk_action", { ids, action }),

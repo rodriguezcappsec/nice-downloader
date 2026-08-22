@@ -1087,6 +1087,14 @@ pub async fn generate_library_storyboard(
 }
 
 #[tauri::command]
+pub async fn load_library_embedded_subtitles(
+    database: State<'_, Database>,
+    item_id: String,
+) -> Result<Vec<crate::models::LibrarySubtitleTrack>, AppError> {
+    crate::subtitles::load_embedded_subtitles(&database, &item_id).await
+}
+
+#[tauri::command]
 pub async fn start_library_clip_export(
     app: AppHandle,
     database: State<'_, Database>,
