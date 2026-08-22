@@ -77,6 +77,7 @@ import type {
   LibraryPlaybackCacheStatus,
   LibraryPlaybackSession,
   LibraryPlaybackState,
+  LibraryVideoDisplaySettings,
   LibrarySubtitleTrack,
   LibraryTranscriptIndexStatus,
   LibraryTranscriptMatch,
@@ -93,6 +94,7 @@ import type {
   NativePlaybackStatus,
   LibraryWatchState,
   SaveLibraryPlaybackRequest,
+  SaveLibraryVideoDisplaySettingsRequest,
   LibraryCacheResult,
   LibraryBulkAction,
   LibraryBulkMovePlan,
@@ -291,6 +293,12 @@ export const api = {
   releaseLibraryPlayback: (id: string) => invoke<void>("release_library_playback", { id }),
   saveLibraryPlaybackProgress: (request: SaveLibraryPlaybackRequest) =>
     invoke<LibraryPlaybackState>("save_library_playback_progress", { request }),
+  getLibraryVideoDisplaySettings: (id: string) =>
+    invoke<LibraryVideoDisplaySettings | null>("get_library_video_display_settings", { id }),
+  saveLibraryVideoDisplaySettings: (request: SaveLibraryVideoDisplaySettingsRequest) =>
+    invoke<LibraryVideoDisplaySettings>("save_library_video_display_settings", { request }),
+  forgetLibraryVideoDisplaySettings: (id: string) =>
+    invoke<void>("forget_library_video_display_settings", { id }),
   listContinueWatching: (limit = 12) =>
     invoke<LibraryPlaybackEntry[]>("list_continue_watching", { limit }),
   getLibraryWatchState: (id: string) =>

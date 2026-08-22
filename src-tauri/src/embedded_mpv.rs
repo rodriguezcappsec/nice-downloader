@@ -3,7 +3,7 @@ use crate::{
     errors::AppError,
     models::{
         EmbeddedMpvBounds, EmbeddedMpvControlRequest, EmbeddedMpvSession, EmbeddedMpvStatus,
-        LibraryMediaKind,
+        LibraryMediaKind, LibraryVideoDisplaySettings, LibraryVideoFit,
     },
 };
 use tauri::WebviewWindow;
@@ -321,6 +321,9 @@ mod linux {
             EmbeddedMpvControl::SetMuted => {
                 matches!(request.value, Some(0.0 | 1.0))
             }
+            EmbeddedMpvControl::SetDisplay => {
+                request.value.is_none() && request.display.is_some_and(display_settings_are_valid)
+            }
         };
         if valid {
             Ok(())
@@ -330,6 +333,31 @@ mod linux {
                 "The embedded playback control is invalid.",
             ))
         }
+    }
+
+    fn display_settings_are_valid(settings: LibraryVideoDisplaySettings) -> bool {
+        let values = [
+            settings.zoom,
+            settings.pan_x,
+            settings.pan_y,
+            settings.brightness,
+            settings.contrast,
+            settings.saturation,
+            settings.gamma,
+        ];
+        values.iter().all(|value| value.is_finite())
+            && (1.0..=3.0).contains(&settings.zoom)
+            && (-1.0..=1.0).contains(&settings.pan_x)
+            && (-1.0..=1.0).contains(&settings.pan_y)
+            && [0, 90, 180, 270].contains(&settings.rotation)
+            && [
+                settings.brightness,
+                settings.contrast,
+                settings.saturation,
+                settings.gamma,
+            ]
+            .iter()
+            .all(|value| (-100.0..=100.0).contains(value))
     }
 
     fn set_unavailable(shared: &Arc<Shared>, detail: String) {
@@ -647,6 +675,11 @@ mod linux {
                 EmbeddedMpvControl::SetMuted => {
                     player.command(&["set", "mute", if value >= 0.5 { "yes" } else { "no" }])
                 }
+                EmbeddedMpvControl::SetDisplay => player.apply_display_settings(
+                    request
+                        .display
+                        .expect("validated display control must include settings"),
+                ),
             };
             result.map_err(|error| AppError::new("embedded_mpv_control_failed", error))
         }
@@ -1034,6 +1067,7 @@ mod linux {
         force_render: bool,
         playback_started: bool,
         decoded_frame_available: bool,
+        display_flip_filter: Option<(bool, bool)>,
     }
 
     enum PlayerTerminal {
@@ -1061,6 +1095,7 @@ mod linux {
                     force_render: true,
                     playback_started: false,
                     decoded_frame_available: false,
+                    display_flip_filter: None,
                 };
                 for (name, value) in [
                     ("terminal", "no"),
@@ -1162,6 +1197,56 @@ mod linux {
             (result >= 0)
                 .then_some(())
                 .ok_or_else(|| self.api.error(result, "mpv_command"))
+        }
+
+        fn apply_display_settings(
+            &mut self,
+            settings: LibraryVideoDisplaySettings,
+        ) -> Result<(), String> {
+            let (video_unscaled, aspect_override, panscan) = match settings.fit {
+                LibraryVideoFit::Fit => ("no", "no", "0"),
+                LibraryVideoFit::Fill => ("no", "no", "1"),
+                LibraryVideoFit::Original => ("yes", "no", "0"),
+                LibraryVideoFit::Stretch => ("no", "0", "0"),
+            };
+            let zoom = settings.zoom.log2();
+            let commands = [
+                ("video-unscaled", video_unscaled.to_owned()),
+                ("video-aspect-override", aspect_override.to_owned()),
+                ("panscan", panscan.to_owned()),
+                ("video-zoom", format!("{zoom:.4}")),
+                ("video-pan-x", format!("{:.4}", settings.pan_x)),
+                ("video-pan-y", format!("{:.4}", settings.pan_y)),
+                ("video-rotate", settings.rotation.to_string()),
+                ("brightness", format!("{:.2}", settings.brightness)),
+                ("contrast", format!("{:.2}", settings.contrast)),
+                ("saturation", format!("{:.2}", settings.saturation)),
+                ("gamma", format!("{:.2}", settings.gamma)),
+            ];
+            let mut errors = Vec::new();
+            for (property, value) in commands {
+                if let Err(error) = self.command(&["set", property, &value]) {
+                    errors.push(error);
+                }
+            }
+            let flip_state = (settings.flip_horizontal, settings.flip_vertical);
+            if self.display_flip_filter != Some(flip_state) {
+                let flip_result = match flip_state {
+                    (false, false) => self.command(&["vf", "clr"]),
+                    (true, false) => self.command(&["vf", "set", "hflip"]),
+                    (false, true) => self.command(&["vf", "set", "vflip"]),
+                    (true, true) => self.command(&["vf", "set", "hflip,vflip"]),
+                };
+                match flip_result {
+                    Ok(()) => self.display_flip_filter = Some(flip_state),
+                    Err(error) => errors.push(error),
+                }
+            }
+            if errors.is_empty() {
+                Ok(())
+            } else {
+                Err(errors.join("; "))
+            }
         }
 
         fn get_double(&self, name: &str) -> Option<f64> {
@@ -1432,32 +1517,38 @@ mod linux {
             assert!(validate_control(EmbeddedMpvControlRequest {
                 action: EmbeddedMpvControl::SeekRelative,
                 value: Some(-10.0),
+                display: None,
             })
             .is_ok());
             assert!(validate_control(EmbeddedMpvControlRequest {
                 action: EmbeddedMpvControl::SetRate,
                 value: Some(2.0),
+                display: None,
             })
             .is_ok());
             assert!(validate_control(EmbeddedMpvControlRequest {
                 action: EmbeddedMpvControl::SetVolume,
                 value: Some(75.0),
+                display: None,
             })
             .is_ok());
             assert!(validate_control(EmbeddedMpvControlRequest {
                 action: EmbeddedMpvControl::FrameStep,
                 value: None,
+                display: None,
             })
             .is_ok());
             assert!(validate_control(EmbeddedMpvControlRequest {
                 action: EmbeddedMpvControl::FrameBackStep,
                 value: Some(1.0),
+                display: None,
             })
             .is_err());
             assert_eq!(
                 validate_control(EmbeddedMpvControlRequest {
                     action: EmbeddedMpvControl::SetRate,
                     value: Some(8.0),
+                    display: None,
                 })
                 .expect_err("rate must be bounded")
                 .code,
@@ -1467,11 +1558,39 @@ mod linux {
                 validate_control(EmbeddedMpvControlRequest {
                     action: EmbeddedMpvControl::SetVolume,
                     value: Some(101.0),
+                    display: None,
                 })
                 .expect_err("volume must be bounded")
                 .code,
                 "invalid_embedded_mpv_control"
             );
+            assert!(validate_control(EmbeddedMpvControlRequest {
+                action: EmbeddedMpvControl::SetDisplay,
+                value: None,
+                display: Some(LibraryVideoDisplaySettings {
+                    fit: LibraryVideoFit::Fill,
+                    zoom: 1.75,
+                    pan_x: 0.2,
+                    pan_y: -0.1,
+                    rotation: 270,
+                    flip_horizontal: true,
+                    flip_vertical: false,
+                    brightness: 10.0,
+                    contrast: -5.0,
+                    saturation: 15.0,
+                    gamma: 4.0,
+                }),
+            })
+            .is_ok());
+            assert!(validate_control(EmbeddedMpvControlRequest {
+                action: EmbeddedMpvControl::SetDisplay,
+                value: None,
+                display: Some(LibraryVideoDisplaySettings {
+                    zoom: 4.0,
+                    ..LibraryVideoDisplaySettings::default()
+                }),
+            })
+            .is_err());
         }
 
         #[test]

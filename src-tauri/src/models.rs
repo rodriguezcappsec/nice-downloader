@@ -1157,6 +1157,57 @@ pub struct SaveLibraryPlaybackRequest {
     pub completed: bool,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum LibraryVideoFit {
+    #[default]
+    Fit,
+    Fill,
+    Original,
+    Stretch,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryVideoDisplaySettings {
+    pub fit: LibraryVideoFit,
+    pub zoom: f64,
+    pub pan_x: f64,
+    pub pan_y: f64,
+    pub rotation: i16,
+    pub flip_horizontal: bool,
+    pub flip_vertical: bool,
+    pub brightness: f64,
+    pub contrast: f64,
+    pub saturation: f64,
+    pub gamma: f64,
+}
+
+impl Default for LibraryVideoDisplaySettings {
+    fn default() -> Self {
+        Self {
+            fit: LibraryVideoFit::Fit,
+            zoom: 1.0,
+            pan_x: 0.0,
+            pan_y: 0.0,
+            rotation: 0,
+            flip_horizontal: false,
+            flip_vertical: false,
+            brightness: 0.0,
+            contrast: 0.0,
+            saturation: 0.0,
+            gamma: 0.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveLibraryVideoDisplaySettingsRequest {
+    pub item_id: String,
+    pub settings: LibraryVideoDisplaySettings,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LibraryPlaybackEntry {
@@ -1305,6 +1356,7 @@ pub enum EmbeddedMpvControl {
     SetRate,
     SetVolume,
     SetMuted,
+    SetDisplay,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -1312,6 +1364,7 @@ pub enum EmbeddedMpvControl {
 pub struct EmbeddedMpvControlRequest {
     pub action: EmbeddedMpvControl,
     pub value: Option<f64>,
+    pub display: Option<LibraryVideoDisplaySettings>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
