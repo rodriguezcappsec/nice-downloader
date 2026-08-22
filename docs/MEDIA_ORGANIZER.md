@@ -282,6 +282,7 @@ Status: implemented on `feat/library-creative-workspaces`.
 - Watch captures the playhead as a point or bounded clip range with a label, note, and color, then seeks back to any saved moment.
 - Range moments start cancellable FFmpeg stream-copy exports through Transformations. Rust resolves the source path; React only provides a native-dialog output path.
 - Rust generates 4–24 storyboard JPEG frames from a validated regular video. Generation is serialized, timeout-bounded, cached by item ID and modification stamp, and returned without exposing source paths.
+- The Watch timeline lazily reuses that storyboard cache on first pointer hover or keyboard focus, showing the nearest local frame and timestamp without delaying initial playback. The same accessible timeline drives direct WebView, compatibility-stream, and embedded-libmpv seeking.
 - Version 3 Library backup/restore includes validated moments, remaps catalog references, rejects malformed timing before writing, and remains compatible with versions 1 and 2.
 
 Acceptance: mark and revisit a timestamp, save and export a range without changing the original, generate a storyboard, seek from a frame, relaunch with moments intact, and restore them from backup.

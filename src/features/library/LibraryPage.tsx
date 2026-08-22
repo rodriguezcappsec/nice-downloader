@@ -110,6 +110,7 @@ import type {
   LibraryTranscriptMatch,
   LibrarySmartView,
   LibrarySmartViewQuery,
+  LibraryStoryboard,
   LibraryWatchState,
   LibraryQueryRequest,
   LibraryQueryResult,
@@ -3106,6 +3107,49 @@ function PlaybackPreparationStatus({ preparation, reencodeRequired, cancelling }
   </div>;
 }
 
+function PlaybackPreviewTimeline({ currentTime, duration, pendingTime, compact, storyboard, storyboardBusy, storyboardUnavailable, onPreviewRequested, onPendingTime, onCommit }: {
+  currentTime: number;
+  duration: number;
+  pendingTime: number | null;
+  compact: boolean;
+  storyboard: LibraryStoryboard | null;
+  storyboardBusy: boolean;
+  storyboardUnavailable: boolean;
+  onPreviewRequested: () => void;
+  onPendingTime: (seconds: number | null) => void;
+  onCommit: (seconds: number) => void;
+}) {
+  const [hover, setHover] = useState<{ seconds: number; percent: number } | null>(null);
+  const safeDuration = Math.max(0.1, Number.isFinite(duration) ? duration : 0.1);
+  const value = Math.min(Math.max(0, pendingTime ?? currentTime), safeDuration);
+  const previewFrame = hover && storyboard?.frames.length
+    ? storyboard.frames.reduce((nearest, frame) => Math.abs(frame.timeSeconds - hover.seconds) < Math.abs(nearest.timeSeconds - hover.seconds) ? frame : nearest)
+    : null;
+
+  function updateHover(event: ReactPointerEvent<HTMLDivElement>) {
+    const rect = event.currentTarget.getBoundingClientRect();
+    if (rect.width <= 0) return;
+    const percent = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
+    setHover({ percent, seconds: percent * safeDuration });
+  }
+
+  return <div className={`relative border-t border-white/10 bg-[#100e0b] ${compact ? "px-2.5 py-1.5" : "px-5 py-2.5"}`} aria-label="Playback timeline with frame previews">
+    <div className="flex items-center gap-2">
+      <span className={`${compact ? "text-[9px]" : "text-[10px]"} number-font min-w-9 text-right text-white/55`}>{formatDuration(value)}</span>
+      <div className="relative min-w-0 flex-1" onPointerEnter={onPreviewRequested} onPointerMove={updateHover} onPointerLeave={() => setHover(null)}>
+        {hover ? <div className="pointer-events-none absolute bottom-[calc(100%+10px)] z-20 -translate-x-1/2 overflow-hidden rounded-[8px] border border-white/15 bg-[#090806] shadow-[0_16px_45px_rgb(0_0_0/0.65)]" style={{ left: `${Math.min(90, Math.max(10, hover.percent * 100))}%` }} aria-hidden="true">
+          <div className={`${compact ? "w-28" : "w-40"} aspect-video bg-black`}>
+            {previewFrame ? <img className="h-full w-full object-cover" src={previewFrame.imageDataUrl} alt="" /> : <div className="grid h-full place-items-center text-white/35">{storyboardBusy ? <LoaderCircle className="animate-spin" size={15} /> : <Film size={17} />}</div>}
+          </div>
+          <div className="number-font flex items-center justify-between gap-3 px-2 py-1 text-[9px] text-white/65"><span>{formatDuration(hover.seconds)}</span><span className="text-white/35">{storyboardUnavailable ? "Preview unavailable" : storyboardBusy ? "Preparing…" : previewFrame ? "Frame preview" : "Hover preview"}</span></div>
+        </div> : null}
+        <input className="h-5 w-full cursor-pointer accent-[var(--color-accent)]" type="range" min={0} max={safeDuration} step={0.1} value={value} aria-label="Seek through video with frame previews" aria-valuetext={`${formatDuration(value)} of ${formatDuration(duration)}`} onFocus={onPreviewRequested} onChange={(event) => onPendingTime(Number(event.currentTarget.value))} onPointerUp={(event) => onCommit(Number(event.currentTarget.value))} onPointerCancel={() => onPendingTime(null)} onKeyUp={(event) => onCommit(Number(event.currentTarget.value))} onBlur={(event) => { if (pendingTime != null) onCommit(Number(event.currentTarget.value)); }} />
+      </div>
+      <span className={`${compact ? "text-[9px]" : "text-[10px]"} number-font min-w-9 text-white/45`}>{formatDuration(duration)}</span>
+    </div>
+  </div>;
+}
+
 function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = false, seekRequest, onRestore, onClose, onExitLeanBack, onPrevious, onNext, onPlaybackEnded, onMiniPlayerMoveStart, onMiniPlayerMoveKey, onMiniPlayerResizeStart, onMiniPlayerResizeKey, onMiniPlayerReset }: { item: LibraryItem; sourceName: string; compact?: boolean; leanBack?: boolean; seekRequest: TranscriptSeekRequest | null; onRestore?: () => void; onClose: () => void; onExitLeanBack?: () => void; onPrevious?: () => void; onNext?: () => void; onPlaybackEnded?: () => void; onMiniPlayerMoveStart?: (event: ReactPointerEvent<HTMLElement>) => void; onMiniPlayerMoveKey?: (event: ReactKeyboardEvent<HTMLElement>) => void; onMiniPlayerResizeStart?: (event: ReactPointerEvent<HTMLElement>) => void; onMiniPlayerResizeKey?: (event: ReactKeyboardEvent<HTMLElement>) => void; onMiniPlayerReset?: () => void }) {
   const setError = useAppStore((state) => state.setError);
   const recordEmbeddedPlaybackEvidence = useAppStore((state) => state.recordEmbeddedPlaybackEvidence);
@@ -3151,6 +3195,9 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
   const [currentPosition, setCurrentPosition] = useState(0);
   const [playbackDuration, setPlaybackDuration] = useState(item.durationSeconds || 0);
   const [pendingNativeSeek, setPendingNativeSeek] = useState<number | null>(null);
+  const [previewStoryboard, setPreviewStoryboard] = useState<LibraryStoryboard | null>(null);
+  const [previewStoryboardBusy, setPreviewStoryboardBusy] = useState(false);
+  const [previewStoryboardUnavailable, setPreviewStoryboardUnavailable] = useState(false);
 
   function recordDirectPlaybackEvidence(evidence: "played" | "failed") {
     if (!session || session.compatibilityMode || session.liveTranscode) return;
@@ -3182,6 +3229,9 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
     setCurrentPosition(0);
     setPlaybackDuration(item.durationSeconds || 0);
     setPendingNativeSeek(null);
+    setPreviewStoryboard(null);
+    setPreviewStoryboardBusy(false);
+    setPreviewStoryboardUnavailable(false);
     webPlaybackHandoff.current = null;
     hlsFallbackAttempted.current = false;
     liveFallbackAttempted.current = false;
@@ -3732,6 +3782,17 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
     setPendingNativeSeek(null);
   }
 
+  function requestPreviewStoryboard() {
+    if (previewStoryboard || previewStoryboardBusy || previewStoryboardUnavailable || playbackDuration <= 0) return;
+    setPreviewStoryboardBusy(true);
+    void api.generateLibraryStoryboard(item.id, compact ? 8 : 16)
+      .then((generated) => {
+        if (generated.itemId === item.id) setPreviewStoryboard(generated);
+      })
+      .catch(() => setPreviewStoryboardUnavailable(true))
+      .finally(() => setPreviewStoryboardBusy(false));
+  }
+
   function toggleFullscreen() {
     if (document.fullscreenElement) void document.exitFullscreen();
     else if (playerRef.current) void playerRef.current.requestFullscreen();
@@ -4171,15 +4232,13 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
         {session.subtitles.map((track) => <track key={`${track.url}:${session.streamStartSeconds}`} kind="subtitles" src={track.url} srcLang={track.language || "und"} label={track.label} onLoad={(event) => { if (!session.liveTranscode || session.streamStartSeconds <= 0) return; const cues = event.currentTarget.track.cues; if (!cues) return; for (const cue of Array.from(cues)) { cue.startTime = Math.max(0, cue.startTime - session.streamStartSeconds); cue.endTime = Math.max(0, cue.endTime - session.streamStartSeconds); } }} />)}
       </video> : null}
     </div>
-    {embeddedMpvSession ? <div className={`flex items-center gap-2 border-t border-white/10 bg-[#100e0b] ${compact ? "px-2.5 py-1.5" : "px-5 py-2"}`} aria-label="Native playback timeline"><span className={`${compact ? "text-[9px]" : "text-[10px]"} number-font min-w-9 text-right text-white/55`}>{formatDuration(pendingNativeSeek ?? currentPosition)}</span><input className="h-5 min-w-0 flex-1 cursor-pointer accent-[var(--color-accent)]" type="range" min={0} max={Math.max(0.1, playbackDuration)} step={0.1} value={Math.min(Math.max(0, pendingNativeSeek ?? currentPosition), Math.max(0.1, playbackDuration))} aria-label="Seek through video" aria-valuetext={`${formatDuration(pendingNativeSeek ?? currentPosition)} of ${formatDuration(playbackDuration)}`} onChange={(event) => setPendingNativeSeek(Number(event.currentTarget.value))} onPointerUp={(event) => commitNativeSeek(Number(event.currentTarget.value))} onPointerCancel={() => setPendingNativeSeek(null)} onKeyUp={(event) => commitNativeSeek(Number(event.currentTarget.value))} onBlur={(event) => { if (pendingNativeSeek != null) commitNativeSeek(Number(event.currentTarget.value)); }} /><span className={`${compact ? "text-[9px]" : "text-[10px]"} number-font min-w-9 text-white/45`}>{formatDuration(playbackDuration)}</span></div> : null}
     {session?.liveTranscode ? <div className={`flex items-center gap-2 border-t border-white/10 bg-[#100e0b] ${compact ? "px-2 py-1.5" : "px-5 py-2"}`} aria-label="Live compatibility playback controls">
       <button className={nativeControlClass} onClick={() => seek(-10)} aria-label="Seek back 10 seconds"><RotateCcw size={14} /></button>
       <button className="grid size-8 shrink-0 place-items-center rounded-[8px] bg-accent text-accentInk focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/80" onClick={togglePlayback} aria-label={isPlaying ? "Pause" : "Play"}>{isPlaying ? <Pause size={14} fill="currentColor" /> : <Play size={14} fill="currentColor" />}</button>
-      <span className={`${compact ? "text-[9px]" : "text-[10px]"} number-font min-w-9 text-right text-white/55`}>{formatDuration(pendingNativeSeek ?? currentPosition)}</span>
-      <input className="h-5 min-w-0 flex-1 cursor-pointer accent-[var(--color-accent)]" type="range" min={0} max={Math.max(0.1, playbackDuration)} step={0.1} value={Math.min(Math.max(0, pendingNativeSeek ?? currentPosition), Math.max(0.1, playbackDuration))} aria-label="Seek through live compatibility playback" aria-valuetext={`${formatDuration(pendingNativeSeek ?? currentPosition)} of ${formatDuration(playbackDuration)}`} onChange={(event) => setPendingNativeSeek(Number(event.currentTarget.value))} onPointerUp={(event) => commitNativeSeek(Number(event.currentTarget.value))} onPointerCancel={() => setPendingNativeSeek(null)} onKeyUp={(event) => commitNativeSeek(Number(event.currentTarget.value))} onBlur={(event) => { if (pendingNativeSeek != null) commitNativeSeek(Number(event.currentTarget.value)); }} />
-      <span className={`${compact ? "text-[9px]" : "text-[10px]"} number-font min-w-9 text-white/45`}>{formatDuration(playbackDuration)}</span>
-      {!compact ? <span className="rounded-[7px] border border-accent/20 bg-accent/10 px-2 py-1 text-[10px] font-semibold text-accent">Live compatible</span> : null}
+      <button className={nativeControlClass} onClick={() => seek(10)} aria-label="Seek forward 10 seconds"><RotateCw size={14} /></button>
+      <span className="number-font text-[9px] text-white/45">Live compatibility stream</span>
     </div> : null}
+    {(embeddedMpvSession || session) && !playbackError && !nativeSession ? <PlaybackPreviewTimeline currentTime={currentPosition} duration={playbackDuration} pendingTime={pendingNativeSeek} compact={compact} storyboard={previewStoryboard} storyboardBusy={previewStoryboardBusy} storyboardUnavailable={previewStoryboardUnavailable} onPreviewRequested={requestPreviewStoryboard} onPendingTime={setPendingNativeSeek} onCommit={commitNativeSeek} /> : null}
     <footer className={`${compact ? "hidden" : "flex"} flex-wrap items-center gap-3 border-t border-white/10 bg-[#100e0b] ${leanBack ? "justify-center px-5 py-4" : "px-5 py-3"}`}>
       {leanBack ? <><Button variant="ghost" className="h-14 min-w-32 text-base text-white/75" disabled={!onPrevious} onClick={() => changeVideo(onPrevious)}><SkipBack size={21} /> Previous</Button><Button className="h-14 min-w-44 text-base" disabled={(!videoRef.current && !embeddedMpvSession) || Boolean(playbackError) || Boolean(nativeSession)} onClick={togglePlayback}>{isPlaying ? <Pause size={22} /> : <Play size={22} fill="currentColor" />} {isPlaying ? "Pause" : "Play"}</Button><Button variant="ghost" className="h-14 min-w-32 text-base text-white/75" disabled={!onNext} onClick={() => changeVideo(onNext)}>Next <SkipForward size={21} /></Button><Button variant="secondary" className="h-14 min-w-28 border-white/10 bg-white/10 text-white" onClick={onExitLeanBack}><Minimize2 size={19} /> Exit</Button><p className="w-full text-center text-[11px] text-white/45">Gamepad: A/Start play · B exit · D-pad browse · LB/RB seek · Keyboard: Space/K · J/L · M · F · Esc</p></> : <><Button variant="ghost" className="h-9 text-white/70" disabled={!onPrevious} onClick={() => changeVideo(onPrevious)}><ChevronRight className="rotate-180" size={15} /> Previous</Button><Button variant="ghost" className="h-9 text-white/70" disabled={!onNext} onClick={() => changeVideo(onNext)}>Next <ChevronRight size={15} /></Button><span className="h-5 w-px bg-white/10" /><label className="flex items-center gap-2 text-xs text-white/55"><span>Speed</span><Select className="h-8 w-24 border-white/10 bg-white/5 text-xs text-white" value={playbackRate} onChange={(event) => { const rate = Number(event.target.value); setPlaybackRate(rate); if (embeddedMpvSession) void api.controlEmbeddedMpv({ action: "setRate", value: rate }).catch((error) => setError(normalizeError(error))); else if (videoRef.current) videoRef.current.playbackRate = rate; }}><option value={0.5}>0.5×</option><option value={0.75}>0.75×</option><option value={1}>1×</option><option value={1.25}>1.25×</option><option value={1.5}>1.5×</option><option value={2}>2×</option></Select></label><p className="ml-auto text-[10px] text-white/40">Space/K play · J/L seek · M mute · F fullscreen · Esc close</p></>}
       {resumedAt != null ? <p className="w-full text-[10px] text-accent" role="status">{seekRequest?.itemId === item.id ? "Started from transcript" : "Resumed"} at {formatDuration(resumedAt)}</p> : null}

@@ -13,7 +13,9 @@
     "tauri:build": "tauri build",
     "engines:prepare": "node scripts/prepare-bundled-engines.mjs",
     "tauri:build:bundled": "npm run engines:prepare && npm run tauri:build",
-    "tauri:build:appimage:arch": "bash scripts/build-appimage-arch.sh"
+    "tauri:build:appimage:arch": "bash scripts/build-appimage-arch.sh",
+    "test:e2e": "playwright test",
+    "test:e2e:headed": "playwright test --headed"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.8.0",
@@ -25,6 +27,7 @@
     "zustand": "^5.0.2"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.1",
     "@tauri-apps/cli": "^2.8.0",
     "@types/qrcode": "^1.5.6",
     "@types/react": "^19.0.0",
