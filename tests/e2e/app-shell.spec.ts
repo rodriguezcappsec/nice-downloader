@@ -30,7 +30,7 @@ test("command search opens and closes with focus restoration", async ({ page }) 
 });
 
 test("Library exposes live Smart Collections without crowding the catalog", async ({ page }) => {
-  await page.getByRole("button", { name: "Library" }).click();
+  await page.getByRole("navigation", { name: "Primary navigation" }).getByRole("button", { name: "Library" }).click();
   await expect(page.getByRole("heading", { name: "Smart Collections" })).toBeVisible();
   await expect(page.getByText("Build a shelf around what matters to you")).toBeVisible();
   await page.getByRole("button", { name: "Create from current filters" }).click();
@@ -99,6 +99,32 @@ test("video playback uses one accessible frame-preview control strip", async ({ 
   await expect(controls.getByRole("button", { name: "Toggle fullscreen" })).toBeVisible();
   await expect(page.locator("video")).not.toHaveAttribute("controls", "");
   await expect.poll(() => page.locator("video").evaluate((video) => (video as HTMLVideoElement).controls)).toBe(false);
+});
+
+test("video appearance controls are non-destructive, persistent, and mini-player safe", async ({ page }) => {
+  await page.getByRole("button", { name: "Watch", exact: true }).click();
+  await page.getByRole("button", { name: "Video fit and appearance" }).click();
+  const panel = page.getByRole("region", { name: "Video fit and appearance" });
+  await expect(panel).toBeVisible();
+  await expect(panel).toContainText("Applied non-destructively by WebView");
+  await panel.getByRole("button", { name: /^Fill Fill the player/ }).click();
+  await panel.getByRole("slider", { name: /Zoom/ }).fill("1.5");
+  await panel.getByRole("slider", { name: /Brightness/ }).fill("40");
+  await panel.getByRole("slider", { name: /Gamma/ }).fill("50");
+  await expect.poll(() => page.locator("video").evaluate((video) => ({ objectFit: video.style.objectFit, transform: video.style.transform }))).toEqual({ objectFit: "cover", transform: expect.stringContaining("scale(1.5)") });
+  await expect.poll(() => page.locator("video").evaluate((video) => video.style.filter)).toMatch(/^brightness\((?!1\))/);
+
+  await page.getByLabel("Watch workspace").getByRole("button", { name: "Library" }).click();
+  await expect.poll(() => page.locator("video").evaluate((video) => video.style.objectFit)).toBe("contain");
+  await page.getByRole("button", { name: "Return to full watch page" }).click();
+  await expect.poll(() => page.locator("video").evaluate((video) => video.style.objectFit)).toBe("cover");
+
+  await page.getByRole("button", { name: "Video fit and appearance" }).click();
+  const restoredPanel = page.getByRole("region", { name: "Video fit and appearance" });
+  await restoredPanel.getByRole("checkbox", { name: "Remember for this video" }).check();
+  await expect.poll(() => page.evaluate(() => (window as typeof window & { __PLAYWRIGHT_VIDEO_DISPLAY_REQUEST__?: { settings?: { fit?: string } } }).__PLAYWRIGHT_VIDEO_DISPLAY_REQUEST__?.settings?.fit)).toBe("fill");
+  await restoredPanel.getByRole("button", { name: "Reset appearance" }).click();
+  await expect(restoredPanel.getByRole("button", { name: /^Fit Show the entire frame/ })).toHaveAttribute("aria-pressed", "true");
 });
 
 test("Library video cards lazily scrub cached storyboard frames", async ({ page }) => {

@@ -758,6 +758,27 @@ export interface SaveLibraryPlaybackRequest {
   completed: boolean;
 }
 
+export type LibraryVideoFit = "fit" | "fill" | "original" | "stretch";
+
+export interface LibraryVideoDisplaySettings {
+  fit: LibraryVideoFit;
+  zoom: number;
+  panX: number;
+  panY: number;
+  rotation: 0 | 90 | 180 | 270;
+  flipHorizontal: boolean;
+  flipVertical: boolean;
+  brightness: number;
+  contrast: number;
+  saturation: number;
+  gamma: number;
+}
+
+export interface SaveLibraryVideoDisplaySettingsRequest {
+  itemId: string;
+  settings: LibraryVideoDisplaySettings;
+}
+
 export interface LibraryPlaybackEntry {
   item: LibraryItem;
   playback: LibraryPlaybackState;
@@ -984,11 +1005,13 @@ export type EmbeddedMpvControl =
   | "frameBackStep"
   | "setRate"
   | "setVolume"
-  | "setMuted";
+  | "setMuted"
+  | "setDisplay";
 
 export interface EmbeddedMpvControlRequest {
   action: EmbeddedMpvControl;
   value?: number | null;
+  display?: LibraryVideoDisplaySettings | null;
 }
 
 export interface LibraryCacheResult {

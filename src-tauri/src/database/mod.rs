@@ -84,6 +84,7 @@ const MIGRATION_0029: &str = include_str!("migrations/0029_library_privacy.sql")
 const MIGRATION_0030: &str = include_str!("migrations/0030_library_semantic_transcripts.sql");
 const MIGRATION_0031: &str = include_str!("migrations/0031_post_download_recipes.sql");
 const MIGRATION_0032: &str = include_str!("migrations/0032_library_source_automation.sql");
+const MIGRATION_0033: &str = include_str!("migrations/0033_library_video_display.sql");
 const ENGINE_PREFERENCES_KEY: &str = "engine.preferences";
 const QUEUE_SETTINGS_KEY: &str = "queue.settings";
 const DESKTOP_PREFERENCES_KEY: &str = "desktop.preferences";
@@ -230,6 +231,7 @@ impl Database {
             (30, MIGRATION_0030),
             (31, MIGRATION_0031),
             (32, MIGRATION_0032),
+            (33, MIGRATION_0033),
         ] {
             let migrated: bool = transaction.query_row(
                 "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = ?1)",
@@ -3467,6 +3469,118 @@ impl Database {
                 |row| library_playback_from_row(row, 0),
             )
             .map_err(AppError::from)
+    }
+
+    pub fn get_library_video_display_settings(
+        &self,
+        item_id: &str,
+    ) -> Result<Option<crate::models::LibraryVideoDisplaySettings>, AppError> {
+        validate_uuid(item_id, "library item")?;
+        if self.is_library_privacy_locked() && self.is_library_item_private(item_id)? {
+            return Ok(None);
+        }
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "Saved video display settings are unavailable.",
+            )
+        })?;
+        connection
+            .query_row(
+                "SELECT fit, zoom, pan_x, pan_y, rotation, flip_horizontal, flip_vertical,
+                        brightness, contrast, saturation, gamma
+                 FROM library_video_display_settings WHERE item_id = ?1",
+                [item_id],
+                library_video_display_settings_from_row,
+            )
+            .optional()
+            .map_err(AppError::from)
+    }
+
+    pub fn save_library_video_display_settings(
+        &self,
+        request: crate::models::SaveLibraryVideoDisplaySettingsRequest,
+    ) -> Result<crate::models::LibraryVideoDisplaySettings, AppError> {
+        validate_uuid(&request.item_id, "library item")?;
+        if self.is_library_privacy_locked() && self.is_library_item_private(&request.item_id)? {
+            return Err(library_locked_error());
+        }
+        validate_library_video_display_settings(request.settings)?;
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "Saved video display settings are unavailable.",
+            )
+        })?;
+        let media_kind = connection
+            .query_row(
+                "SELECT media_kind FROM media_library WHERE id = ?1",
+                [&request.item_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten();
+        if media_kind.as_deref() != Some("video") {
+            return Err(AppError::new(
+                "library_video_not_found",
+                "The selected library video was not found.",
+            ));
+        }
+        let settings = request.settings;
+        let fit = library_video_fit_value(settings.fit);
+        connection.execute(
+            "INSERT INTO library_video_display_settings
+                (item_id, fit, zoom, pan_x, pan_y, rotation, flip_horizontal, flip_vertical,
+                 brightness, contrast, saturation, gamma, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+             ON CONFLICT(item_id) DO UPDATE SET
+                fit = excluded.fit,
+                zoom = excluded.zoom,
+                pan_x = excluded.pan_x,
+                pan_y = excluded.pan_y,
+                rotation = excluded.rotation,
+                flip_horizontal = excluded.flip_horizontal,
+                flip_vertical = excluded.flip_vertical,
+                brightness = excluded.brightness,
+                contrast = excluded.contrast,
+                saturation = excluded.saturation,
+                gamma = excluded.gamma,
+                updated_at = excluded.updated_at",
+            params![
+                request.item_id,
+                fit,
+                settings.zoom,
+                settings.pan_x,
+                settings.pan_y,
+                settings.rotation,
+                settings.flip_horizontal,
+                settings.flip_vertical,
+                settings.brightness,
+                settings.contrast,
+                settings.saturation,
+                settings.gamma,
+                Utc::now().timestamp_millis(),
+            ],
+        )?;
+        Ok(settings)
+    }
+
+    pub fn forget_library_video_display_settings(&self, item_id: &str) -> Result<(), AppError> {
+        validate_uuid(item_id, "library item")?;
+        if self.is_library_privacy_locked() && self.is_library_item_private(item_id)? {
+            return Err(library_locked_error());
+        }
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "Saved video display settings are unavailable.",
+            )
+        })?;
+        connection.execute(
+            "DELETE FROM library_video_display_settings WHERE item_id = ?1",
+            [item_id],
+        )?;
+        Ok(())
     }
 
     pub fn list_continue_watching(
@@ -7748,6 +7862,85 @@ fn library_playback_from_row(
     })
 }
 
+fn library_video_fit_value(fit: crate::models::LibraryVideoFit) -> &'static str {
+    match fit {
+        crate::models::LibraryVideoFit::Fit => "fit",
+        crate::models::LibraryVideoFit::Fill => "fill",
+        crate::models::LibraryVideoFit::Original => "original",
+        crate::models::LibraryVideoFit::Stretch => "stretch",
+    }
+}
+
+fn validate_library_video_display_settings(
+    settings: crate::models::LibraryVideoDisplaySettings,
+) -> Result<(), AppError> {
+    let values = [
+        settings.zoom,
+        settings.pan_x,
+        settings.pan_y,
+        settings.brightness,
+        settings.contrast,
+        settings.saturation,
+        settings.gamma,
+    ];
+    let valid = values.iter().all(|value| value.is_finite())
+        && (1.0..=3.0).contains(&settings.zoom)
+        && (-1.0..=1.0).contains(&settings.pan_x)
+        && (-1.0..=1.0).contains(&settings.pan_y)
+        && [0, 90, 180, 270].contains(&settings.rotation)
+        && [
+            settings.brightness,
+            settings.contrast,
+            settings.saturation,
+            settings.gamma,
+        ]
+        .iter()
+        .all(|value| (-100.0..=100.0).contains(value));
+    if valid {
+        Ok(())
+    } else {
+        Err(AppError::new(
+            "invalid_library_video_display",
+            "The video display adjustment is outside the supported range.",
+        ))
+    }
+}
+
+fn library_video_display_settings_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<crate::models::LibraryVideoDisplaySettings> {
+    let fit_value: String = row.get(0)?;
+    let fit = match fit_value.as_str() {
+        "fit" => crate::models::LibraryVideoFit::Fit,
+        "fill" => crate::models::LibraryVideoFit::Fill,
+        "original" => crate::models::LibraryVideoFit::Original,
+        "stretch" => crate::models::LibraryVideoFit::Stretch,
+        _ => {
+            return Err(rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "invalid saved video fit",
+                )),
+            ));
+        }
+    };
+    Ok(crate::models::LibraryVideoDisplaySettings {
+        fit,
+        zoom: row.get(1)?,
+        pan_x: row.get(2)?,
+        pan_y: row.get(3)?,
+        rotation: row.get(4)?,
+        flip_horizontal: row.get(5)?,
+        flip_vertical: row.get(6)?,
+        brightness: row.get(7)?,
+        contrast: row.get(8)?,
+        saturation: row.get(9)?,
+        gamma: row.get(10)?,
+    })
+}
+
 fn library_order_by(sort: LibrarySort) -> &'static str {
     match sort {
         LibrarySort::Recent => "added_at DESC, media_library.id DESC",
@@ -9742,7 +9935,7 @@ mod tests {
     use super::*;
     use crate::models::{
         AudioQuality, DownloadOptions, MediaAnalysis, OutputConflictPolicy, OutputContainer,
-        QualityKind, QualityOption, VideoCodecPreference,
+        QualityKind, QualityOption, SaveLibraryVideoDisplaySettingsRequest, VideoCodecPreference,
     };
     use std::time::Instant;
     use tempfile::tempdir;
@@ -10283,7 +10476,7 @@ mod tests {
                 row.get(0)
             })
             .expect("recovered migration version");
-        assert_eq!(latest_version, 32);
+        assert_eq!(latest_version, 33);
         let has_playback: bool = connection
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'library_playback')",
@@ -13369,5 +13562,91 @@ mod tests {
         assert!(facets.containers.is_empty());
         assert!(facets.tags.is_empty());
         assert!(facets.folders.is_empty());
+    }
+
+    #[test]
+    fn persists_validates_protects_and_cascades_video_display_settings() {
+        let directory = tempdir().expect("temporary directory");
+        let database =
+            Database::open(&directory.path().join("video-display.sqlite3")).expect("database");
+        let item = database
+            .upsert_library_item(&media_stack_test_item(
+                directory.path(),
+                "Display settings",
+                LibraryMediaKind::Video,
+            ))
+            .expect("library video");
+        let settings = crate::models::LibraryVideoDisplaySettings {
+            fit: crate::models::LibraryVideoFit::Fill,
+            zoom: 1.5,
+            pan_x: 0.25,
+            pan_y: -0.2,
+            rotation: 90,
+            flip_horizontal: true,
+            flip_vertical: false,
+            brightness: 12.0,
+            contrast: -8.0,
+            saturation: 20.0,
+            gamma: 5.0,
+        };
+        let saved = database
+            .save_library_video_display_settings(SaveLibraryVideoDisplaySettingsRequest {
+                item_id: item.id.clone(),
+                settings,
+            })
+            .expect("save display settings");
+        assert_eq!(saved, settings);
+        assert_eq!(
+            database
+                .get_library_video_display_settings(&item.id)
+                .expect("load display settings"),
+            Some(settings)
+        );
+
+        let invalid = crate::models::LibraryVideoDisplaySettings {
+            zoom: 3.01,
+            ..settings
+        };
+        assert_eq!(
+            database
+                .save_library_video_display_settings(SaveLibraryVideoDisplaySettingsRequest {
+                    item_id: item.id.clone(),
+                    settings: invalid,
+                })
+                .expect_err("reject invalid zoom")
+                .code,
+            "invalid_library_video_display"
+        );
+
+        database
+            .configure_library_privacy("correct horse battery staple", 15)
+            .expect("configure privacy");
+        database
+            .set_library_items_private(vec![item.id.clone()], true)
+            .expect("mark private");
+        database.lock_library_privacy().expect("lock privacy");
+        assert_eq!(
+            database
+                .get_library_video_display_settings(&item.id)
+                .expect("locked lookup"),
+            None
+        );
+        assert_eq!(
+            database
+                .forget_library_video_display_settings(&item.id)
+                .expect_err("locked delete")
+                .code,
+            "library_locked"
+        );
+        database
+            .unlock_library_privacy("correct horse battery staple")
+            .expect("unlock privacy");
+        database.remove_library_item(&item.id).expect("remove item");
+        assert_eq!(
+            database
+                .get_library_video_display_settings(&item.id)
+                .expect("cascaded lookup"),
+            None
+        );
     }
 }

@@ -52,13 +52,13 @@ use crate::{
         SaveLibraryCompareSessionRequest, SaveLibraryMediaStackRequest, SaveLibraryMomentRequest,
         SaveLibraryMontageRequest, SaveLibraryPlaybackRequest, SaveLibraryRichMetadataRequest,
         SaveLibrarySmartViewRequest, SaveLibrarySourceAutomationRequest, SaveLibrarySourceRequest,
-        SavePostDownloadRecipeRequest, SavePresetRequest, SaveSitePresetRuleRequest,
-        SaveSubscriptionRequest, SetLibraryArtworkRequest, SitePresetRule, StartDownloadRequest,
-        StartLibraryClipExportRequest, StartLibraryMontageExportRequest,
-        StartLibrarySemanticIndexRequest, StartLibraryThemeAnalysisRequest,
-        StartLibraryTranscriptionRequest, StartLocalShareRequest, StartTransformationRequest,
-        Subscription, SubscriptionCheckResult, TransformationOperation, TransformationState,
-        TransformationTask, UpdateLibraryItemRequest,
+        SaveLibraryVideoDisplaySettingsRequest, SavePostDownloadRecipeRequest, SavePresetRequest,
+        SaveSitePresetRuleRequest, SaveSubscriptionRequest, SetLibraryArtworkRequest,
+        SitePresetRule, StartDownloadRequest, StartLibraryClipExportRequest,
+        StartLibraryMontageExportRequest, StartLibrarySemanticIndexRequest,
+        StartLibraryThemeAnalysisRequest, StartLibraryTranscriptionRequest, StartLocalShareRequest,
+        StartTransformationRequest, Subscription, SubscriptionCheckResult, TransformationOperation,
+        TransformationState, TransformationTask, UpdateLibraryItemRequest,
     },
     queue::{disk_space, QueueManager},
     semantic_transcripts::SemanticTranscriptManager,
@@ -757,6 +757,30 @@ pub fn save_library_playback_progress(
     request: SaveLibraryPlaybackRequest,
 ) -> Result<LibraryPlaybackState, AppError> {
     database.save_library_playback(request)
+}
+
+#[tauri::command]
+pub fn get_library_video_display_settings(
+    database: State<'_, Database>,
+    id: String,
+) -> Result<Option<crate::models::LibraryVideoDisplaySettings>, AppError> {
+    database.get_library_video_display_settings(&id)
+}
+
+#[tauri::command]
+pub fn save_library_video_display_settings(
+    database: State<'_, Database>,
+    request: SaveLibraryVideoDisplaySettingsRequest,
+) -> Result<crate::models::LibraryVideoDisplaySettings, AppError> {
+    database.save_library_video_display_settings(request)
+}
+
+#[tauri::command]
+pub fn forget_library_video_display_settings(
+    database: State<'_, Database>,
+    id: String,
+) -> Result<(), AppError> {
+    database.forget_library_video_display_settings(&id)
 }
 
 #[tauri::command]
