@@ -1366,6 +1366,15 @@ export interface SaveLibrarySourceRequest {
   excludePatterns: string[];
 }
 
+export interface LibrarySourceAutomation {
+  sourceId: string;
+  tags: string[];
+  collectionId?: string | null;
+  favorite: boolean;
+}
+
+export type SaveLibrarySourceAutomationRequest = LibrarySourceAutomation;
+
 export interface LibraryPrivacyStatus {
   configured: boolean;
   locked: boolean;

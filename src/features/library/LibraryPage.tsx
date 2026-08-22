@@ -118,6 +118,7 @@ import type {
   LibrarySort,
   LibraryScanJob,
   LibrarySource,
+  LibrarySourceAutomation,
 } from "../../types";
 
 type MediaFilter = "all" | "video" | "image";
@@ -2033,6 +2034,7 @@ const resultTitle = search.trim()
             scheduleLibraryRefresh(0);
           }}
         />
+        <WatchAutomationSection sources={sources} collections={collections} />
         <CollectionSection collections={collections} onChanged={setCollections} />
         <ReviewSection changes={changes} items={manageItems} sourceNames={sourceNames} onChanged={setChanges} />
         <DuplicateSection job={duplicateJob} groups={duplicateGroups} items={manageItems} onJob={setDuplicateJob} onTrashed={(itemId) => {
@@ -5073,7 +5075,76 @@ function SourceForm({ onClose, onSaved }: { onClose: () => void; onSaved: (sourc
 
 function SourceSection({ sources, scanJobs, onJob, onRemoved }: { sources: LibrarySource[]; scanJobs: LibraryScanJob[]; onJob: (job: LibraryScanJob) => void; onRemoved: (id: string) => void }) {
   if (sources.length === 0) return <div className="border border-dashed border-line/70 bg-panel/30 px-5 py-8 text-center text-xs text-muted">No folders are indexed yet.</div>;
-  return <section aria-labelledby="library-sources-title"><div className="mb-3 flex items-center justify-between"><div><h2 id="library-sources-title" className="text-lg font-semibold tracking-[-0.025em]">Folders</h2><p className="mt-1 text-xs text-muted">Scans index media in place.</p></div><span className="text-[11px] text-muted">{sources.length} source{sources.length === 1 ? "" : "s"}</span></div><div className="grid gap-3 lg:grid-cols-2 2xl:grid-cols-3">{sources.map((source) => <SourceCard key={source.id} source={source} latestJob={scanJobs.find((job) => job.sourceId === source.id)} onJob={onJob} onRemoved={() => onRemoved(source.id)} />)}</div></section>;
+  return <section aria-labelledby="library-sources-title"><div className="mb-3 flex items-center justify-between"><div><h2 id="library-sources-title" className="text-lg font-semibold tracking-[-0.025em]">Folders</h2><p className="mt-1 text-xs text-muted">Scans index media in place. Watched folders can organize newly discovered media automatically.</p></div><span className="text-[11px] text-muted">{sources.length} source{sources.length === 1 ? "" : "s"}</span></div><div className="grid items-start gap-3 lg:grid-cols-2 2xl:grid-cols-3">{sources.map((source) => <SourceCard key={source.id} source={source} latestJob={scanJobs.find((job) => job.sourceId === source.id)} onJob={onJob} onRemoved={() => onRemoved(source.id)} />)}</div></section>;
+}
+
+function WatchAutomationSection({ sources, collections }: { sources: LibrarySource[]; collections: LibraryCollection[] }) {
+  if (sources.length === 0) return null;
+  return <section className="mt-8 border-t border-line/60 pt-7" aria-labelledby="watch-automation-title">
+    <div className="mb-4 flex flex-wrap items-end justify-between gap-3"><div><h2 id="watch-automation-title" className="flex items-center gap-2 text-lg font-semibold tracking-[-0.025em]"><FolderInput className="text-accent" size={19} /> Watch-folder automation</h2><p className="mt-1 max-w-3xl text-xs leading-5 text-muted">Apply typed organization rules only when a folder discovers new media. Existing catalog items and original files stay unchanged.</p></div><span className="rounded-[6px] bg-elevated px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-muted">No scripts</span></div>
+    <div className="grid items-start gap-3 lg:grid-cols-2">{sources.map((source) => <WatchAutomationRule key={source.id} source={source} collections={collections} />)}</div>
+  </section>;
+}
+
+function WatchAutomationRule({ source, collections }: { source: LibrarySource; collections: LibraryCollection[] }) {
+  const setError = useAppStore((state) => state.setError);
+  const setNotice = useAppStore((state) => state.setNotice);
+  const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [automation, setAutomation] = useState<LibrarySourceAutomation | null>(null);
+  const [tags, setTags] = useState("");
+  const [collectionId, setCollectionId] = useState("");
+  const [favorite, setFavorite] = useState(false);
+
+  async function loadAutomation() {
+    setLoading(true);
+    try {
+      const next = await api.getLibrarySourceAutomation(source.id);
+      setAutomation(next);
+      setTags(next.tags.join(", "));
+      setCollectionId(next.collectionId || "");
+      setFavorite(next.favorite);
+    } catch (error) {
+      setError(normalizeError(error));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function toggleOpen() {
+    const next = !open;
+    setOpen(next);
+    if (next && !automation && !loading) void loadAutomation();
+  }
+
+  async function saveAutomation() {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const next = await api.saveLibrarySourceAutomation({
+        sourceId: source.id,
+        tags: tags.split(",").map((tag) => tag.trim()).filter(Boolean).slice(0, 20),
+        collectionId: collectionId || null,
+        favorite,
+      });
+      setAutomation(next);
+      setTags(next.tags.join(", "));
+      setCollectionId(next.collectionId || "");
+      setFavorite(next.favorite);
+      setNotice({ message: next.tags.length || next.collectionId || next.favorite ? `Automation saved for ${source.name}. New media will be organized after indexing.` : `Automation cleared for ${source.name}.`, view: "library" });
+    } catch (error) {
+      setError(normalizeError(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const actionCount = automation ? automation.tags.length + Number(Boolean(automation.collectionId)) + Number(automation.favorite) : 0;
+  return <article className="rounded-[10px] border border-line/60 bg-panel/55">
+    <button className="flex w-full items-center gap-3 p-4 text-left" onClick={toggleOpen} aria-expanded={open} aria-controls={`watch-automation-${source.id}`}><span className={`grid size-9 shrink-0 place-items-center rounded-[8px] ${source.watchEnabled ? "bg-accent/12 text-accent" : "bg-elevated text-muted"}`}><FolderInput size={16} /></span><span className="min-w-0 flex-1"><strong className="block truncate text-sm font-semibold">{source.name}</strong><span className="mt-1 block text-[11px] text-muted">{automation ? actionCount > 0 ? `${actionCount} active action${actionCount === 1 ? "" : "s"}` : "No organization actions" : source.watchEnabled ? "Auto scan enabled" : "Manual scans only"}</span></span><ChevronRight className={`shrink-0 text-muted transition-transform ${open ? "rotate-90" : ""}`} size={15} /></button>
+    {open ? <div id={`watch-automation-${source.id}`} className="border-t border-line/60 p-4">{loading ? <p className="flex items-center gap-2 py-3 text-xs text-muted"><LoaderCircle className="animate-spin" size={14} /> Loading automation…</p> : <><p className="mb-3 text-[11px] leading-5 text-muted">Rules run once for each newly indexed file. {source.watchEnabled ? "Folder changes are watched automatically." : "Enable Auto scan above for immediate folder monitoring."}</p><div className="grid gap-3 sm:grid-cols-2"><Field label="Add tags"><Input value={tags} onChange={(event) => setTags(event.target.value)} placeholder="incoming, archive" /></Field><Field label="Add to collection"><Select value={collectionId} onChange={(event) => setCollectionId(event.target.value)}><option value="">No collection</option>{collections.map((collection) => <option key={collection.id} value={collection.id}>{collection.name}</option>)}</Select></Field></div><label className="mt-3 flex items-center gap-2 text-xs text-muted"><input type="checkbox" checked={favorite} onChange={(event) => setFavorite(event.target.checked)} /> Mark new media as favorite</label><div className="mt-4 flex justify-end"><Button className="h-9 text-xs" disabled={busy} onClick={() => void saveAutomation()}>{busy ? <LoaderCircle className="animate-spin" size={14} /> : <Save size={14} />} Save automation</Button></div></>}</div> : null}
+  </article>;
 }
 
 function SourceCard({ source, latestJob, onJob, onRemoved }: { source: LibrarySource; latestJob?: LibraryScanJob; onJob: (job: LibraryScanJob) => void; onRemoved: () => void }) {

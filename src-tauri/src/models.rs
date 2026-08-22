@@ -2071,6 +2071,28 @@ pub struct SaveLibrarySourceRequest {
     pub exclude_patterns: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct LibrarySourceAutomation {
+    pub source_id: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    pub collection_id: Option<String>,
+    #[serde(default)]
+    pub favorite: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveLibrarySourceAutomationRequest {
+    pub source_id: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    pub collection_id: Option<String>,
+    #[serde(default)]
+    pub favorite: bool,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LibraryPrivacyStatus {

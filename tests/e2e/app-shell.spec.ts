@@ -36,3 +36,12 @@ test("Library exposes live Smart Collections without crowding the catalog", asyn
   await page.getByRole("button", { name: "Create from current filters" }).click();
   await expect(page.getByRole("textbox", { name: "Smart Collection name" })).toBeFocused();
 });
+
+test("watched folders expose typed automation controls", async ({ page }) => {
+  await page.getByRole("button", { name: "Library" }).click();
+  await page.getByRole("button", { name: /^Manage/ }).click();
+  await expect(page.getByRole("heading", { name: "Watch-folder automation" })).toBeVisible();
+  await page.getByRole("button", { name: /Playwright media Auto scan enabled/ }).click();
+  await expect(page.getByLabel("Add tags")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Save automation" })).toBeVisible();
+});

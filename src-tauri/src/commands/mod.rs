@@ -40,10 +40,10 @@ use crate::{
         LibraryPlaybackPreflight, LibraryPlaybackSession, LibraryPlaybackState,
         LibraryQueryRequest, LibraryQueryResult, LibraryRichMetadata, LibraryScanJob,
         LibraryScanResult, LibrarySearchStatus, LibrarySemanticIndexStatus,
-        LibrarySemanticTranscriptMatch, LibrarySmartView, LibrarySource, LibraryStoragePlan,
-        LibraryThemeAnalysis, LibraryThemeIndexStatus, LibraryThemeJob, LibraryThemeProviderStatus,
-        LibraryThemeSettings, LibraryTranscriptIndexStatus, LibraryTranscriptMatch,
-        LibraryTranscriptionProviderStatus, LibraryVisualSimilarityJob,
+        LibrarySemanticTranscriptMatch, LibrarySmartView, LibrarySource, LibrarySourceAutomation,
+        LibraryStoragePlan, LibraryThemeAnalysis, LibraryThemeIndexStatus, LibraryThemeJob,
+        LibraryThemeProviderStatus, LibraryThemeSettings, LibraryTranscriptIndexStatus,
+        LibraryTranscriptMatch, LibraryTranscriptionProviderStatus, LibraryVisualSimilarityJob,
         LibraryVisualSimilarityMatch, LibraryVisualSimilarityStatus, LocalShareSession,
         MediaAnalysis, NativePlaybackSession, NativePlaybackStatus, OnboardingStatus,
         PostDownloadRecipe, PostDownloadRecipeRun, Preset, PreviewLibraryBulkMoveRequest,
@@ -51,9 +51,9 @@ use crate::{
         SaveAuthenticationProfileRequest, SaveLibraryCollectionRequest,
         SaveLibraryCompareSessionRequest, SaveLibraryMediaStackRequest, SaveLibraryMomentRequest,
         SaveLibraryMontageRequest, SaveLibraryPlaybackRequest, SaveLibraryRichMetadataRequest,
-        SaveLibrarySmartViewRequest, SaveLibrarySourceRequest, SavePostDownloadRecipeRequest,
-        SavePresetRequest, SaveSitePresetRuleRequest, SaveSubscriptionRequest,
-        SetLibraryArtworkRequest, SitePresetRule, StartDownloadRequest,
+        SaveLibrarySmartViewRequest, SaveLibrarySourceAutomationRequest, SaveLibrarySourceRequest,
+        SavePostDownloadRecipeRequest, SavePresetRequest, SaveSitePresetRuleRequest,
+        SaveSubscriptionRequest, SetLibraryArtworkRequest, SitePresetRule, StartDownloadRequest,
         StartLibraryClipExportRequest, StartLibraryMontageExportRequest,
         StartLibrarySemanticIndexRequest, StartLibraryThemeAnalysisRequest,
         StartLibraryTranscriptionRequest, StartLocalShareRequest, StartTransformationRequest,
@@ -1490,6 +1490,22 @@ pub fn save_library_source(
     request: SaveLibrarySourceRequest,
 ) -> Result<LibrarySource, AppError> {
     library.save_source_and_sync_watcher(app, request)
+}
+
+#[tauri::command]
+pub fn get_library_source_automation(
+    library: State<'_, library::LibraryManager>,
+    source_id: String,
+) -> Result<LibrarySourceAutomation, AppError> {
+    library.source_automation(&source_id)
+}
+
+#[tauri::command]
+pub fn save_library_source_automation(
+    library: State<'_, library::LibraryManager>,
+    request: SaveLibrarySourceAutomationRequest,
+) -> Result<LibrarySourceAutomation, AppError> {
+    library.save_source_automation(request)
 }
 
 #[tauri::command]

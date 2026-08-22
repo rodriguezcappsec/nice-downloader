@@ -17,6 +17,7 @@ export async function installTauriMock(page: Page) {
       themes: [],
       folders: [],
     };
+    const testSource = { id: "00000000-0000-4000-8000-000000000001", name: "Playwright media", path: "/tmp/media", mediaKind: "both", recursive: true, watchEnabled: true, private: false, includePatterns: [], excludePatterns: [], status: "online", lastError: null, lastScannedAt: null, itemCount: 0, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z" };
     const invoke = async (command: string) => {
       switch (command) {
         case "plugin:event|listen": return nextCallbackId++;
@@ -29,7 +30,6 @@ export async function installTauriMock(page: Page) {
         case "list_jobs":
         case "detect_engines":
         case "list_history":
-        case "list_library_sources":
         case "list_library_scan_jobs":
         case "list_library_smart_views":
         case "list_library_collections":
@@ -37,6 +37,8 @@ export async function installTauriMock(page: Page) {
         case "list_continue_watching":
         case "list_library_watch_later":
         case "list_recently_watched": return [];
+        case "list_library_sources": return [testSource];
+        case "get_library_source_automation": return { sourceId: testSource.id, tags: [], collectionId: null, favorite: false };
         case "load_library_embedded_subtitles": return [];
         case "get_default_destination": return "/tmp";
         case "get_engine_preferences": return { browserCookieSource: "none", browserProfile: null, proxyUrl: null, enableImpersonation: true, bandwidthLimitKib: null };
@@ -44,7 +46,7 @@ export async function installTauriMock(page: Page) {
         case "get_library_privacy_status": return { configured: false, locked: false, autoLockMinutes: 15, privateSourceCount: 0, privateFolderCount: 0, privateItemCount: 0 };
         case "get_library_search_status": return { catalogItems: 0, indexedItems: 0, consistent: true };
         case "get_library_transcript_index_status": return { indexedItems: 0, indexedCues: 0 };
-        case "get_library_artwork_cache_status": return { fileCount: 0, totalBytes: 0 };
+        case "get_library_artwork_cache_status": return { fileCount: 0, totalBytes: 0, maxFiles: 20_000, maxBytes: 1_073_741_824 };
         case "get_library_playback_cache_status": return { fileCount: 0, totalBytes: 0, maxFiles: 4, maxBytes: 8_589_934_592 };
         case "get_library_visual_similarity_status": return { eligibleItems: 0, indexedItems: 0, staleItems: 0 };
         case "get_library_visual_similarity_job":
@@ -68,6 +70,9 @@ export async function installTauriMock(page: Page) {
       }
     };
     Object.assign(window, {
+      __TAURI_EVENT_PLUGIN_INTERNALS__: {
+        unregisterListener: () => undefined,
+      },
       __TAURI_INTERNALS__: {
         callbacks,
         invoke,

@@ -373,6 +373,8 @@ pub fn run() {
             commands::set_library_folder_private,
             commands::list_library_sources,
             commands::save_library_source,
+            commands::get_library_source_automation,
+            commands::save_library_source_automation,
             commands::remove_library_source,
             commands::list_library_scan_jobs,
             commands::start_library_scan,
