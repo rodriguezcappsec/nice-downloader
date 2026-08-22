@@ -235,6 +235,7 @@ pub fn run() {
             commands::export_diagnostics,
             commands::list_transformation_tasks,
             commands::start_transformation,
+            commands::start_library_optimization,
             commands::cancel_transformation,
             commands::suggest_privacy_redactions,
             commands::list_library_items,

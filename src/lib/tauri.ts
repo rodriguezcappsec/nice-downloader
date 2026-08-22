@@ -200,6 +200,8 @@ export const api = {
   listTransformationTasks: () => invoke<TransformationTask[]>("list_transformation_tasks"),
   startTransformation: (request: StartTransformationRequest) =>
     invoke<TransformationTask>("start_transformation", { request }),
+  startLibraryOptimization: (itemIds: string[], destinationDirectory: string, overwrite = false) =>
+    invoke<TransformationTask[]>("start_library_optimization", { itemIds, destinationDirectory, overwrite }),
   cancelTransformation: (id: string) => invoke<void>("cancel_transformation", { id }),
   suggestPrivacyRedactions: (request: PrivacyDetectionRequest) => invoke<PrivacyRedactionSuggestion[]>("suggest_privacy_redactions", { request }),
   listLibraryItems: () => invoke<LibraryItem[]>("list_library_items"),

@@ -91,10 +91,10 @@ export const toolNavigation: NavigationItem[] = [
   },
   {
     id: "transformations",
-    label: "Transform Media",
+    label: "Optimize & Transform",
     icon: WandSparkles,
-    description: "Create format conversions, audio extracts, and privacy-safe derivatives through FFmpeg.",
-    usage: "Use when a file needs a new format or a safer shareable copy.",
+    description: "Batch-optimize Library videos for broad playback or create focused conversions, extracts, and privacy-safe derivatives.",
+    usage: "Use when several videos need reliable H.264/AAC playback or one file needs a specialized output.",
     selection: "optional",
   },
   {

@@ -205,6 +205,8 @@ Subtitle Center continues to serve validated same-stem WebVTT sidecars through t
 
 ## Media organizer boundary
 
+Optimize Library accepts catalog IDs rather than input paths. Rust revalidates every selected item, caps batches at 100 videos, rejects symlink or non-directory output roots, derives collision-resistant filenames, and starts ordinary cancellable H.264/AAC MP4 transformation tasks. Outputs are always separate files; originals are never replaced by the optimizer.
+
 The Library can index multiple user-selected folders independently of download destinations. Sources, durable scan jobs, and catalog items are persisted in SQLite. A Rust-owned scanner performs bounded directory walks, ignores symlinks by default, classifies supported video and image extensions, and emits normalized progress events. Files remain in place; scanning and record removal never mutate external media.
 
 The default Library presentation is a browse-first media hub. React may request artwork only by catalog item ID. Rust validates the stored item, resolves FFmpeg internally, limits concurrent artwork work, and returns a bounded cached JPEG data URL; the webview never receives arbitrary filesystem read access. Opening media likewise accepts an item ID and resolves the persisted path in Rust.

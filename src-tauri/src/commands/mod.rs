@@ -95,6 +95,81 @@ pub fn start_transformation(
 }
 
 #[tauri::command]
+pub fn start_library_optimization(
+    app: AppHandle,
+    database: State<'_, Database>,
+    transformations: State<'_, TransformationManager>,
+    item_ids: Vec<String>,
+    destination_directory: String,
+    overwrite: bool,
+) -> Result<Vec<TransformationTask>, AppError> {
+    if item_ids.is_empty() || item_ids.len() > 100 {
+        return Err(AppError::new(
+            "invalid_optimization_selection",
+            "Choose between 1 and 100 Library videos to optimize.",
+        ));
+    }
+    let destination = std::path::PathBuf::from(destination_directory);
+    let metadata = destination.symlink_metadata().map_err(|_| {
+        AppError::new(
+            "optimization_destination_missing",
+            "Choose an existing output folder for optimized videos.",
+        )
+    })?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(AppError::new(
+            "invalid_optimization_destination",
+            "The optimization output must be a regular folder, not a symlink.",
+        ));
+    }
+    let mut tasks = Vec::with_capacity(item_ids.len());
+    let mut seen = HashSet::new();
+    for item_id in item_ids {
+        if !seen.insert(item_id.clone()) {
+            continue;
+        }
+        let item = database.get_library_item(&item_id)?;
+        if item.missing || item.media_kind != Some(LibraryMediaKind::Video) {
+            return Err(AppError::new(
+                "optimization_video_unavailable",
+                "Every selected optimization item must be an available Library video.",
+            ));
+        }
+        let source = std::path::Path::new(&item.path);
+        let stem = source
+            .file_stem()
+            .and_then(std::ffi::OsStr::to_str)
+            .unwrap_or("video")
+            .chars()
+            .map(|character| {
+                if character.is_control() || matches!(character, '/' | '\\') {
+                    '_'
+                } else {
+                    character
+                }
+            })
+            .take(120)
+            .collect::<String>();
+        let suffix = item_id.get(..8).unwrap_or(&item_id);
+        let output = destination.join(format!("{stem}-compatible-{suffix}.mp4"));
+        tasks.push(transformations.start(
+            app.clone(),
+            StartTransformationRequest {
+                input_path: item.path,
+                output_path: output.to_string_lossy().into_owned(),
+                operation: crate::models::TransformationOperation::Transcode {
+                    container: "mp4".to_owned(),
+                    video_codec: crate::models::TransformVideoCodec::H264,
+                    audio_codec: crate::models::TransformAudioCodec::Aac,
+                },
+                overwrite,
+            },
+        )?);
+    }
+    Ok(tasks)
+}
+
+#[tauri::command]
 pub fn cancel_transformation(
     transformations: State<'_, TransformationManager>,
     id: String,
