@@ -3,6 +3,7 @@ mod chapter_suggestions;
 mod commands;
 mod creative;
 mod database;
+mod embedded_mpv;
 mod engines;
 mod errors;
 mod library;
@@ -56,6 +57,9 @@ fn install_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(native_player) = app.try_state::<native_player::NativePlayerManager>() {
                     native_player.close();
                 }
+                if let Some(embedded_mpv) = app.try_state::<embedded_mpv::EmbeddedMpvManager>() {
+                    embedded_mpv.close();
+                }
                 app.exit(0);
             }
             _ => {}
@@ -68,6 +72,9 @@ fn install_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 pub fn run() {
+    if let Err(error) = embedded_mpv::configure_numeric_locale() {
+        eprintln!("Nice Downloader warning: {error}");
+    }
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
@@ -127,6 +134,12 @@ pub fn run() {
                 media_server::MediaServerState::unavailable(database.clone())
                 });
             let native_player = native_player::NativePlayerManager::new(database.clone());
+            let embedded_mpv = embedded_mpv::EmbeddedMpvManager::new(database.clone());
+            if let Some(window) = app.get_webview_window("main") {
+                if let Err(error) = embedded_mpv.install(&window) {
+                    tracing::warn!(%error, "could not install experimental embedded libmpv surface");
+                }
+            }
             if tray_available && database.load_desktop_preferences()?.start_minimized {
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.hide();
@@ -164,6 +177,7 @@ pub fn run() {
             app.manage(library);
             app.manage(media_server);
             app.manage(native_player);
+            app.manage(embedded_mpv);
             tracing::info!(path = %data_directory.display(), "application backend initialized");
             Ok(())
         })
@@ -258,6 +272,8 @@ pub fn run() {
             commands::prepare_library_image_view,
             commands::inspect_library_playback,
             commands::prepare_library_playback,
+            commands::prepare_library_live_playback,
+            commands::prepare_library_hls_playback,
             commands::inspect_library_playback_fallback,
             commands::prepare_library_playback_fallback,
             commands::get_library_playback_preparation,
@@ -268,6 +284,11 @@ pub fn run() {
             commands::get_native_playback_status,
             commands::open_library_native_playback,
             commands::close_library_native_playback,
+            commands::get_embedded_mpv_status,
+            commands::open_library_embedded_mpv,
+            commands::update_embedded_mpv_bounds,
+            commands::control_embedded_mpv,
+            commands::close_embedded_mpv,
             commands::save_library_playback_progress,
             commands::list_continue_watching,
             commands::get_library_watch_state,

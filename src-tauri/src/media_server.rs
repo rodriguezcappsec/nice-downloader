@@ -10,8 +10,8 @@ use crate::{
     },
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use futures_util::TryStreamExt;
-use http_body_util::{combinators::UnsyncBoxBody, BodyExt, Empty, StreamBody};
+use futures_util::{Stream, TryStreamExt};
+use http_body_util::{combinators::UnsyncBoxBody, BodyExt, Empty, Full, StreamBody};
 use hyper::{
     body::{Bytes, Frame, Incoming},
     header::{
@@ -33,9 +33,11 @@ use std::{
     io::SeekFrom,
     net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener as StdTcpListener},
     path::{Path, PathBuf},
+    pin::Pin,
     process::Stdio,
     sync::{Arc, RwLock},
-    time::{SystemTime, UNIX_EPOCH},
+    task::{Context, Poll},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
     fs::File,
@@ -55,6 +57,10 @@ const MAX_COMPATIBILITY_CACHE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const COMPATIBILITY_CACHE_VERSION: u8 = 2;
 const TRANSCODE_CACHE_VERSION: u8 = 1;
 const LARGE_COMPATIBILITY_COPY_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const MAX_LIVE_TRANSCODES: usize = 2;
+const LIVE_TRANSCODE_AUTHORIZATION_TTL: Duration = Duration::from_secs(5 * 60);
+const MAX_HLS_MANIFEST_BYTES: u64 = 1024 * 1024;
+const HLS_START_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct CompatibilityTarget {
     source: PathBuf,
@@ -67,6 +73,45 @@ struct ActivePlaybackPreparation {
     progress: LibraryPlaybackPreparationProgress,
     cancellation: CancellationToken,
     reserved_bytes: u64,
+}
+
+#[derive(Clone)]
+struct LiveTranscodeAuthorization {
+    item_id: String,
+    start_seconds: f64,
+    cancellation: CancellationToken,
+    started: bool,
+    created_at: Instant,
+}
+
+#[derive(Clone)]
+struct HlsTranscodeAuthorization {
+    item_id: String,
+    start_seconds: f64,
+    directory: PathBuf,
+    cancellation: CancellationToken,
+    started: bool,
+    created_at: Instant,
+    last_access: Instant,
+}
+
+struct LiveTranscodeBodyStream {
+    inner: Pin<Box<dyn Stream<Item = Result<Frame<Bytes>, BoxError>> + Send>>,
+    cancellation: CancellationToken,
+}
+
+impl Stream for LiveTranscodeBodyStream {
+    type Item = Result<Frame<Bytes>, BoxError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.inner.as_mut().poll_next(context)
+    }
+}
+
+impl Drop for LiveTranscodeBodyStream {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
+    }
 }
 
 struct PlaybackPreparationGuard {
@@ -138,6 +183,9 @@ pub struct MediaServerState {
     compatibility_lock: Arc<AsyncMutex<()>>,
     playback_preparations: Arc<RwLock<HashMap<String, ActivePlaybackPreparation>>>,
     preparation_slots: Arc<Semaphore>,
+    live_transcodes: Arc<RwLock<HashMap<String, LiveTranscodeAuthorization>>>,
+    hls_transcodes: Arc<RwLock<HashMap<String, HlsTranscodeAuthorization>>>,
+    live_transcode_slots: Arc<Semaphore>,
     webview_dependency_error: Arc<OnceCell<Option<String>>>,
 }
 
@@ -152,6 +200,9 @@ impl MediaServerState {
             compatibility_lock: Arc::new(AsyncMutex::new(())),
             playback_preparations: Arc::new(RwLock::new(HashMap::new())),
             preparation_slots: Arc::new(Semaphore::new(2)),
+            live_transcodes: Arc::new(RwLock::new(HashMap::new())),
+            hls_transcodes: Arc::new(RwLock::new(HashMap::new())),
+            live_transcode_slots: Arc::new(Semaphore::new(MAX_LIVE_TRANSCODES)),
             webview_dependency_error: Arc::new(OnceCell::new()),
         }
     }
@@ -436,6 +487,17 @@ impl MediaServerState {
                 "Close embedded videos before clearing the compatibility cache.",
             ));
         }
+        if !self
+            .hls_transcodes
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_empty()
+        {
+            return Err(AppError::new(
+                "playback_cache_in_use",
+                "Close segmented playback sessions before clearing the compatibility cache.",
+            ));
+        }
         let result = clear_playback_cache(&self.cache_directory)?;
         self.playback_paths
             .write()
@@ -447,8 +509,221 @@ impl MediaServerState {
     pub fn release_playback(&self, item_id: &str) -> Result<(), AppError> {
         validate_item_id(item_id)?;
         self.cancel_playback_preparation_if_active(item_id);
+        self.cancel_live_transcodes_for_item(item_id);
+        self.cancel_hls_transcodes_for_item(item_id);
         self.set_playback_path(item_id, None);
         Ok(())
+    }
+
+    pub fn prepare_live_transcode_playback(
+        &self,
+        item_id: &str,
+        start_seconds: f64,
+    ) -> Result<LibraryPlaybackSession, AppError> {
+        let base_url = self.base_url.as_deref().ok_or_else(|| {
+            AppError::new(
+                "embedded_playback_unavailable",
+                "Embedded playback is unavailable on this system. Open the video in your system player instead.",
+            )
+        })?;
+        validate_item_id(item_id)?;
+        if managed::resolve("ffmpeg").is_none() {
+            return Err(AppError::new(
+                "live_transcode_unavailable",
+                "Live compatibility playback needs FFmpeg. Install FFmpeg in Settings > Engines or use a native player.",
+            ));
+        }
+
+        let item = self.database.get_library_item(item_id)?;
+        validate_playable_item(&item)?;
+        let playback = self.database.get_library_playback(item_id)?;
+        let duration = item
+            .duration_seconds
+            .filter(|value| value.is_finite() && *value > 0.0);
+        let maximum_start = duration
+            .map(|value| (value - 0.25).max(0.0))
+            .unwrap_or(f64::MAX);
+        let start_seconds = if start_seconds.is_finite() {
+            start_seconds.clamp(0.0, maximum_start)
+        } else {
+            return Err(AppError::new(
+                "invalid_playback_timestamp",
+                "The requested playback timestamp is invalid.",
+            ));
+        };
+
+        self.cancel_live_transcodes_for_item(item_id);
+        self.cancel_hls_transcodes_for_item(item_id);
+        self.set_playback_path(item_id, None);
+        let stream_id = Uuid::new_v4().to_string();
+        self.live_transcodes
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(
+                stream_id.clone(),
+                LiveTranscodeAuthorization {
+                    item_id: item_id.to_owned(),
+                    start_seconds,
+                    cancellation: CancellationToken::new(),
+                    started: false,
+                    created_at: Instant::now(),
+                },
+            );
+
+        let subtitles = discover_subtitles(Path::new(&item.path))
+            .into_iter()
+            .map(|track| LibrarySubtitleTrack {
+                label: track.label,
+                language: track.language,
+                url: format!(
+                    "{}/subtitle/{}/{}?token={}",
+                    base_url,
+                    item.id,
+                    URL_SAFE_NO_PAD.encode(track.file_name.as_bytes()),
+                    self.token,
+                ),
+            })
+            .collect();
+
+        Ok(LibraryPlaybackSession {
+            playback,
+            url: format!(
+                "{}/transcode/{}/{}.mp4?token={}",
+                base_url, item.id, stream_id, self.token,
+            ),
+            item,
+            subtitles,
+            compatibility_mode: false,
+            compatibility_transcoded: false,
+            live_transcode: true,
+            segmented_stream: false,
+            stream_start_seconds: start_seconds,
+        })
+    }
+
+    pub fn prepare_hls_playback(
+        &self,
+        item_id: &str,
+        start_seconds: f64,
+    ) -> Result<LibraryPlaybackSession, AppError> {
+        let base_url = self.base_url.as_deref().ok_or_else(|| {
+            AppError::new(
+                "embedded_playback_unavailable",
+                "Embedded playback is unavailable on this system. Open the video in your system player instead.",
+            )
+        })?;
+        validate_item_id(item_id)?;
+        if managed::resolve("ffmpeg").is_none() {
+            return Err(AppError::new(
+                "live_transcode_unavailable",
+                "Segmented compatibility playback needs FFmpeg. Install FFmpeg in Settings > Engines or use a native player.",
+            ));
+        }
+
+        let item = self.database.get_library_item(item_id)?;
+        validate_playable_item(&item)?;
+        let playback = self.database.get_library_playback(item_id)?;
+        let duration = item
+            .duration_seconds
+            .filter(|value| value.is_finite() && *value > 0.0);
+        let maximum_start = duration
+            .map(|value| (value - 0.25).max(0.0))
+            .unwrap_or(f64::MAX);
+        let start_seconds = if start_seconds.is_finite() {
+            start_seconds.clamp(0.0, maximum_start)
+        } else {
+            return Err(AppError::new(
+                "invalid_playback_timestamp",
+                "The requested playback timestamp is invalid.",
+            ));
+        };
+
+        self.cancel_live_transcodes_for_item(item_id);
+        self.cancel_hls_transcodes_for_item(item_id);
+        self.set_playback_path(item_id, None);
+        let stream_id = Uuid::new_v4().to_string();
+        let directory = create_hls_session_directory(&self.cache_directory, &stream_id)?;
+        let now = Instant::now();
+        self.hls_transcodes
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(
+                stream_id.clone(),
+                HlsTranscodeAuthorization {
+                    item_id: item_id.to_owned(),
+                    start_seconds,
+                    directory,
+                    cancellation: CancellationToken::new(),
+                    started: false,
+                    created_at: now,
+                    last_access: now,
+                },
+            );
+
+        let subtitles = discover_subtitles(Path::new(&item.path))
+            .into_iter()
+            .map(|track| LibrarySubtitleTrack {
+                label: track.label,
+                language: track.language,
+                url: format!(
+                    "{}/subtitle/{}/{}?token={}",
+                    base_url,
+                    item.id,
+                    URL_SAFE_NO_PAD.encode(track.file_name.as_bytes()),
+                    self.token,
+                ),
+            })
+            .collect();
+
+        Ok(LibraryPlaybackSession {
+            playback,
+            url: format!(
+                "{}/hls/{}/{}/index.m3u8?token={}",
+                base_url, item.id, stream_id, self.token,
+            ),
+            item,
+            subtitles,
+            compatibility_mode: false,
+            compatibility_transcoded: false,
+            live_transcode: true,
+            segmented_stream: true,
+            stream_start_seconds: start_seconds,
+        })
+    }
+
+    fn cancel_live_transcodes_for_item(&self, item_id: &str) {
+        let mut streams = self
+            .live_transcodes
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let matching = streams
+            .iter()
+            .filter(|(_, stream)| stream.item_id == item_id)
+            .map(|(stream_id, _)| stream_id.clone())
+            .collect::<Vec<_>>();
+        for stream_id in matching {
+            if let Some(stream) = streams.remove(&stream_id) {
+                stream.cancellation.cancel();
+            }
+        }
+    }
+
+    fn cancel_hls_transcodes_for_item(&self, item_id: &str) {
+        let mut streams = self
+            .hls_transcodes
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let matching = streams
+            .iter()
+            .filter(|(_, stream)| stream.item_id == item_id)
+            .map(|(stream_id, _)| stream_id.clone())
+            .collect::<Vec<_>>();
+        for stream_id in matching {
+            if let Some(stream) = streams.remove(&stream_id) {
+                stream.cancellation.cancel();
+                let _ = std::fs::remove_dir_all(stream.directory);
+            }
+        }
     }
 
     pub fn prepare_playback(&self, item_id: &str) -> Result<LibraryPlaybackSession, AppError> {
@@ -496,6 +771,9 @@ impl MediaServerState {
             subtitles,
             compatibility_mode,
             compatibility_transcoded,
+            live_transcode: false,
+            segmented_stream: false,
+            stream_start_seconds: 0.0,
         })
     }
 
@@ -1076,6 +1354,65 @@ fn remove_orphaned_playback_partials(directory: &Path) {
     }
 }
 
+fn create_hls_session_directory(
+    cache_directory: &Path,
+    stream_id: &str,
+) -> Result<PathBuf, AppError> {
+    let root = cache_directory.join("live-hls");
+    match std::fs::symlink_metadata(&root) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => {
+            return Err(AppError::new(
+                "embedded_playback_cache_unsafe",
+                "The temporary playback cache is not a safe directory. Clear or repair the application cache before retrying.",
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir_all(&root).map_err(|error| {
+                AppError::internal("could not create the temporary HLS playback root", error)
+            })?;
+        }
+        Err(error) => {
+            return Err(AppError::internal(
+                "could not inspect the temporary HLS playback root",
+                error,
+            ));
+        }
+    }
+    let directory = root.join(stream_id);
+    std::fs::create_dir(&directory).map_err(|error| {
+        AppError::internal(
+            "could not create the temporary HLS playback directory",
+            error,
+        )
+    })?;
+    Ok(directory)
+}
+
+fn remove_orphaned_hls_sessions(cache_directory: &Path) {
+    let root = cache_directory.join("live-hls");
+    if !std::fs::symlink_metadata(&root)
+        .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+    {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_session_directory = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| Uuid::parse_str(name).is_ok())
+            && std::fs::symlink_metadata(&path)
+                .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink());
+        if is_session_directory {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
+}
+
 fn enforce_compatibility_cache_limits(
     directory: &Path,
     preserve: Option<&Path>,
@@ -1415,6 +1752,7 @@ fn playback_preparation_cancelled() -> AppError {
 
 pub fn start(database: Database, cache_directory: PathBuf) -> Result<MediaServerState, AppError> {
     remove_orphaned_playback_partials(&cache_directory);
+    remove_orphaned_hls_sessions(&cache_directory);
     let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
     let listener = StdTcpListener::bind(address)
         .map_err(|error| AppError::internal("could not start the local media player", error))?;
@@ -1433,6 +1771,9 @@ pub fn start(database: Database, cache_directory: PathBuf) -> Result<MediaServer
         compatibility_lock: Arc::new(AsyncMutex::new(())),
         playback_preparations: Arc::new(RwLock::new(HashMap::new())),
         preparation_slots: Arc::new(Semaphore::new(2)),
+        live_transcodes: Arc::new(RwLock::new(HashMap::new())),
+        hls_transcodes: Arc::new(RwLock::new(HashMap::new())),
+        live_transcode_slots: Arc::new(Semaphore::new(MAX_LIVE_TRANSCODES)),
         webview_dependency_error: Arc::new(OnceCell::new()),
     };
     let server_state = state.clone();
@@ -1534,6 +1875,21 @@ async fn handle_request(
         .split('/')
         .filter(|segment| !segment.is_empty())
         .collect::<Vec<_>>();
+    if let ["transcode", item_id, stream_file] = segments.as_slice() {
+        let Some(stream_id) = stream_file.strip_suffix(".mp4") else {
+            return response(StatusCode::NOT_FOUND, empty_body());
+        };
+        return match serve_live_transcode(&request, &state, item_id, stream_id).await {
+            Ok(response) => response,
+            Err(status) => response(status, empty_body()),
+        };
+    }
+    if let ["hls", item_id, stream_id, file_name] = segments.as_slice() {
+        return match serve_hls(&request, &state, item_id, stream_id, file_name).await {
+            Ok(response) => response,
+            Err(status) => response(status, empty_body()),
+        };
+    }
     let resolved = match segments.as_slice() {
         ["media", item_id] => resolve_media_path(&state, item_id),
         ["image", item_id] => resolve_image_path(&state.database, item_id),
@@ -1641,6 +1997,572 @@ fn resolve_subtitle_path(
         .join(file_name);
     validate_regular_media_file(&path).map_err(|_| StatusCode::NOT_FOUND)?;
     Ok((path, "text/vtt; charset=utf-8"))
+}
+
+async fn serve_hls(
+    request: &Request<Incoming>,
+    state: &MediaServerState,
+    item_id: &str,
+    stream_id: &str,
+    file_name: &str,
+) -> Result<Response<MediaBody>, StatusCode> {
+    Uuid::parse_str(item_id).map_err(|_| StatusCode::NOT_FOUND)?;
+    Uuid::parse_str(stream_id).map_err(|_| StatusCode::NOT_FOUND)?;
+    let content_type = hls_content_type(file_name).ok_or(StatusCode::NOT_FOUND)?;
+    let item = state
+        .database
+        .get_library_item(item_id)
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+    validate_playable_item(&item).map_err(|_| StatusCode::NOT_FOUND)?;
+    let source = PathBuf::from(&item.path);
+
+    let authorization = {
+        let mut streams = state
+            .hls_transcodes
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let stream = streams
+            .get_mut(stream_id)
+            .filter(|stream| {
+                stream.item_id == item_id
+                    && (stream.started
+                        || stream.created_at.elapsed() <= LIVE_TRANSCODE_AUTHORIZATION_TTL)
+            })
+            .ok_or(StatusCode::NOT_FOUND)?;
+        stream.last_access = Instant::now();
+        stream.clone()
+    };
+
+    if request.method() == Method::HEAD && file_name == "index.m3u8" {
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, content_type)
+            .header(ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+            .header(CACHE_CONTROL, "no-store")
+            .body(empty_body())
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    if file_name == "index.m3u8" {
+        ensure_hls_started(state, item_id, stream_id, &source).await?;
+        wait_for_hls_manifest(&authorization.directory, &authorization.cancellation).await?;
+        serve_hls_manifest(
+            request,
+            &authorization.directory.join(file_name),
+            &state.token,
+        )
+        .await
+    } else {
+        let path = authorization.directory.join(file_name);
+        validate_regular_media_file(&path).map_err(|_| StatusCode::NOT_FOUND)?;
+        serve_file(request, &path, content_type)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+    }
+}
+
+fn hls_content_type(file_name: &str) -> Option<&'static str> {
+    if file_name == "index.m3u8" {
+        return Some("application/vnd.apple.mpegurl");
+    }
+    let number = file_name.strip_prefix("segment_")?.strip_suffix(".ts")?;
+    (!number.is_empty() && number.len() <= 8 && number.bytes().all(|byte| byte.is_ascii_digit()))
+        .then_some("video/mp2t")
+}
+
+async fn ensure_hls_started(
+    state: &MediaServerState,
+    item_id: &str,
+    stream_id: &str,
+    source: &Path,
+) -> Result<(), StatusCode> {
+    let authorization = {
+        let mut streams = state
+            .hls_transcodes
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let stream = streams.get_mut(stream_id).ok_or(StatusCode::NOT_FOUND)?;
+        if stream.item_id != item_id {
+            return Err(StatusCode::NOT_FOUND);
+        }
+        if stream.started {
+            return Ok(());
+        }
+        stream.started = true;
+        stream.clone()
+    };
+
+    let permit = match timeout(
+        Duration::from_secs(3),
+        state.live_transcode_slots.clone().acquire_owned(),
+    )
+    .await
+    {
+        Ok(Ok(permit)) => permit,
+        _ => {
+            if let Some(stream) = state
+                .hls_transcodes
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .get_mut(stream_id)
+            {
+                stream.started = false;
+            }
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
+        }
+    };
+    let Some(ffmpeg) = managed::resolve("ffmpeg") else {
+        if let Some(stream) = state
+            .hls_transcodes
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get_mut(stream_id)
+        {
+            stream.started = false;
+        }
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    };
+    let mut command = hls_transcode_command(
+        &ffmpeg,
+        source,
+        authorization.start_seconds,
+        &authorization.directory,
+    );
+    command
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            tracing::warn!(%error, item_id, "could not start segmented compatibility playback");
+            if let Some(stream) = state
+                .hls_transcodes
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .get_mut(stream_id)
+            {
+                stream.started = false;
+            }
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
+        }
+    };
+    let Some(mut stderr) = child.stderr.take() else {
+        authorization.cancellation.cancel();
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    };
+    let cancellation = authorization.cancellation.clone();
+    let process_cancellation = cancellation.clone();
+    let completed_item_id = item_id.to_owned();
+    let completed_directory = authorization.directory.clone();
+    let diagnostic_task = tauri::async_runtime::spawn(async move {
+        let mut buffer = [0u8; 1024];
+        loop {
+            match stderr.read(&mut buffer).await {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+        }
+    });
+
+    tauri::async_runtime::spawn(async move {
+        let should_remove = tokio::select! {
+            result = child.wait() => {
+                match result {
+                    Ok(status) if status.success() => false,
+                    Ok(status) => {
+                        tracing::debug!(item_id = %completed_item_id, ?status, "segmented compatibility playback ended with an error");
+                        process_cancellation.cancel();
+                        true
+                    }
+                    Err(error) => {
+                        tracing::debug!(item_id = %completed_item_id, %error, "could not wait for segmented compatibility playback");
+                        process_cancellation.cancel();
+                        true
+                    }
+                }
+            }
+            _ = process_cancellation.cancelled() => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                true
+            }
+        };
+        let _ = diagnostic_task.await;
+        if should_remove {
+            let _ = std::fs::remove_dir_all(completed_directory);
+        }
+        drop(permit);
+    });
+    Ok(())
+}
+
+async fn wait_for_hls_manifest(
+    directory: &Path,
+    cancellation: &CancellationToken,
+) -> Result<(), StatusCode> {
+    timeout(HLS_START_TIMEOUT, async {
+        loop {
+            if cancellation.is_cancelled() {
+                return Err(StatusCode::GONE);
+            }
+            let manifest = directory.join("index.m3u8");
+            if std::fs::metadata(manifest)
+                .is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
+            {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .map_err(|_| StatusCode::GATEWAY_TIMEOUT)?
+}
+
+async fn serve_hls_manifest(
+    request: &Request<Incoming>,
+    path: &Path,
+    token: &str,
+) -> Result<Response<MediaBody>, StatusCode> {
+    validate_regular_media_file(path).map_err(|_| StatusCode::NOT_FOUND)?;
+    let metadata = std::fs::metadata(path).map_err(|_| StatusCode::NOT_FOUND)?;
+    if metadata.len() == 0 || metadata.len() > MAX_HLS_MANIFEST_BYTES {
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+    let contents = tokio::fs::read_to_string(path)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let contents =
+        authorize_hls_manifest(&contents, token).ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let builder = Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "application/vnd.apple.mpegurl")
+        .header(CONTENT_LENGTH, contents.len())
+        .header(ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+        .header(CACHE_CONTROL, "no-store")
+        .header("X-Content-Type-Options", "nosniff");
+    if request.method() == Method::HEAD {
+        return builder
+            .body(empty_body())
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR);
+    }
+    builder
+        .body(
+            Full::new(Bytes::from(contents))
+                .map_err(|never| -> BoxError { match never {} })
+                .boxed_unsync(),
+        )
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+fn authorize_hls_manifest(contents: &str, token: &str) -> Option<String> {
+    let mut authorized = String::with_capacity(contents.len().saturating_add(256));
+    for line in contents.lines() {
+        if line.is_empty() || line.starts_with('#') {
+            authorized.push_str(line);
+        } else {
+            if hls_content_type(line) != Some("video/mp2t") {
+                return None;
+            }
+            authorized.push_str(line);
+            authorized.push_str(if line.contains('?') {
+                "&token="
+            } else {
+                "?token="
+            });
+            authorized.push_str(token);
+        }
+        authorized.push('\n');
+    }
+    Some(authorized)
+}
+
+fn hls_transcode_command(
+    ffmpeg: &Path,
+    source: &Path,
+    start_seconds: f64,
+    directory: &Path,
+) -> Command {
+    let mut command = Command::new(ffmpeg);
+    command
+        .arg("-hide_banner")
+        .arg("-loglevel")
+        .arg("error")
+        .arg("-nostdin");
+    if start_seconds > 0.0 {
+        command.arg("-ss").arg(format!("{start_seconds:.3}"));
+    }
+    command
+        .arg("-re")
+        .arg("-i")
+        .arg(source)
+        .arg("-map")
+        .arg("0:v:0")
+        .arg("-map")
+        .arg("0:a:0?")
+        .arg("-sn")
+        .arg("-dn")
+        .arg("-map_metadata")
+        .arg("-1")
+        .arg("-c:v")
+        .arg("libx264")
+        .arg("-preset")
+        .arg("veryfast")
+        .arg("-crf")
+        .arg("23")
+        .arg("-pix_fmt")
+        .arg("yuv420p")
+        .arg("-vf")
+        .arg("scale=trunc(iw/2)*2:trunc(ih/2)*2")
+        .arg("-fps_mode")
+        .arg("vfr")
+        .arg("-force_key_frames")
+        .arg("expr:gte(t,n_forced*2)")
+        .arg("-c:a")
+        .arg("aac")
+        .arg("-b:a")
+        .arg("160k")
+        .arg("-ac")
+        .arg("2")
+        .arg("-f")
+        .arg("hls")
+        .arg("-hls_time")
+        .arg("2")
+        .arg("-hls_list_size")
+        .arg("0")
+        .arg("-hls_playlist_type")
+        .arg("event")
+        .arg("-hls_flags")
+        .arg("independent_segments+temp_file")
+        .arg("-start_number")
+        .arg("0")
+        .arg("-hls_segment_filename")
+        .arg(directory.join("segment_%06d.ts"))
+        .arg(directory.join("index.m3u8"));
+    command
+}
+
+async fn serve_live_transcode(
+    request: &Request<Incoming>,
+    state: &MediaServerState,
+    item_id: &str,
+    stream_id: &str,
+) -> Result<Response<MediaBody>, StatusCode> {
+    Uuid::parse_str(item_id).map_err(|_| StatusCode::NOT_FOUND)?;
+    Uuid::parse_str(stream_id).map_err(|_| StatusCode::NOT_FOUND)?;
+
+    let item = state
+        .database
+        .get_library_item(item_id)
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+    validate_playable_item(&item).map_err(|_| StatusCode::NOT_FOUND)?;
+    let source = PathBuf::from(&item.path);
+
+    let authorization = state
+        .live_transcodes
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(stream_id)
+        .filter(|authorization| {
+            authorization.item_id == item_id
+                && (authorization.started
+                    || authorization.created_at.elapsed() <= LIVE_TRANSCODE_AUTHORIZATION_TTL)
+        })
+        .cloned()
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    if request.method() == Method::HEAD {
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, "video/mp4")
+            .header(ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+            .header(CACHE_CONTROL, "no-store")
+            .body(empty_body())
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    let permit = timeout(
+        Duration::from_secs(3),
+        state.live_transcode_slots.clone().acquire_owned(),
+    )
+    .await
+    .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+    .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    {
+        let mut streams = state
+            .live_transcodes
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let stream = streams.get_mut(stream_id).ok_or(StatusCode::NOT_FOUND)?;
+        if stream.item_id != item_id {
+            return Err(StatusCode::NOT_FOUND);
+        }
+        if stream.started {
+            return Err(StatusCode::CONFLICT);
+        }
+        stream.started = true;
+    }
+
+    let Some(ffmpeg) = managed::resolve("ffmpeg") else {
+        state
+            .live_transcodes
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(stream_id);
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    };
+    let mut command = live_transcode_command(&ffmpeg, &source, authorization.start_seconds);
+    command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            tracing::warn!(%error, item_id, "could not start live compatibility playback");
+            state
+                .live_transcodes
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(stream_id);
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
+        }
+    };
+    let Some(stdout) = child.stdout.take() else {
+        authorization.cancellation.cancel();
+        state
+            .live_transcodes
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(stream_id);
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    };
+    let Some(mut stderr) = child.stderr.take() else {
+        authorization.cancellation.cancel();
+        state
+            .live_transcodes
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(stream_id);
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    };
+    let cancellation = authorization.cancellation.clone();
+    let process_cancellation = cancellation.clone();
+    let streams = state.live_transcodes.clone();
+    let completed_stream_id = stream_id.to_owned();
+    let completed_item_id = item_id.to_owned();
+
+    let diagnostic_task = tauri::async_runtime::spawn(async move {
+        let mut buffer = [0u8; 1024];
+        loop {
+            match stderr.read(&mut buffer).await {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+        }
+    });
+
+    tauri::async_runtime::spawn(async move {
+        tokio::select! {
+            result = child.wait() => {
+                match result {
+                    Ok(status) if status.success() => {},
+                    Ok(status) => {
+                        tracing::debug!(item_id = %completed_item_id, ?status, "live compatibility playback ended");
+                    }
+                    Err(error) => {
+                        tracing::debug!(item_id = %completed_item_id, %error, "could not wait for live compatibility playback");
+                    }
+                }
+            }
+            _ = process_cancellation.cancelled() => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+            }
+        };
+        let _ = diagnostic_task.await;
+        streams
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&completed_stream_id);
+        drop(permit);
+    });
+
+    let stream = ReaderStream::new(stdout)
+        .map_ok(Frame::data)
+        .map_err(|error| -> BoxError { Box::new(error) });
+    let body = LiveTranscodeBodyStream {
+        inner: Box::pin(stream),
+        cancellation,
+    };
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "video/mp4")
+        .header(ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+        .header(CACHE_CONTROL, "no-store")
+        .body(StreamBody::new(body).boxed_unsync())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+fn live_transcode_command(ffmpeg: &Path, source: &Path, start_seconds: f64) -> Command {
+    let mut command = Command::new(ffmpeg);
+    command
+        .arg("-hide_banner")
+        .arg("-loglevel")
+        .arg("error")
+        .arg("-nostdin");
+    if start_seconds > 0.0 {
+        command.arg("-ss").arg(format!("{start_seconds:.3}"));
+    }
+    command
+        .arg("-i")
+        .arg(source)
+        .arg("-map")
+        .arg("0:v:0")
+        .arg("-map")
+        .arg("0:a:0?")
+        .arg("-sn")
+        .arg("-dn")
+        .arg("-map_metadata")
+        .arg("-1")
+        .arg("-c:v")
+        .arg("libx264")
+        .arg("-preset")
+        .arg("veryfast")
+        .arg("-tune")
+        .arg("zerolatency")
+        .arg("-crf")
+        .arg("23")
+        .arg("-pix_fmt")
+        .arg("yuv420p")
+        .arg("-vf")
+        .arg("scale=trunc(iw/2)*2:trunc(ih/2)*2")
+        .arg("-fps_mode")
+        .arg("vfr")
+        .arg("-g")
+        .arg("60")
+        .arg("-keyint_min")
+        .arg("60")
+        .arg("-sc_threshold")
+        .arg("0")
+        .arg("-c:a")
+        .arg("aac")
+        .arg("-b:a")
+        .arg("160k")
+        .arg("-ac")
+        .arg("2")
+        .arg("-avoid_negative_ts")
+        .arg("make_zero")
+        .arg("-movflags")
+        .arg("+frag_keyframe+empty_moov+default_base_moof")
+        .arg("-frag_duration")
+        .arg("1000000")
+        .arg("-flush_packets")
+        .arg("1")
+        .arg("-f")
+        .arg("mp4")
+        .arg("pipe:1");
+    command
 }
 
 async fn serve_file(
@@ -2127,6 +3049,9 @@ mod tests {
             compatibility_lock: Arc::new(AsyncMutex::new(())),
             playback_preparations: Arc::new(RwLock::new(HashMap::new())),
             preparation_slots: Arc::new(Semaphore::new(2)),
+            live_transcodes: Arc::new(RwLock::new(HashMap::new())),
+            hls_transcodes: Arc::new(RwLock::new(HashMap::new())),
+            live_transcode_slots: Arc::new(Semaphore::new(MAX_LIVE_TRANSCODES)),
             webview_dependency_error: Arc::new(OnceCell::new()),
         };
 
@@ -2179,6 +3104,9 @@ mod tests {
             compatibility_lock: Arc::new(AsyncMutex::new(())),
             playback_preparations: Arc::new(RwLock::new(HashMap::new())),
             preparation_slots: Arc::new(Semaphore::new(2)),
+            live_transcodes: Arc::new(RwLock::new(HashMap::new())),
+            hls_transcodes: Arc::new(RwLock::new(HashMap::new())),
+            live_transcode_slots: Arc::new(Semaphore::new(MAX_LIVE_TRANSCODES)),
             webview_dependency_error: Arc::new(OnceCell::new_with(Some(Some(
                 "GStreamer fixture is missing".to_owned(),
             )))),
@@ -2211,6 +3139,9 @@ mod tests {
             compatibility_lock: Arc::new(AsyncMutex::new(())),
             playback_preparations: Arc::new(RwLock::new(HashMap::new())),
             preparation_slots: Arc::new(Semaphore::new(2)),
+            live_transcodes: Arc::new(RwLock::new(HashMap::new())),
+            hls_transcodes: Arc::new(RwLock::new(HashMap::new())),
+            live_transcode_slots: Arc::new(Semaphore::new(MAX_LIVE_TRANSCODES)),
             webview_dependency_error: Arc::new(OnceCell::new_with(Some(None))),
         };
 
@@ -2260,6 +3191,9 @@ mod tests {
             compatibility_lock: Arc::new(AsyncMutex::new(())),
             playback_preparations: Arc::new(RwLock::new(HashMap::new())),
             preparation_slots: Arc::new(Semaphore::new(2)),
+            live_transcodes: Arc::new(RwLock::new(HashMap::new())),
+            hls_transcodes: Arc::new(RwLock::new(HashMap::new())),
+            live_transcode_slots: Arc::new(Semaphore::new(MAX_LIVE_TRANSCODES)),
             webview_dependency_error: Arc::new(OnceCell::new()),
         };
 
@@ -2321,6 +3255,9 @@ mod tests {
             compatibility_lock: Arc::new(AsyncMutex::new(())),
             playback_preparations: Arc::new(RwLock::new(HashMap::new())),
             preparation_slots: Arc::new(Semaphore::new(2)),
+            live_transcodes: Arc::new(RwLock::new(HashMap::new())),
+            hls_transcodes: Arc::new(RwLock::new(HashMap::new())),
+            live_transcode_slots: Arc::new(Semaphore::new(MAX_LIVE_TRANSCODES)),
             webview_dependency_error: Arc::new(OnceCell::new()),
         };
 
@@ -2360,6 +3297,9 @@ mod tests {
             compatibility_lock: Arc::new(AsyncMutex::new(())),
             playback_preparations: Arc::new(RwLock::new(HashMap::new())),
             preparation_slots: Arc::new(Semaphore::new(2)),
+            live_transcodes: Arc::new(RwLock::new(HashMap::new())),
+            hls_transcodes: Arc::new(RwLock::new(HashMap::new())),
+            live_transcode_slots: Arc::new(Semaphore::new(MAX_LIVE_TRANSCODES)),
             webview_dependency_error: Arc::new(OnceCell::new()),
         };
 
@@ -2388,6 +3328,190 @@ mod tests {
                 .code,
             "library_image_not_found"
         );
+    }
+
+    #[test]
+    fn hls_manifest_authorizes_only_segment_lines() {
+        let manifest = "#EXTM3U\n#EXTINF:2.0,\nsegment_000000.ts\n#EXT-X-ENDLIST\n";
+        assert_eq!(
+            authorize_hls_manifest(manifest, "fixture-token"),
+            Some(
+                "#EXTM3U\n#EXTINF:2.0,\nsegment_000000.ts?token=fixture-token\n#EXT-X-ENDLIST\n"
+                    .to_owned(),
+            ),
+        );
+        assert_eq!(authorize_hls_manifest("/private/video.ts\n", "token"), None);
+        assert_eq!(
+            hls_content_type("index.m3u8"),
+            Some("application/vnd.apple.mpegurl")
+        );
+        assert_eq!(hls_content_type("segment_000042.ts"), Some("video/mp2t"));
+        assert_eq!(hls_content_type("../video.ts"), None);
+        assert_eq!(hls_content_type("segment_bad.ts"), None);
+    }
+
+    #[test]
+    fn hls_transcode_command_uses_fixed_bounded_segment_paths() {
+        let directory = Path::new("/private/cache/session-id");
+        let command = hls_transcode_command(
+            Path::new("/usr/bin/ffmpeg"),
+            Path::new("/media/video with spaces.avi"),
+            8.25,
+            directory,
+        );
+        let arguments = command
+            .as_std()
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert!(arguments.windows(2).any(|pair| pair == ["-ss", "8.250"]));
+        assert!(arguments
+            .windows(2)
+            .any(|pair| pair == ["-i", "/media/video with spaces.avi"]));
+        assert!(arguments.windows(2).any(|pair| pair == ["-f", "hls"]));
+        assert!(arguments.windows(2).any(|pair| {
+            pair == [
+                "-hls_segment_filename",
+                "/private/cache/session-id/segment_%06d.ts",
+            ]
+        }));
+        assert_eq!(
+            arguments.last().map(String::as_str),
+            Some("/private/cache/session-id/index.m3u8"),
+        );
+    }
+
+    #[test]
+    fn releasing_playback_cancels_and_removes_hls_session_files() {
+        let directory = tempdir().expect("temporary directory");
+        let database = Database::open(&directory.path().join("media.sqlite3")).expect("database");
+        let state = MediaServerState::unavailable(database);
+        let item_id = Uuid::new_v4().to_string();
+        let stream_id = Uuid::new_v4().to_string();
+        let stream_directory = directory.path().join(&stream_id);
+        std::fs::create_dir_all(&stream_directory).expect("stream directory");
+        std::fs::write(stream_directory.join("segment_000000.ts"), b"segment")
+            .expect("segment fixture");
+        let cancellation = CancellationToken::new();
+        let now = Instant::now();
+        state.hls_transcodes.write().expect("HLS lock").insert(
+            stream_id,
+            HlsTranscodeAuthorization {
+                item_id: item_id.clone(),
+                start_seconds: 0.0,
+                directory: stream_directory.clone(),
+                cancellation: cancellation.clone(),
+                started: false,
+                created_at: now,
+                last_access: now,
+            },
+        );
+
+        state.release_playback(&item_id).expect("release playback");
+
+        assert!(cancellation.is_cancelled());
+        assert!(!stream_directory.exists());
+        assert!(state.hls_transcodes.read().expect("HLS lock").is_empty());
+    }
+
+    #[test]
+    fn startup_cleanup_removes_only_uuid_hls_session_directories() {
+        let directory = tempdir().expect("temporary directory");
+        let root = directory.path().join("live-hls");
+        let orphan = root.join(Uuid::new_v4().to_string());
+        let unrelated = root.join("keep-me");
+        std::fs::create_dir_all(&orphan).expect("orphan directory");
+        std::fs::create_dir_all(&unrelated).expect("unrelated directory");
+
+        remove_orphaned_hls_sessions(directory.path());
+
+        assert!(!orphan.exists());
+        assert!(unrelated.exists());
+    }
+
+    #[test]
+    fn live_transcode_command_uses_a_fixed_fragmented_mp4_argument_array() {
+        let source = Path::new("/media/video with spaces.mkv");
+        let command = live_transcode_command(Path::new("/usr/bin/ffmpeg"), source, 12.5);
+        let arguments = command
+            .as_std()
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert!(arguments.windows(2).any(|pair| pair == ["-ss", "12.500"]));
+        assert!(arguments
+            .windows(2)
+            .any(|pair| pair == ["-i", "/media/video with spaces.mkv"]));
+        assert!(arguments.windows(2).any(|pair| pair == ["-c:v", "libx264"]));
+        assert!(arguments.windows(2).any(|pair| pair == ["-c:a", "aac"]));
+        assert!(arguments
+            .windows(2)
+            .any(|pair| { pair == ["-movflags", "+frag_keyframe+empty_moov+default_base_moof"] }));
+        assert_eq!(arguments.last().map(String::as_str), Some("pipe:1"));
+    }
+
+    #[tokio::test]
+    async fn live_transcode_head_is_authorized_without_starting_ffmpeg() {
+        let directory = tempdir().expect("temporary directory");
+        let source = directory.path().join("video.avi");
+        std::fs::write(&source, b"video fixture").expect("video fixture");
+        let database = Database::open(&directory.path().join("media.sqlite3")).expect("database");
+        let item = video_item(&source, 13);
+        database.upsert_library_item(&item).expect("catalog video");
+        let state = start(database, directory.path().join("playback-cache")).expect("media server");
+        let stream_id = Uuid::new_v4().to_string();
+        let cancellation = CancellationToken::new();
+        state
+            .live_transcodes
+            .write()
+            .expect("live transcode lock")
+            .insert(
+                stream_id.clone(),
+                LiveTranscodeAuthorization {
+                    item_id: item.id.clone(),
+                    start_seconds: 4.0,
+                    cancellation: cancellation.clone(),
+                    started: false,
+                    created_at: Instant::now(),
+                },
+            );
+        let url = format!(
+            "{}/transcode/{}/{}.mp4?token={}",
+            state.base_url.as_deref().expect("server URL"),
+            item.id,
+            stream_id,
+            state.token,
+        );
+
+        let response = reqwest::Client::new()
+            .head(url)
+            .send()
+            .await
+            .expect("HEAD response");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            response.headers().get(reqwest::header::CONTENT_TYPE),
+            Some(&reqwest::header::HeaderValue::from_static("video/mp4")),
+        );
+        assert!(
+            !state
+                .live_transcodes
+                .read()
+                .expect("live transcode lock")
+                .get(&stream_id)
+                .expect("authorized stream")
+                .started
+        );
+
+        state.release_playback(&item.id).expect("release playback");
+        assert!(cancellation.is_cancelled());
+        assert!(!state
+            .live_transcodes
+            .read()
+            .expect("live transcode lock")
+            .contains_key(&stream_id));
     }
 
     #[tokio::test]

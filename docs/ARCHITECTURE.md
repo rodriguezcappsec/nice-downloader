@@ -156,6 +156,8 @@ Embedded playback uses the platform WebView's HTML5 media engine. Rust starts an
 
 An optional Rust-owned native mpv backend sits before compatibility-copy fallbacks. React supplies only a catalog UUID; Rust revalidates video kind, availability, and an absolute regular-file path before spawning a discovered `mpv` executable with a fixed argument array, `--no-config`, a random process-private IPC socket, and the media path after `--`. One native session may run at a time. The backend polls mpv time/duration through IPC and persists bounded resume state through the same SQLite playback record. Linux parent-death signaling and explicit quit handling prevent orphaned playback. Wayland uses mpv's own native window because portable foreign-surface embedding is unavailable; this still avoids remuxing or transcoding and isolates decoder failures from the WebView.
 
+The libmpv experiment documented in `docs/experiments/libmpv-gtk.md` proves AV1 + AAC rendering in an application-owned GTK `GLArea` under native Wayland. Its opt-in phase-two path reparents the Tauri WebView into a GTK overlay and positions an input-pass-through libmpv surface from bounded React geometry while Rust retains catalog-ID path authority. WebView/copy/external-player fallbacks remain intact; packaging, license review, broader distribution coverage, and automated interaction/accessibility proof remain gates before this can become a default player.
+
 Linux AppImages stage a curated GStreamer plugin set and matching
 `gst-plugin-scanner` before the final `linuxdeploy` dependency pass. A small
 AppRun wrapper pins WebKitGTK to that packaged runtime rather than mixing the
@@ -233,3 +235,9 @@ resolution prefers app-managed updates, then the bundled baseline, then host
 installations. Platform packaging, non-Linux pause/notification adapters, and
 custom arguments remain later work. Additional authenticated-site support should
 extend typed access preferences rather than exposing arbitrary engine flags.
+
+## Live compatibility playback
+
+Direct byte-range playback remains the first embedded-player choice. When preflight predicts a compatibility copy, or direct WebView playback reports a decode failure or stall, React advances through two Rust-owned compatibility sources: segmented HLS first, then fragmented MP4. Random stream IDs bind the catalog UUID to a finite logical start timestamp, and the loopback server revalidates the original regular, non-symlink video before spawning FFmpeg.
+
+At most two compatibility FFmpeg processes run concurrently across both protocols. HLS writes atomic two-second H.264/AAC transport-stream segments and an event playlist into a UUID-scoped private cache directory; Rust rewrites only media lines with the process token, serves a closed filename grammar, clears sessions on release, and removes UUID-shaped orphans at startup. Fragmented MP4 writes to stdout, and dropping its HTTP body cancels and reaps the child immediately. Seeking creates a fresh authorization and stream at the selected original-media timestamp. React offsets progress and same-stem WebVTT cues so resume, transcript jumps, and persistence remain on the original video's timeline. Cached AV1 remuxes, full H.264 copies, embedded libmpv, native mpv, and the system player remain explicit recovery paths.

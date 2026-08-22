@@ -413,3 +413,10 @@ See `docs/LOCAL_AI_THEMES.md` for setup, privacy, and indexing behavior.
 ## Explicitly deferred
 
 Face recognition, cloud sync, server mode, automatic file deletion, and Stash-compatible scraping are not prerequisites for a mature local organizer. Revisit them only after the source scanner, metadata cache, browsing, and recovery behavior are dependable.
+
+## Live compatibility playback
+
+- Direct WebView playback is attempted first. Predicted incompatibility, a decode error, or a playback watchdog stall advances automatically to temporary HLS and then fragmented H.264/AAC MP4 when the platform rejects HLS.
+- Compatibility streams use catalog IDs and random authorizations and share a two-process FFmpeg cap. HLS uses private two-second segments removed on release; fragmented MP4 is cancelled when its HTTP client disconnects. Source paths never cross into React.
+- Seeking starts a fresh stream at the selected original-media timestamp. Progress, duration, transcript jumps, and same-stem subtitle cues stay on the original video's logical timeline.
+- Cached AV1 remuxes, full H.264 playback copies, embedded libmpv, native mpv, and the system player remain recovery choices.

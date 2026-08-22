@@ -1,6 +1,8 @@
+use crate::embedded_mpv::EmbeddedMpvManager;
 use crate::models::LibraryWatchState;
 use crate::models::{
-    ConfigureLibraryPrivacyRequest, LibraryPrivacyRules, LibraryPrivacyStatus,
+    ConfigureLibraryPrivacyRequest, EmbeddedMpvBounds, EmbeddedMpvControlRequest,
+    EmbeddedMpvSession, EmbeddedMpvStatus, LibraryPrivacyRules, LibraryPrivacyStatus,
     SetLibraryFolderPrivacyRequest, SetLibraryItemPrivacyRequest,
 };
 use crate::models::{LibraryPlaylist, SaveLibraryPlaylistRequest};
@@ -483,6 +485,24 @@ pub async fn prepare_library_playback(
 }
 
 #[tauri::command]
+pub fn prepare_library_live_playback(
+    media_server: State<'_, MediaServerState>,
+    id: String,
+    start_seconds: f64,
+) -> Result<LibraryPlaybackSession, AppError> {
+    media_server.prepare_live_transcode_playback(&id, start_seconds)
+}
+
+#[tauri::command]
+pub fn prepare_library_hls_playback(
+    media_server: State<'_, MediaServerState>,
+    id: String,
+    start_seconds: f64,
+) -> Result<LibraryPlaybackSession, AppError> {
+    media_server.prepare_hls_playback(&id, start_seconds)
+}
+
+#[tauri::command]
 pub async fn inspect_library_playback(
     media_server: State<'_, MediaServerState>,
     id: String,
@@ -559,9 +579,11 @@ pub fn open_library_native_playback(
     app: AppHandle,
     library: State<'_, library::LibraryManager>,
     native_player: State<'_, NativePlayerManager>,
+    embedded_mpv: State<'_, EmbeddedMpvManager>,
     id: String,
     start_at_seconds: Option<f64>,
 ) -> Result<NativePlaybackSession, AppError> {
+    embedded_mpv.close();
     match native_player.open(&id, start_at_seconds) {
         Ok(session) => Ok(session),
         Err(error) if error.code == "library_file_not_found" => {
@@ -577,6 +599,65 @@ pub fn open_library_native_playback(
 #[tauri::command]
 pub fn close_library_native_playback(native_player: State<'_, NativePlayerManager>) {
     native_player.close();
+}
+
+#[tauri::command]
+pub fn get_embedded_mpv_status(embedded_mpv: State<'_, EmbeddedMpvManager>) -> EmbeddedMpvStatus {
+    embedded_mpv.status()
+}
+
+#[tauri::command]
+pub async fn open_library_embedded_mpv(
+    app: AppHandle,
+    library: State<'_, library::LibraryManager>,
+    embedded_mpv: State<'_, EmbeddedMpvManager>,
+    native_player: State<'_, NativePlayerManager>,
+    id: String,
+    start_at_seconds: Option<f64>,
+    bounds: EmbeddedMpvBounds,
+) -> Result<EmbeddedMpvSession, AppError> {
+    native_player.close();
+    let manager = embedded_mpv.inner().clone();
+    let open_id = id.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        manager.open(&open_id, start_at_seconds, bounds)
+    })
+    .await
+    .map_err(|error| AppError::internal("embedded libmpv startup task failed", error))?;
+    match result {
+        Ok(session) => Ok(session),
+        Err(error) if error.code == "library_file_not_found" => {
+            if let Err(mark_error) = library.mark_item_missing(&app, &id) {
+                tracing::warn!(%mark_error, item_id = %id, "could not mark unavailable embedded-libmpv media as missing");
+            }
+            Err(error)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[tauri::command]
+pub fn update_embedded_mpv_bounds(
+    embedded_mpv: State<'_, EmbeddedMpvManager>,
+    bounds: EmbeddedMpvBounds,
+) -> Result<(), AppError> {
+    embedded_mpv.update_bounds(bounds)
+}
+
+#[tauri::command]
+pub async fn control_embedded_mpv(
+    embedded_mpv: State<'_, EmbeddedMpvManager>,
+    request: EmbeddedMpvControlRequest,
+) -> Result<(), AppError> {
+    let manager = embedded_mpv.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || manager.control(request))
+        .await
+        .map_err(|error| AppError::internal("embedded libmpv control task failed", error))?
+}
+
+#[tauri::command]
+pub fn close_embedded_mpv(embedded_mpv: State<'_, EmbeddedMpvManager>) {
+    embedded_mpv.close();
 }
 
 #[tauri::command]
