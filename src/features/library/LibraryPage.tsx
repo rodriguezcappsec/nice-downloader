@@ -156,6 +156,11 @@ const MINI_PLAYER_MARGIN = 16;
 const MINI_PLAYER_DEFAULT_WIDTH = 420;
 const MINI_PLAYER_MIN_WIDTH = 340;
 const MINI_PLAYER_MAX_WIDTH = 720;
+const MEDIA_HOVER_PREVIEW_DELAY_MS = 450;
+const MEDIA_HOVER_STORYBOARD_FRAMES = 8;
+const MEDIA_HOVER_STORYBOARD_CACHE_LIMIT = 12;
+const mediaHoverStoryboardCache = new Map<string, LibraryStoryboard>();
+const mediaHoverStoryboardRequests = new Map<string, Promise<LibraryStoryboard>>();
 const EMPTY_LIBRARY_RESULT: LibraryQueryResult = { items: [], totalItems: 0, page: 1, pageSize: LIBRARY_PAGE_SIZE, totalPages: 1 };
 const EMPTY_LIBRARY_FACETS: LibraryFacets = { totalItems: 0, availableItems: 0, missingItems: 0, containers: [], tags: [], creators: [], series: [], sites: [], themes: [], folders: [] };
 type LiveAnnouncement = { signature: string; message: string; assertive?: boolean };
@@ -2626,6 +2631,42 @@ function MediaSection({ title, subtitle, items, sourceNames, onSelect, onSeeAll,
   return <section className="mt-10" aria-labelledby={headingId}><div className="mb-4 flex items-end justify-between gap-4"><div><h2 id={headingId} className="text-[21px] font-semibold tracking-[-0.035em]">{title}</h2><p className="mt-1 text-[12px] text-muted">{subtitle}</p></div><div className="flex items-center gap-2">{onSeeAll ? <button className="h-9 rounded-control px-3 text-[12px] font-semibold text-muted transition hover:bg-elevated hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70" onClick={onSeeAll}>See all</button> : null}{shelf && items.length > 1 ? <div className="flex gap-1"><button className="grid size-9 place-items-center rounded-full bg-elevated/70 text-muted hover:bg-elevated hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70" onClick={() => moveShelf(-1)} aria-label={`Scroll ${title} left`}><ChevronRight className="rotate-180" size={16} /></button><button className="grid size-9 place-items-center rounded-full bg-elevated/70 text-muted hover:bg-elevated hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70" onClick={() => moveShelf(1)} aria-label={`Scroll ${title} right`}><ChevronRight size={16} /></button></div> : null}</div></div>{items.length > 0 ? <div ref={shelfRef} tabIndex={shelf ? 0 : undefined} onKeyDown={shelf ? (event) => { if (event.key === "ArrowLeft") { event.preventDefault(); moveShelf(-1); } else if (event.key === "ArrowRight") { event.preventDefault(); moveShelf(1); } } : undefined} className={shelf ? "media-shelf flex snap-x snap-mandatory gap-4 overflow-x-auto pb-3 outline-none focus-visible:ring-2 focus-visible:ring-accent/60" : viewMode === "grid" ? "grid gap-x-4 gap-y-7 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4" : "grid gap-2"} aria-label={shelf ? `${title} media shelf. Use Left and Right Arrow keys to scroll.` : undefined}>{items.map((item) => <div key={item.id} className={shelf ? "w-[clamp(220px,24vw,330px)] shrink-0 snap-start" : ""}><MediaCard item={item} sourceName={sourceLabel(item, sourceNames)} progress={progress?.get(item.id)} selected={selectedIds.has(item.id)} selectionMode={selectionMode} privateMedia={privateItemIds.has(item.id)} initialWatchLater={title.toLocaleLowerCase() === "watch later"} viewMode={viewMode} onSelect={() => selectionMode ? onToggleSelection?.(item.id) : onSelect(item)} /></div>)}</div> : <div className="border border-dashed border-line/70 px-6 py-12 text-center text-sm text-muted">Nothing matches these filters.</div>}</section>;
 }
 
+function mediaHoverStoryboardKey(item: LibraryItem) {
+  return `${item.id}:${item.modifiedAtMs ?? item.updatedAt}:${MEDIA_HOVER_STORYBOARD_FRAMES}`;
+}
+
+function rememberMediaHoverStoryboard(key: string, storyboard: LibraryStoryboard) {
+  mediaHoverStoryboardCache.delete(key);
+  mediaHoverStoryboardCache.set(key, storyboard);
+  while (mediaHoverStoryboardCache.size > MEDIA_HOVER_STORYBOARD_CACHE_LIMIT) {
+    const oldest = mediaHoverStoryboardCache.keys().next().value;
+    if (oldest == null) break;
+    mediaHoverStoryboardCache.delete(oldest);
+  }
+}
+
+async function loadMediaHoverStoryboard(item: LibraryItem, privateMedia: boolean) {
+  const key = mediaHoverStoryboardKey(item);
+  if (!privateMedia) {
+    const cached = mediaHoverStoryboardCache.get(key);
+    if (cached) {
+      rememberMediaHoverStoryboard(key, cached);
+      return cached;
+    }
+    const pending = mediaHoverStoryboardRequests.get(key);
+    if (pending) return pending;
+  }
+  const request = api.generateLibraryStoryboard(item.id, MEDIA_HOVER_STORYBOARD_FRAMES);
+  if (!privateMedia) mediaHoverStoryboardRequests.set(key, request);
+  try {
+    const storyboard = await request;
+    if (!privateMedia) rememberMediaHoverStoryboard(key, storyboard);
+    return storyboard;
+  } finally {
+    if (!privateMedia && mediaHoverStoryboardRequests.get(key) === request) mediaHoverStoryboardRequests.delete(key);
+  }
+}
+
 function MediaCard({ item, sourceName, onSelect, progress, selectionMode = false, selected = false, privateMedia = false, initialWatchLater = false, viewMode = "grid" }: { item: LibraryItem; sourceName: string; onSelect: () => void; progress?: number; selectionMode?: boolean; selected?: boolean; privateMedia?: boolean; initialWatchLater?: boolean; viewMode?: "grid" | "list" }) {
   const setError = useAppStore((state) => state.setError);
   const setNotice = useAppStore((state) => state.setNotice);
@@ -2634,6 +2675,71 @@ function MediaCard({ item, sourceName, onSelect, progress, selectionMode = false
   const listView = viewMode === "list";
   const [watchLater, setWatchLater] = useState<boolean | null>(initialWatchLater ? true : null);
   const [watchLaterBusy, setWatchLaterBusy] = useState(false);
+  const [hoverPreviewActive, setHoverPreviewActive] = useState(false);
+  const [hoverStoryboard, setHoverStoryboard] = useState<LibraryStoryboard | null>(null);
+  const [hoverPreviewFrame, setHoverPreviewFrame] = useState(0);
+  const [hoverPreviewBusy, setHoverPreviewBusy] = useState(false);
+  const [hoverPreviewUnavailable, setHoverPreviewUnavailable] = useState(false);
+  const hoverPreviewDelay = useRef<number | null>(null);
+  const hoverPreviewPercent = useRef(0.5);
+  const hoverPreviewRequest = useRef(0);
+
+  useEffect(() => () => {
+    if (hoverPreviewDelay.current != null) window.clearTimeout(hoverPreviewDelay.current);
+    hoverPreviewRequest.current += 1;
+  }, []);
+
+  const previewEligible = item.mediaKind === "video"
+    && !item.missing
+    && !selectionMode
+    && item.durationSeconds != null
+    && item.durationSeconds > 0.1;
+
+  async function requestHoverPreview() {
+    if (!previewEligible || hoverStoryboard || hoverPreviewBusy || hoverPreviewUnavailable) return;
+    const requestId = ++hoverPreviewRequest.current;
+    setHoverPreviewBusy(true);
+    try {
+      const storyboard = await loadMediaHoverStoryboard(item, privateMedia);
+      if (hoverPreviewRequest.current !== requestId) return;
+      setHoverStoryboard(storyboard);
+      setHoverPreviewFrame(Math.min(storyboard.frames.length - 1, Math.floor(hoverPreviewPercent.current * storyboard.frames.length)));
+    } catch {
+      if (hoverPreviewRequest.current === requestId) setHoverPreviewUnavailable(true);
+    } finally {
+      if (hoverPreviewRequest.current === requestId) setHoverPreviewBusy(false);
+    }
+  }
+
+  function startHoverPreview() {
+    if (!previewEligible) return;
+    const reducedMotion = document.documentElement.classList.contains("reduce-motion")
+      || window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (reducedMotion) return;
+    setHoverPreviewActive(true);
+    if (hoverStoryboard || hoverPreviewBusy || hoverPreviewUnavailable || hoverPreviewDelay.current != null) return;
+    hoverPreviewDelay.current = window.setTimeout(() => {
+      hoverPreviewDelay.current = null;
+      void requestHoverPreview();
+    }, MEDIA_HOVER_PREVIEW_DELAY_MS);
+  }
+
+  function scrubHoverPreview(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!previewEligible) return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    if (rect.width <= 0) return;
+    const percent = Math.min(0.999, Math.max(0, (event.clientX - rect.left) / rect.width));
+    hoverPreviewPercent.current = percent;
+    if (hoverStoryboard?.frames.length) setHoverPreviewFrame(Math.floor(percent * hoverStoryboard.frames.length));
+  }
+
+  function stopHoverPreview() {
+    setHoverPreviewActive(false);
+    if (hoverPreviewDelay.current != null) {
+      window.clearTimeout(hoverPreviewDelay.current);
+      hoverPreviewDelay.current = null;
+    }
+  }
 
   async function toggleWatchLater() {
     if (watchLaterBusy) return;
@@ -2654,8 +2760,9 @@ function MediaCard({ item, sourceName, onSelect, progress, selectionMode = false
   return (
     <article className="group min-w-0">
       <button className={`${listView ? "grid grid-cols-[180px_minmax(0,1fr)] items-center gap-4 bg-panel/45 p-2 hover:bg-panel/70" : "block"} w-full text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/80 focus-visible:ring-offset-4 focus-visible:ring-offset-canvas ${selected && listView ? "ring-2 ring-accent ring-offset-2 ring-offset-canvas" : ""}`} onClick={onSelect} aria-pressed={selectionMode ? selected : undefined}>
-        <div className={`relative aspect-video overflow-hidden rounded-[9px] bg-elevated shadow-[0_14px_35px_rgb(3_11_24/0.24)] transition duration-200 group-hover:-translate-y-0.5 group-hover:shadow-[0_20px_45px_rgb(3_11_24/0.36)] ${selected ? "ring-2 ring-accent ring-offset-2 ring-offset-canvas" : ""}`}>
+        <div className={`relative aspect-video overflow-hidden rounded-[9px] bg-elevated shadow-[0_14px_35px_rgb(3_11_24/0.24)] transition duration-200 group-hover:-translate-y-0.5 group-hover:shadow-[0_20px_45px_rgb(3_11_24/0.36)] ${selected ? "ring-2 ring-accent ring-offset-2 ring-offset-canvas" : ""}`} onPointerEnter={startHoverPreview} onPointerMove={scrubHoverPreview} onPointerLeave={stopHoverPreview}>
           <MediaArtwork item={item} />
+          {hoverPreviewActive && hoverStoryboard?.frames[hoverPreviewFrame] ? <span className="absolute inset-0"><img className="h-full w-full object-cover" src={hoverStoryboard.frames[hoverPreviewFrame].imageDataUrl} alt="" aria-hidden="true" /><span className="number-font absolute bottom-2 left-1/2 z-[1] -translate-x-1/2 rounded-[5px] bg-black/78 px-2 py-1 text-[9px] font-semibold text-white/90 shadow-control">Preview · {formatDuration(hoverStoryboard.frames[hoverPreviewFrame].timeSeconds)}</span></span> : hoverPreviewActive && hoverPreviewBusy ? <span className="absolute bottom-2 left-1/2 z-[1] inline-flex -translate-x-1/2 items-center gap-1.5 rounded-[5px] bg-black/78 px-2 py-1 text-[9px] font-medium text-white/75"><LoaderCircle className="animate-spin" size={10} /> Preparing preview</span> : hoverPreviewActive && hoverPreviewUnavailable ? <span className="absolute bottom-2 left-1/2 z-[1] -translate-x-1/2 rounded-[5px] bg-black/78 px-2 py-1 text-[9px] font-medium text-white/65">Preview unavailable</span> : null}
           <span className="absolute inset-0 grid place-items-center bg-black/0 transition group-hover:bg-black/20"><span className={`grid size-11 place-items-center rounded-full shadow-lg transition ${selectionMode ? "scale-100 bg-panel/95 text-ink opacity-100" : "scale-90 bg-white/90 text-black opacity-0 group-hover:scale-100 group-hover:opacity-100"}`}>{selectionMode ? selected ? <CheckSquare2 className="text-accent" size={21} /> : <Square size={21} /> : item.mediaKind === "image" ? <ImageIcon size={19} strokeWidth={1.8} /> : <Play size={18} strokeWidth={1.8} fill="currentColor" />}</span></span>
           <span className="number-font absolute bottom-2 right-2 rounded-[4px] bg-black/82 px-1.5 py-0.5 text-[10px] font-semibold text-white">{item.durationSeconds != null ? formatDuration(item.durationSeconds) : quality}</span>
           {item.durationSeconds != null && quality ? <span className="absolute bottom-2 left-2 rounded-[4px] bg-black/75 px-1.5 py-0.5 text-[9px] font-semibold text-white/90">{quality}</span> : null}
@@ -2675,17 +2782,40 @@ function MediaCard({ item, sourceName, onSelect, progress, selectionMode = false
 function MediaArtwork({ item, eager = false }: { item: LibraryItem; eager?: boolean }) {
   const inlineArtwork = item.thumbnail?.startsWith("data:") ? item.thumbnail : null;
   const [artwork, setArtwork] = useState<string | null>(inlineArtwork);
+  const [nearViewport, setNearViewport] = useState(eager);
+  const artworkRoot = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (eager || inlineArtwork || item.missing) {
+      setNearViewport(true);
+      return;
+    }
+    const element = artworkRoot.current;
+    if (!element || typeof IntersectionObserver === "undefined") {
+      setNearViewport(true);
+      return;
+    }
+    setNearViewport(false);
+    const observer = new IntersectionObserver(([entry]) => {
+      if (!entry?.isIntersecting) return;
+      setNearViewport(true);
+      observer.disconnect();
+    }, { rootMargin: "240px" });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [eager, inlineArtwork, item.id, item.missing]);
   useEffect(() => {
     setArtwork(inlineArtwork);
-    if (inlineArtwork || item.missing) return;
+    if (inlineArtwork || item.missing || !nearViewport) return;
     let disposed = false;
-    void api.getLibraryArtwork(item.id).then((value) => { if (!disposed) setArtwork(value); }).catch(() => {});
+    void api.getLibraryArtwork(item.id)
+      .then((value) => { if (!disposed) setArtwork(value); })
+      .catch((error) => { if (!disposed) console.warn(`Could not load artwork for ${item.id}`, error); });
     return () => { disposed = true; };
-  }, [inlineArtwork, item.id, item.missing]);
-  if (artwork) return <img className="h-full w-full object-cover transition duration-300 group-hover:scale-[1.025]" src={artwork} alt={`${item.title} artwork`} loading={eager ? "eager" : "lazy"} />;
+  }, [inlineArtwork, item.id, item.missing, nearViewport]);
+  if (artwork) return <div ref={artworkRoot} className="h-full w-full"><img className="h-full w-full object-cover transition duration-300 group-hover:scale-[1.025]" src={artwork} alt={`${item.title} artwork`} loading={eager ? "eager" : "lazy"} /></div>;
   const variant = item.id.charCodeAt(0) % 3;
   const background = variant === 0 ? "from-[#1b2b45] via-[#172235] to-[#101419]" : variant === 1 ? "from-[#33291d] via-[#26231d] to-[#111417]" : "from-[#202b3a] via-[#1b252f] to-[#101419]";
-  return <div className={`relative grid h-full w-full place-items-center bg-gradient-to-br ${background}`}><div className="absolute inset-0 opacity-[0.08] [background-image:radial-gradient(circle_at_center,white_1px,transparent_1px)] [background-size:18px_18px]" />{item.mediaKind === "image" ? <FileImage className="relative text-white/35" size={34} /> : <FileVideo className="relative text-white/35" size={34} />}</div>;
+  return <div ref={artworkRoot} className={`relative grid h-full w-full place-items-center bg-gradient-to-br ${background}`}><div className="absolute inset-0 opacity-[0.08] [background-image:radial-gradient(circle_at_center,white_1px,transparent_1px)] [background-size:18px_18px]" />{item.mediaKind === "image" ? <FileImage className="relative text-white/35" size={34} /> : <FileVideo className="relative text-white/35" size={34} />}</div>;
 }
 
 function EmbeddedCompatibilityLabel({ item, preflight, variant = "panel" }: { item: LibraryItem; preflight?: LibraryPlaybackPreflight | null; variant?: "badge" | "overlay" | "panel" }) {

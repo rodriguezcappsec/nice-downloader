@@ -110,6 +110,17 @@ export async function installTauriMock(page: Page) {
         case "query_library_items": return { ...emptyQuery, items: [testItem], totalItems: 1 };
         case "get_library_facets": return emptyFacets;
         case "get_library_artwork": return null;
+        case "generate_library_storyboard":
+          Object.assign(window, { __PLAYWRIGHT_STORYBOARD_REQUEST__: args });
+          return {
+            itemId: testItem.id,
+            durationSeconds: 95,
+            generatedAt: "2026-01-01T00:00:00Z",
+            frames: [6, 18, 30, 42, 54, 66, 78, 90].map((timeSeconds) => ({
+              timeSeconds,
+              imageDataUrl: "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==",
+            })),
+          };
         case "apply_library_bulk_metadata":
           Object.assign(window, { __PLAYWRIGHT_BULK_METADATA_REQUEST__: args?.request });
           return [testItem];

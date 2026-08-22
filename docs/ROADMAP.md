@@ -2,7 +2,7 @@
 
 ## Milestone 35: playback refinement and library optimization
 
-In progress on `library-experience-roadmap`. Delivered foundations include Playwright shell regression coverage, lazy storyboard-backed seek previews, local Subtitle Center for sidecar and compatible embedded text tracks, and batch Library optimization into separate H.264/AAC MP4 outputs. Existing dynamic smart views, watched sources, creative moments, rich metadata/artwork overrides, curation/health queues, and locked-library boundaries remain the foundations for the following ordered refinements.
+In progress on `library-experience-roadmap`. Delivered foundations include Playwright shell regression coverage, representative-frame generated artwork, lazy storyboard-backed card scrubbing and seek previews, local Subtitle Center for sidecar and compatible embedded text tracks, and batch Library optimization into separate H.264/AAC MP4 outputs. Existing dynamic smart views, watched sources, creative moments, rich metadata/artwork overrides, curation/health queues, and locked-library boundaries remain the foundations for the following ordered refinements.
 
 ## Active: local media organizer
 

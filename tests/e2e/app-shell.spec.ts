@@ -101,6 +101,22 @@ test("video playback uses one accessible frame-preview control strip", async ({ 
   await expect.poll(() => page.locator("video").evaluate((video) => (video as HTMLVideoElement).controls)).toBe(false);
 });
 
+test("Library video cards lazily scrub cached storyboard frames", async ({ page }) => {
+  await page.getByRole("button", { name: "Library" }).click();
+  const card = page.locator("article").filter({ hasText: "Playwright clip" }).first();
+  const artwork = card.locator(".aspect-video").first();
+  await artwork.hover({ position: { x: 4, y: 4 } });
+  await expect(card.getByText("Preview · 0:06")).toBeVisible();
+  await expect.poll(() => page.evaluate(() => (window as typeof window & { __PLAYWRIGHT_STORYBOARD_REQUEST__?: unknown }).__PLAYWRIGHT_STORYBOARD_REQUEST__)).toEqual({
+    itemId: "00000000-0000-4000-8000-000000000002",
+    frameCount: 8,
+  });
+  const bounds = await artwork.boundingBox();
+  if (!bounds) throw new Error("Video artwork bounds are unavailable");
+  await page.mouse.move(bounds.x + bounds.width - 3, bounds.y + bounds.height / 2);
+  await expect(card.getByText("Preview · 1:30")).toBeVisible();
+});
+
 test("Library activity inbox links attention counts to existing workspaces", async ({ page }) => {
   const inbox = page.locator("details").filter({ hasText: "Library activity" });
   await expect(inbox).toContainText("1 attention signal");
