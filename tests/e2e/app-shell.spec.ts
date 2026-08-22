@@ -95,3 +95,28 @@ test("Library activity inbox links attention counts to existing workspaces", asy
   await curation.click();
   await expect(page.getByRole("heading", { name: "Review your library quickly" })).toBeVisible();
 });
+
+test("panic-lock clears sensitive Library state and announces the lock", async ({ page }) => {
+  await page.evaluate(() => {
+    window.localStorage.setItem("playwright.privacy", "unlocked");
+    window.localStorage.setItem("nice-downloader.library-workspace.v1", JSON.stringify({ search: "private creator", selectedItemId: "private-item" }));
+  });
+  await page.reload();
+
+  await expect(page.getByRole("button", { name: /Panic-lock Private Library/ })).toBeVisible();
+  await page.locator("#library-search").focus();
+  await page.keyboard.press("Control+Shift+l");
+
+  await expect(page.getByText("Private Library locked. Private media, searches, and open details were cleared.")).toBeVisible();
+  await expect(page.locator("#main-content")).toBeFocused();
+  await expect.poll(async () => page.evaluate(() => {
+    const savedWorkspace = window.localStorage.getItem("nice-downloader.library-workspace.v1");
+    const workspace = savedWorkspace ? JSON.parse(savedWorkspace) as { search?: string; selectedItemId?: string | null } : null;
+    return {
+      privacy: window.localStorage.getItem("playwright.privacy"),
+      search: workspace?.search || "",
+      selectedItemId: workspace?.selectedItemId || null,
+      view: window.localStorage.getItem("nice-downloader.view"),
+    };
+  })).toEqual({ privacy: "locked", search: "", selectedItemId: null, view: "home" });
+});

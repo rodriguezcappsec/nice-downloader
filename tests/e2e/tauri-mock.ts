@@ -76,9 +76,19 @@ export async function installTauriMock(page: Page) {
         case "get_default_destination": return "/tmp";
         case "get_engine_preferences": return { browserCookieSource: "none", browserProfile: null, proxyUrl: null, enableImpersonation: true, bandwidthLimitKib: null };
         case "get_queue_snapshot": return { settings: { concurrentDownloads: 2, paused: false, notifyOnCompletion: true, completionAction: "none" }, orderedJobIds: [], activeJobIds: [], pauseSupported: true, completionNotificationsSupported: true };
-        case "get_library_privacy_status": return { configured: false, locked: false, autoLockMinutes: 15, privateSourceCount: 0, privateFolderCount: 0, privateItemCount: 0 };
+        case "get_library_privacy_status": {
+          const configured = window.localStorage.getItem("playwright.privacy") != null;
+          const locked = window.localStorage.getItem("playwright.privacy") === "locked";
+          return { configured, locked, autoLockMinutes: 15, privateSourceCount: configured ? 1 : 0, privateFolderCount: 0, privateItemCount: 0 };
+        }
+        case "lock_library_privacy":
+          window.localStorage.setItem("playwright.privacy", "locked");
+          return { configured: true, locked: true, autoLockMinutes: 15, privateSourceCount: 1, privateFolderCount: 0, privateItemCount: 0 };
+        case "touch_library_privacy": return null;
+        case "list_library_privacy_rules": return { itemIds: [], folders: [] };
         case "get_library_search_status": return { catalogItems: 0, indexedItems: 0, consistent: true };
-        case "get_library_transcript_index_status": return { indexedItems: 0, indexedCues: 0 };
+        case "get_library_transcript_index_status": return { indexedItems: 0, cueCount: 0 };
+        case "search_library_transcripts": return [];
         case "get_library_artwork_cache_status": return { fileCount: 0, totalBytes: 0, maxFiles: 20_000, maxBytes: 1_073_741_824 };
         case "get_library_playback_cache_status": return { fileCount: 0, totalBytes: 0, maxFiles: 4, maxBytes: 8_589_934_592 };
         case "get_library_visual_similarity_status": return { eligibleItems: 0, indexedItems: 0, staleItems: 0 };
