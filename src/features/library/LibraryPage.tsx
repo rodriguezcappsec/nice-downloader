@@ -2899,6 +2899,9 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
   const playbackProgress = useRef<{ position: number; observedAt: number } | null>(null);
   const playbackVerification = useRef<{ lastPosition: number; accumulatedSeconds: number; recorded: boolean } | null>(null);
   const webPlaybackHandoff = useRef<{ positionSeconds: number; shouldPlay: boolean } | null>(null);
+  const hlsFallbackAttempted = useRef(false);
+  const liveFallbackAttempted = useRef(false);
+  const livePlaybackShouldPlay = useRef(false);
   const embeddedMpvStopRequested = useRef(false);
   const nativeInitializationItemId = useRef(item.id);
   const [session, setSession] = useState<LibraryPlaybackSession | null>(null);
@@ -2919,7 +2922,7 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
   const [embeddedMpvSession, setEmbeddedMpvSession] = useState<EmbeddedMpvSession | null>(null);
   const [embeddedMpvBusy, setEmbeddedMpvBusy] = useState(false);
   const [embeddedMpvMuted, setEmbeddedMpvMuted] = useState(false);
-  const [playbackRenderer, setPlaybackRenderer] = useState<"native" | "web">("native");
+  const [playbackRenderer, setPlaybackRenderer] = useState<"native" | "web">("web");
   const [nativeFallbackMessage, setNativeFallbackMessage] = useState<string | null>(null);
   const [resumedAt, setResumedAt] = useState<number | null>(null);
   const [playbackRate, setPlaybackRate] = useState(1);
@@ -2929,14 +2932,12 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
   const [pendingNativeSeek, setPendingNativeSeek] = useState<number | null>(null);
 
   function recordDirectPlaybackEvidence(evidence: "played" | "failed") {
-    if (!session || session.compatibilityMode) return;
+    if (!session || session.compatibilityMode || session.liveTranscode) return;
     recordEmbeddedPlaybackEvidence(playbackFingerprint, evidence);
   }
 
   useEffect(() => {
     let disposed = false;
-    let boundsFrame = 0;
-    let finishBoundsWait: ((bounds: EmbeddedMpvBounds | null) => void) | null = null;
     nativeInitializationItemId.current = item.id;
     setSession(null);
     setPreflight(null);
@@ -2954,58 +2955,46 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
     setEmbeddedMpvSession(null);
     setEmbeddedMpvBusy(false);
     setEmbeddedMpvMuted(false);
-    setPlaybackRenderer("native");
+    setPlaybackRenderer("web");
     setNativeFallbackMessage(null);
     setIsPlaying(false);
     setCurrentPosition(0);
     setPlaybackDuration(item.durationSeconds || 0);
     setPendingNativeSeek(null);
     webPlaybackHandoff.current = null;
+    hlsFallbackAttempted.current = false;
+    liveFallbackAttempted.current = false;
+    livePlaybackShouldPlay.current = false;
 
     const isCurrent = () => !disposed && nativeInitializationItemId.current === item.id;
-    const waitForStableEmbeddedMpvBounds = () => new Promise<EmbeddedMpvBounds | null>((resolve) => {
-      let previousSignature: string | null = null;
-      let stableSamples = 0;
-      let attempts = 0;
-      const finish = (bounds: EmbeddedMpvBounds | null) => {
-        finishBoundsWait = null;
-        resolve(bounds);
-      };
-      const sample = () => {
-        if (!isCurrent()) {
-          finish(null);
-          return;
-        }
-        const bounds = readEmbeddedMpvBounds();
-        const signature = bounds?.visible ? [
-          Math.round(bounds.x),
-          Math.round(bounds.y),
-          Math.round(bounds.width),
-          Math.round(bounds.height),
-          bounds.devicePixelRatio,
-        ].join(":") : null;
-        stableSamples = signature && signature === previousSignature ? stableSamples + 1 : 0;
-        previousSignature = signature;
-        attempts += 1;
-        if (bounds?.visible && stableSamples >= 1) {
-          finish(bounds);
-          return;
-        }
-        if (attempts >= 30) {
-          finish(bounds?.visible ? bounds : null);
-          return;
-        }
-        boundsFrame = window.requestAnimationFrame(sample);
-      };
-      finishBoundsWait = finish;
-      boundsFrame = window.requestAnimationFrame(sample);
-    });
     const prepareWebPlayback = async () => {
       if (!isCurrent()) return;
       setPlaybackRenderer("web");
       const inspected = await api.inspectLibraryPlayback(item.id);
       if (!isCurrent()) return;
       setPreflight(inspected);
+      if (inspected.compatibilityRequired) {
+        hlsFallbackAttempted.current = true;
+        livePlaybackShouldPlay.current = true;
+        let requestedStart = seekRequest?.itemId === item.id ? seekRequest.seconds : 0;
+        let prepared: LibraryPlaybackSession;
+        try {
+          prepared = await api.prepareLibraryHlsPlayback(item.id, requestedStart);
+        } catch {
+          liveFallbackAttempted.current = true;
+          prepared = await api.prepareLibraryLivePlayback(item.id, requestedStart);
+        }
+        const saved = prepared.playback;
+        if (requestedStart === 0 && saved && !saved.completed && saved.positionSeconds >= 5
+          && (!item.durationSeconds || saved.positionSeconds < item.durationSeconds - 10)) {
+          requestedStart = saved.positionSeconds;
+          prepared = prepared.segmentedStream
+            ? await api.prepareLibraryHlsPlayback(item.id, requestedStart)
+            : await api.prepareLibraryLivePlayback(item.id, requestedStart);
+        }
+        if (isCurrent()) setSession(prepared);
+        return;
+      }
       if (inspected.requiresConfirmation) {
         consentReturnFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
         setConsent(inspected);
@@ -3021,41 +3010,7 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
         const status = await api.getEmbeddedMpvStatus();
         if (!isCurrent()) return;
         setEmbeddedMpvStatus(status);
-        if (status.active?.itemId === item.id) {
-          setEmbeddedMpvSession(status.active);
-          setCurrentPosition(status.active.positionSeconds);
-          setPlaybackDuration(status.active.durationSeconds);
-          setIsPlaying(!status.active.paused);
-          setLoading(false);
-          return;
-        }
-        if (status.available) {
-          const bounds = await waitForStableEmbeddedMpvBounds();
-          if (!isCurrent()) return;
-          if (bounds) {
-            try {
-              const transcriptStart = seekRequest?.itemId === item.id ? seekRequest.seconds : undefined;
-              const opened = await api.openLibraryEmbeddedMpv(item.id, bounds, transcriptStart);
-              if (!isCurrent()) {
-                const currentStatus = await api.getEmbeddedMpvStatus().catch(() => null);
-                if (currentStatus?.active?.itemId === item.id) await api.closeEmbeddedMpv().catch(() => {});
-                return;
-              }
-              embeddedMpvStopRequested.current = false;
-              setEmbeddedMpvSession(opened);
-              setCurrentPosition(opened.positionSeconds);
-              setPlaybackDuration(opened.durationSeconds);
-              setIsPlaying(!opened.paused);
-              setLoading(false);
-              return;
-            } catch (error) {
-              if (!isCurrent()) return;
-              setNativeFallbackMessage(normalizeError(error).message);
-            }
-          } else {
-            setNativeFallbackMessage("The native video surface was not ready, so the web player was used.");
-          }
-        } else {
+        if (!status.available) {
           setNativeFallbackMessage(status.detail);
         }
       } catch (error) {
@@ -3073,9 +3028,6 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
     })();
     return () => {
       disposed = true;
-      window.cancelAnimationFrame(boundsFrame);
-      finishBoundsWait?.(null);
-      finishBoundsWait = null;
     };
   }, [item.id]);
 
@@ -3276,7 +3228,13 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
     if (!session || !loading) return;
     const timer = window.setTimeout(() => {
       recordDirectPlaybackEvidence("failed");
-      setPlaybackError(createPlaybackError("embedded_playback_timeout", "Embedded playback did not become ready. Your video is unchanged; try opening it with your system player."));
+      if (advanceCompatibilitySource(videoRef.current, true)) return;
+      setPlaybackError(createPlaybackError(
+        "embedded_playback_timeout",
+        session.liveTranscode
+          ? "The available compatibility streams did not become ready. Try libmpv, a cached H.264 copy, or your system player."
+          : "Embedded playback did not become ready. Your video is unchanged; try opening it with your system player.",
+      ));
       setLoading(false);
     }, EMBEDDED_PLAYBACK_TIMEOUT_MS);
     return () => window.clearTimeout(timer);
@@ -3288,9 +3246,93 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
     playbackWatchdog.current = null;
   }
 
+  function logicalVideoPosition(video: HTMLVideoElement) {
+    const position = session?.liveTranscode
+      ? session.streamStartSeconds + video.currentTime
+      : video.currentTime;
+    return Number.isFinite(position) ? Math.max(0, position) : 0;
+  }
+
+  function logicalVideoDuration(video: HTMLVideoElement) {
+    if (session?.liveTranscode) {
+      return item.durationSeconds && item.durationSeconds > 0
+        ? item.durationSeconds
+        : Math.max(playbackDuration, logicalVideoPosition(video));
+    }
+    return video.duration;
+  }
+
+  async function startHlsPlaybackAt(positionSeconds: number, shouldPlay: boolean) {
+    if (!Number.isFinite(positionSeconds)) return;
+    clearPlaybackWatchdog();
+    hlsFallbackAttempted.current = true;
+    livePlaybackShouldPlay.current = shouldPlay;
+    videoRef.current?.pause();
+    setPlaybackError(null);
+    setLoading(true);
+    const maximum = item.durationSeconds ? Math.max(0, item.durationSeconds - 0.25) : Number.MAX_SAFE_INTEGER;
+    const target = Math.min(maximum, Math.max(0, positionSeconds));
+    try {
+      const prepared = await api.prepareLibraryHlsPlayback(item.id, target);
+      setSession(prepared);
+      setCurrentPosition(target);
+      setPlaybackDuration(item.durationSeconds || playbackDuration);
+    } catch {
+      if (!liveFallbackAttempted.current) {
+        await startLivePlaybackAt(target, shouldPlay);
+        return;
+      }
+      setPlaybackError(createPlaybackError(
+        "segmented_playback_unavailable",
+        "Segmented compatibility playback could not start. Try libmpv, a cached playback copy, or your system player.",
+      ));
+      setLoading(false);
+    }
+  }
+
+  async function startLivePlaybackAt(positionSeconds: number, shouldPlay: boolean) {
+    if (!Number.isFinite(positionSeconds)) return;
+    clearPlaybackWatchdog();
+    liveFallbackAttempted.current = true;
+    livePlaybackShouldPlay.current = shouldPlay;
+    videoRef.current?.pause();
+    setPlaybackError(null);
+    setLoading(true);
+    try {
+      const maximum = item.durationSeconds ? Math.max(0, item.durationSeconds - 0.25) : Number.MAX_SAFE_INTEGER;
+      const target = Math.min(maximum, Math.max(0, positionSeconds));
+      const prepared = await api.prepareLibraryLivePlayback(item.id, target);
+      setSession(prepared);
+      setCurrentPosition(target);
+      setPlaybackDuration(item.durationSeconds || playbackDuration);
+    } catch (error) {
+      livePlaybackShouldPlay.current = false;
+      setPlaybackError(normalizeError(error));
+      setLoading(false);
+    }
+  }
+
+  function restartCompatibilityPlaybackAt(positionSeconds: number, shouldPlay: boolean) {
+    if (session?.segmentedStream) void startHlsPlaybackAt(positionSeconds, shouldPlay);
+    else void startLivePlaybackAt(positionSeconds, shouldPlay);
+  }
+
+  function advanceCompatibilitySource(video: HTMLVideoElement | null, shouldPlay: boolean) {
+    const position = video ? logicalVideoPosition(video) : session?.playback?.positionSeconds || 0;
+    if (!session?.liveTranscode && !hlsFallbackAttempted.current) {
+      void startHlsPlaybackAt(position, shouldPlay);
+      return true;
+    }
+    if (session?.segmentedStream && !liveFallbackAttempted.current) {
+      void startLivePlaybackAt(position, shouldPlay);
+      return true;
+    }
+    return false;
+  }
+
   function notePlaybackProgress(video: HTMLVideoElement) {
     if (!Number.isFinite(video.currentTime)) return;
-    if (session && !session.compatibilityMode) {
+    if (session && !session.compatibilityMode && !session.liveTranscode) {
       const verification = playbackVerification.current;
       if (!verification) {
         playbackVerification.current = { lastPosition: video.currentTime, accumulatedSeconds: 0, recorded: false };
@@ -3304,9 +3346,10 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
         }
       }
     }
+    const position = logicalVideoPosition(video);
     const previous = playbackProgress.current;
-    if (!previous || Math.abs(video.currentTime - previous.position) >= 0.01) {
-      playbackProgress.current = { position: video.currentTime, observedAt: performance.now() };
+    if (!previous || Math.abs(position - previous.position) >= 0.01) {
+      playbackProgress.current = { position, observedAt: performance.now() };
     }
   }
 
@@ -3328,10 +3371,13 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
       }
       video.pause();
       recordDirectPlaybackEvidence("failed");
+      if (advanceCompatibilitySource(video, true)) return;
       setLoading(false);
       setPlaybackError(createPlaybackError(
         "embedded_playback_timeout",
-        "Embedded playback stalled after starting. Try an H.264 playback copy or open the original in your system player.",
+        session?.liveTranscode
+          ? "The available compatibility streams stalled. Try libmpv, a cached H.264 copy, or your system player."
+          : "Embedded playback stalled after starting. Try an H.264 playback copy or open the original in your system player.",
       ));
     };
     playbackWatchdog.current = window.setTimeout(checkProgress, EMBEDDED_PLAYBACK_TIMEOUT_MS);
@@ -3341,7 +3387,7 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
     clearPlaybackWatchdog();
     const video = videoRef.current;
     if (video && Number.isFinite(video.currentTime)) {
-      playbackProgress.current = { position: video.currentTime, observedAt: performance.now() };
+      playbackProgress.current = { position: logicalVideoPosition(video), observedAt: performance.now() };
     }
     armPlaybackWatchdog();
   }
@@ -3359,12 +3405,15 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
 
   function persistProgress(completed = false) {
     const video = videoRef.current;
-    if (!video || !Number.isFinite(video.duration) || video.duration <= 0 || !Number.isFinite(video.currentTime)) return;
-    lastSavedPosition.current = video.currentTime;
+    if (!video || !Number.isFinite(video.currentTime)) return;
+    const duration = logicalVideoDuration(video);
+    const position = logicalVideoPosition(video);
+    if (!Number.isFinite(duration) || duration <= 0) return;
+    lastSavedPosition.current = position;
     void api.saveLibraryPlaybackProgress({
       itemId: item.id,
-      positionSeconds: Math.max(0, video.currentTime),
-      durationSeconds: video.duration,
+      positionSeconds: position,
+      durationSeconds: duration,
       completed,
     }).catch(() => {});
   }
@@ -3429,6 +3478,10 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
       void api.controlEmbeddedMpv({ action: "seekRelative", value: seconds }).catch((error) => setError(normalizeError(error)));
       return;
     }
+    if (session?.liveTranscode) {
+      restartCompatibilityPlaybackAt(currentPosition + seconds, isPlaying);
+      return;
+    }
     const video = videoRef.current;
     if (!video || !Number.isFinite(video.duration)) return;
     video.currentTime = Math.min(video.duration, Math.max(0, video.currentTime + seconds));
@@ -3438,6 +3491,11 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
     if (embeddedMpvSession) {
       if (!Number.isFinite(seconds)) return;
       void api.controlEmbeddedMpv({ action: "seekAbsolute", value: Math.max(0, seconds) }).catch((error) => setError(normalizeError(error)));
+      setCurrentPosition(Math.max(0, seconds));
+      return;
+    }
+    if (session?.liveTranscode) {
+      restartCompatibilityPlaybackAt(seconds, isPlaying);
       setCurrentPosition(Math.max(0, seconds));
       return;
     }
@@ -3733,6 +3791,10 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
       await api.releaseLibraryPlayback(item.id).catch(() => {});
       const inspected = await api.inspectLibraryPlayback(item.id);
       setPreflight(inspected);
+      if (inspected.compatibilityRequired) {
+        await startHlsPlaybackAt(handoff?.positionSeconds || 0, handoff?.shouldPlay || false);
+        return;
+      }
       if (inspected.requiresConfirmation) {
         consentReturnFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
         setConsent(inspected);
@@ -3775,6 +3837,18 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
     if (!video) return;
     setLoading(false);
     video.playbackRate = playbackRate;
+    if (session?.liveTranscode) {
+      const position = logicalVideoPosition(video);
+      const duration = item.durationSeconds || Math.max(playbackDuration, position);
+      setPlaybackDuration(duration);
+      setCurrentPosition(position);
+      lastSavedPosition.current = position;
+      if (session.streamStartSeconds > 0) setResumedAt(session.streamStartSeconds);
+      const shouldPlay = livePlaybackShouldPlay.current || seekRequest?.itemId === item.id;
+      livePlaybackShouldPlay.current = false;
+      if (shouldPlay) void video.play().catch(() => {});
+      return;
+    }
     setPlaybackDuration(video.duration);
     setCurrentPosition(video.currentTime);
     const handoff = webPlaybackHandoff.current;
@@ -3813,6 +3887,12 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
       setResumedAt(seekRequest.seconds);
       return;
     }
+    if (session?.liveTranscode) {
+      restartCompatibilityPlaybackAt(seekRequest.seconds, true);
+      setCurrentPosition(seekRequest.seconds);
+      setResumedAt(seekRequest.seconds);
+      return;
+    }
     const video = videoRef.current;
     if (!video || !Number.isFinite(video.duration)) return;
     const target = Math.min(Math.max(0, video.duration - 0.25), seekRequest.seconds);
@@ -3821,7 +3901,7 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
     setCurrentPosition(target);
     setResumedAt(target);
     void video.play().catch(() => {});
-  }, [embeddedMpvSession?.itemId, item.id, seekRequest?.id]);
+  }, [embeddedMpvSession?.itemId, item.id, seekRequest?.id, session?.liveTranscode]);
 
   const nativeControlClass = "grid size-8 shrink-0 place-items-center rounded-[8px] text-white/65 transition-[background-color,color,transform] duration-150 hover:bg-white/10 hover:text-white active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/75 disabled:pointer-events-none disabled:opacity-40";
 
@@ -3853,7 +3933,7 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
         className="h-full w-full max-h-full max-w-full bg-black object-contain shadow-[0_30px_100px_rgb(0_0_0/0.65)]"
         crossOrigin="anonymous"
         src={session.url}
-        controls
+        controls={!session.liveTranscode}
         playsInline
         preload="metadata"
         onLoadedMetadata={onLoadedMetadata}
@@ -3861,19 +3941,28 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
         onPlaying={() => { setIsPlaying(true); clearPlaybackWatchdog(); }}
         onWaiting={armPlaybackWatchdogWhilePlaying}
         onStalled={armPlaybackWatchdogWhilePlaying}
-        onTimeUpdate={() => { const video = videoRef.current; if (!video) return; notePlaybackProgress(video); setCurrentPosition(video.currentTime); if (Math.abs(video.currentTime - lastSavedPosition.current) >= 5) persistProgress(false); }}
+        onTimeUpdate={() => { const video = videoRef.current; if (!video) return; notePlaybackProgress(video); const position = logicalVideoPosition(video); setCurrentPosition(position); if (Math.abs(position - lastSavedPosition.current) >= 5) persistProgress(false); }}
         onPause={() => { setIsPlaying(false); clearPlaybackWatchdog(); persistProgress(false); }}
         onEnded={() => { recordDirectPlaybackEvidence("played"); setIsPlaying(false); clearPlaybackWatchdog(); persistProgress(true); window.setTimeout(() => onPlaybackEnded?.(), 0); }}
-        onError={() => { recordDirectPlaybackEvidence("failed"); clearPlaybackWatchdog(); setLoading(false); setPlaybackError(createPlaybackError("embedded_playback_decode_failed", "The WebView does not support this file's container or codecs. The original file is unchanged and can still be opened with your system player.")); }}
+        onError={() => { const video = videoRef.current; recordDirectPlaybackEvidence("failed"); clearPlaybackWatchdog(); if (advanceCompatibilitySource(video, true)) return; setLoading(false); setPlaybackError(createPlaybackError("embedded_playback_decode_failed", session.liveTranscode ? "The available H.264/AAC compatibility streams failed. Try libmpv, a cached playback copy, or your system player." : "The WebView does not support this file's container or codecs. The original file is unchanged and can still be opened with your system player.")); }}
       >
-        {session.subtitles.map((track) => <track key={track.url} kind="subtitles" src={track.url} srcLang={track.language || "und"} label={track.label} />)}
+        {session.subtitles.map((track) => <track key={`${track.url}:${session.streamStartSeconds}`} kind="subtitles" src={track.url} srcLang={track.language || "und"} label={track.label} onLoad={(event) => { if (!session.liveTranscode || session.streamStartSeconds <= 0) return; const cues = event.currentTarget.track.cues; if (!cues) return; for (const cue of Array.from(cues)) { cue.startTime = Math.max(0, cue.startTime - session.streamStartSeconds); cue.endTime = Math.max(0, cue.endTime - session.streamStartSeconds); } }} />)}
       </video> : null}
     </div>
     {embeddedMpvSession ? <div className={`flex items-center gap-2 border-t border-white/10 bg-[#100e0b] ${compact ? "px-2.5 py-1.5" : "px-5 py-2"}`} aria-label="Native playback timeline"><span className={`${compact ? "text-[9px]" : "text-[10px]"} number-font min-w-9 text-right text-white/55`}>{formatDuration(pendingNativeSeek ?? currentPosition)}</span><input className="h-5 min-w-0 flex-1 cursor-pointer accent-[var(--color-accent)]" type="range" min={0} max={Math.max(0.1, playbackDuration)} step={0.1} value={Math.min(Math.max(0, pendingNativeSeek ?? currentPosition), Math.max(0.1, playbackDuration))} aria-label="Seek through video" aria-valuetext={`${formatDuration(pendingNativeSeek ?? currentPosition)} of ${formatDuration(playbackDuration)}`} onChange={(event) => setPendingNativeSeek(Number(event.currentTarget.value))} onPointerUp={(event) => commitNativeSeek(Number(event.currentTarget.value))} onPointerCancel={() => setPendingNativeSeek(null)} onKeyUp={(event) => commitNativeSeek(Number(event.currentTarget.value))} onBlur={(event) => { if (pendingNativeSeek != null) commitNativeSeek(Number(event.currentTarget.value)); }} /><span className={`${compact ? "text-[9px]" : "text-[10px]"} number-font min-w-9 text-white/45`}>{formatDuration(playbackDuration)}</span></div> : null}
+    {session?.liveTranscode ? <div className={`flex items-center gap-2 border-t border-white/10 bg-[#100e0b] ${compact ? "px-2 py-1.5" : "px-5 py-2"}`} aria-label="Live compatibility playback controls">
+      <button className={nativeControlClass} onClick={() => seek(-10)} aria-label="Seek back 10 seconds"><RotateCcw size={14} /></button>
+      <button className="grid size-8 shrink-0 place-items-center rounded-[8px] bg-accent text-accentInk focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/80" onClick={togglePlayback} aria-label={isPlaying ? "Pause" : "Play"}>{isPlaying ? <Pause size={14} fill="currentColor" /> : <Play size={14} fill="currentColor" />}</button>
+      <span className={`${compact ? "text-[9px]" : "text-[10px]"} number-font min-w-9 text-right text-white/55`}>{formatDuration(pendingNativeSeek ?? currentPosition)}</span>
+      <input className="h-5 min-w-0 flex-1 cursor-pointer accent-[var(--color-accent)]" type="range" min={0} max={Math.max(0.1, playbackDuration)} step={0.1} value={Math.min(Math.max(0, pendingNativeSeek ?? currentPosition), Math.max(0.1, playbackDuration))} aria-label="Seek through live compatibility playback" aria-valuetext={`${formatDuration(pendingNativeSeek ?? currentPosition)} of ${formatDuration(playbackDuration)}`} onChange={(event) => setPendingNativeSeek(Number(event.currentTarget.value))} onPointerUp={(event) => commitNativeSeek(Number(event.currentTarget.value))} onPointerCancel={() => setPendingNativeSeek(null)} onKeyUp={(event) => commitNativeSeek(Number(event.currentTarget.value))} onBlur={(event) => { if (pendingNativeSeek != null) commitNativeSeek(Number(event.currentTarget.value)); }} />
+      <span className={`${compact ? "text-[9px]" : "text-[10px]"} number-font min-w-9 text-white/45`}>{formatDuration(playbackDuration)}</span>
+      {!compact ? <span className="rounded-[7px] border border-accent/20 bg-accent/10 px-2 py-1 text-[10px] font-semibold text-accent">Live compatible</span> : null}
+    </div> : null}
     <footer className={`${compact ? "hidden" : "flex"} flex-wrap items-center gap-3 border-t border-white/10 bg-[#100e0b] ${leanBack ? "justify-center px-5 py-4" : "px-5 py-3"}`}>
       {leanBack ? <><Button variant="ghost" className="h-14 min-w-32 text-base text-white/75" disabled={!onPrevious} onClick={() => changeVideo(onPrevious)}><SkipBack size={21} /> Previous</Button><Button className="h-14 min-w-44 text-base" disabled={(!videoRef.current && !embeddedMpvSession) || Boolean(playbackError) || Boolean(nativeSession)} onClick={togglePlayback}>{isPlaying ? <Pause size={22} /> : <Play size={22} fill="currentColor" />} {isPlaying ? "Pause" : "Play"}</Button><Button variant="ghost" className="h-14 min-w-32 text-base text-white/75" disabled={!onNext} onClick={() => changeVideo(onNext)}>Next <SkipForward size={21} /></Button><Button variant="secondary" className="h-14 min-w-28 border-white/10 bg-white/10 text-white" onClick={onExitLeanBack}><Minimize2 size={19} /> Exit</Button><p className="w-full text-center text-[11px] text-white/45">Gamepad: A/Start play · B exit · D-pad browse · LB/RB seek · Keyboard: Space/K · J/L · M · F · Esc</p></> : <><Button variant="ghost" className="h-9 text-white/70" disabled={!onPrevious} onClick={() => changeVideo(onPrevious)}><ChevronRight className="rotate-180" size={15} /> Previous</Button><Button variant="ghost" className="h-9 text-white/70" disabled={!onNext} onClick={() => changeVideo(onNext)}>Next <ChevronRight size={15} /></Button><span className="h-5 w-px bg-white/10" /><label className="flex items-center gap-2 text-xs text-white/55"><span>Speed</span><Select className="h-8 w-24 border-white/10 bg-white/5 text-xs text-white" value={playbackRate} onChange={(event) => { const rate = Number(event.target.value); setPlaybackRate(rate); if (embeddedMpvSession) void api.controlEmbeddedMpv({ action: "setRate", value: rate }).catch((error) => setError(normalizeError(error))); else if (videoRef.current) videoRef.current.playbackRate = rate; }}><option value={0.5}>0.5×</option><option value={0.75}>0.75×</option><option value={1}>1×</option><option value={1.25}>1.25×</option><option value={1.5}>1.5×</option><option value={2}>2×</option></Select></label><p className="ml-auto text-[10px] text-white/40">Space/K play · J/L seek · M mute · F fullscreen · Esc close</p></>}
       {resumedAt != null ? <p className="w-full text-[10px] text-accent" role="status">{seekRequest?.itemId === item.id ? "Started from transcript" : "Resumed"} at {formatDuration(resumedAt)}</p> : null}
       {session?.compatibilityMode ? <p className="w-full text-[10px] text-accent" role="status">{session.compatibilityTranscoded ? "Using an H.264/AAC embedded-playback copy." : preflight?.compatibilityCached ? "Using an existing cached compatibility copy. AV1 timing is optimized for the embedded player." : "A lossless AV1 timing copy was created for this playback."} The original is unchanged.</p> : null}
+      {session?.liveTranscode ? <p className="w-full text-[10px] text-accent" role="status">{session.segmentedStream ? "Using temporary HLS segments for resilient H.264/AAC playback." : "Streaming a fragmented H.264/AAC compatibility feed without a completed copy."} The original is unchanged.</p> : null}
       {nativeFallbackMessage && session ? <p className="w-full text-[10px] text-white/45" role="status">Native libmpv was unavailable for this playback. Using the web player. {nativeFallbackMessage}</p> : null}
     </footer>
   </section>{!compact && !leanBack ? <CreativeTimeline item={item} currentTime={currentPosition} duration={playbackDuration} playbackReady={Boolean((session || embeddedMpvSession) && !playbackError)} onSeek={seekTo} /> : null}{consent ? <div className="fixed inset-0 z-[90] grid place-items-center bg-black/75 p-5 backdrop-blur-sm" onMouseDown={dismissConsent}><section ref={consentDialogRef} className="panel-shadow w-full max-w-xl overflow-hidden rounded-[14px] border border-line bg-panel" role="dialog" aria-modal="true" aria-labelledby="compatibility-copy-title" aria-describedby="compatibility-copy-description" aria-busy={consentBusy || nativeBusy} onKeyDown={trapConsentFocus} onMouseDown={(event) => event.stopPropagation()}><header className="flex items-start gap-4 border-b border-line/70 px-5 py-5"><div className="grid size-11 shrink-0 place-items-center rounded-[10px] border border-accent/20 bg-accent/10 text-accent"><Copy size={20} /></div><div><p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-accent">Embedded playback compatibility</p><h2 id="compatibility-copy-title" className="mt-1 text-xl font-semibold tracking-[-0.03em]">{consent.reencodeRequired ? "Create an H.264 playback copy?" : "Create a temporary playback copy?"}</h2><p id="compatibility-copy-description" className="mt-2 text-xs leading-5 text-muted">{consent.reason}</p></div></header><div className="space-y-4 px-5 py-5"><dl className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-5 gap-y-2.5 border-y border-line/60 py-4 text-xs"><dt className="text-muted">Estimated copy size</dt><dd className="number-font font-medium text-ink">{formatBytes(consent.estimatedCopyBytes)}</dd><dt className="text-muted">Free space available</dt><dd className="number-font font-medium text-ink">{consent.availableSpaceBytes != null ? formatBytes(consent.availableSpaceBytes) : "Unknown"}</dd><dt className="text-muted">Conversion</dt><dd className="font-medium text-ink">{consent.reencodeRequired ? "H.264/AAC · video re-encode" : "Stream-copy · no re-encoding"}</dd></dl>{consent.availableSpaceBytes != null && consent.estimatedCopyBytes > consent.availableSpaceBytes ? <p className="border-l-2 border-red-400/70 bg-red-400/5 px-3 py-2 text-xs leading-5 text-red-300" role="alert">There may not be enough free space to create this copy.</p> : null}{consent.unusuallyLarge ? <p className="border-l-2 border-amber-400/70 bg-amber-400/5 px-3 py-2 text-xs leading-5 text-amber-200">This is an unusually large copy, so Nice Downloader always asks before creating it—even when automatic copies are enabled.</p> : null}<div className="rounded-[9px] bg-elevated/55 p-3 text-[11px] leading-5 text-muted"><p><strong className="font-semibold text-ink">Your original stays untouched.</strong> The copy exists only in Nice Downloader’s private playback cache.</p><p className="mt-1">The oldest copies are removed automatically before the cache exceeds 4 files or 8 GiB. You can review or clear the cache in Settings.</p></div>{!consent.reencodeRequired && consent.preference === "never" ? <p className="text-[11px] leading-5 text-muted">Your saved preference is <strong className="text-ink">Never create automatically</strong>. “Create copy and play” is a one-time override unless you enable the option below.</p> : null}{!consent.reencodeRequired ? <label className="flex items-start gap-3 text-xs text-muted"><input className="mt-0.5" type="checkbox" checked={rememberAutomatic} onChange={(event) => setRememberAutomatic(event.target.checked)} /><span><strong className="block font-medium text-ink">Automatically create compatible copies in the future</strong>Large copies will still require confirmation.</span></label> : <p className="text-[11px] leading-5 text-muted">This fallback is never created automatically because it changes the cached copy’s video codec. The original file and its quality remain unchanged.</p>}{nativeStatus?.available ? <div className="rounded-[9px] border border-accent/20 bg-accent/5 p-3 text-[11px] leading-5 text-muted"><p className="flex items-center gap-2 font-medium text-ink"><MonitorPlay className="text-accent" size={15} /> Native mpv is available</p><p className="mt-1">Play the original directly with FFmpeg decoders and create no compatibility copy.</p></div> : null}{copyPreparationBusy ? <PlaybackPreparationStatus preparation={preparation} reencodeRequired={consent.reencodeRequired} cancelling={cancelBusy || cancelRequested.current} /> : null}</div><footer className="flex flex-wrap items-center justify-end gap-2 border-t border-line/70 bg-elevated/25 px-5 py-4"><Button data-consent-cancel variant="ghost" disabled={cancelBusy || (copyPreparationBusy && !preparation)} onClick={copyPreparationBusy ? () => void cancelCompatibilityCopy() : dismissConsent}>{copyPreparationBusy ? cancelBusy ? "Cancelling…" : "Cancel copy" : "Cancel"}</Button><Button variant="secondary" disabled={consentBusy || nativeBusy} onClick={() => void playWithNativeMpv()}>{nativeBusy ? <LoaderCircle className="animate-spin" size={15} /> : <MonitorPlay size={15} />} Play with native mpv</Button><Button variant="secondary" disabled={consentBusy || nativeBusy} onClick={() => void openOriginalFromConsent()}><ExternalLink size={15} /> Open original in system player</Button><Button disabled={consentBusy || nativeBusy} onClick={() => void approveCompatibilityCopy()}>{consentBusy ? <LoaderCircle className="animate-spin" size={15} /> : <Copy size={15} />} {consentBusy && consent.reencodeRequired ? "Encoding…" : consent.reencodeRequired ? "Create H.264 copy and play" : "Create copy and play"}</Button></footer></section></div> : null}</>;

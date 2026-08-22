@@ -485,6 +485,24 @@ pub async fn prepare_library_playback(
 }
 
 #[tauri::command]
+pub fn prepare_library_live_playback(
+    media_server: State<'_, MediaServerState>,
+    id: String,
+    start_seconds: f64,
+) -> Result<LibraryPlaybackSession, AppError> {
+    media_server.prepare_live_transcode_playback(&id, start_seconds)
+}
+
+#[tauri::command]
+pub fn prepare_library_hls_playback(
+    media_server: State<'_, MediaServerState>,
+    id: String,
+    start_seconds: f64,
+) -> Result<LibraryPlaybackSession, AppError> {
+    media_server.prepare_hls_playback(&id, start_seconds)
+}
+
+#[tauri::command]
 pub async fn inspect_library_playback(
     media_server: State<'_, MediaServerState>,
     id: String,

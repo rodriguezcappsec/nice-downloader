@@ -235,3 +235,9 @@ resolution prefers app-managed updates, then the bundled baseline, then host
 installations. Platform packaging, non-Linux pause/notification adapters, and
 custom arguments remain later work. Additional authenticated-site support should
 extend typed access preferences rather than exposing arbitrary engine flags.
+
+## Live compatibility playback
+
+Direct byte-range playback remains the first embedded-player choice. When preflight predicts a compatibility copy, or direct WebView playback reports a decode failure or stall, React advances through two Rust-owned compatibility sources: segmented HLS first, then fragmented MP4. Random stream IDs bind the catalog UUID to a finite logical start timestamp, and the loopback server revalidates the original regular, non-symlink video before spawning FFmpeg.
+
+At most two compatibility FFmpeg processes run concurrently across both protocols. HLS writes atomic two-second H.264/AAC transport-stream segments and an event playlist into a UUID-scoped private cache directory; Rust rewrites only media lines with the process token, serves a closed filename grammar, clears sessions on release, and removes UUID-shaped orphans at startup. Fragmented MP4 writes to stdout, and dropping its HTTP body cancels and reaps the child immediately. Seeking creates a fresh authorization and stream at the selected original-media timestamp. React offsets progress and same-stem WebVTT cues so resume, transcript jumps, and persistence remain on the original video's timeline. Cached AV1 remuxes, full H.264 copies, embedded libmpv, native mpv, and the system player remain explicit recovery paths.

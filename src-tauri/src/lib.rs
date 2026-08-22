@@ -272,6 +272,8 @@ pub fn run() {
             commands::prepare_library_image_view,
             commands::inspect_library_playback,
             commands::prepare_library_playback,
+            commands::prepare_library_live_playback,
+            commands::prepare_library_hls_playback,
             commands::inspect_library_playback_fallback,
             commands::prepare_library_playback_fallback,
             commands::get_library_playback_preparation,

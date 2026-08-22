@@ -1178,6 +1178,9 @@ pub struct LibraryPlaybackSession {
     pub subtitles: Vec<LibrarySubtitleTrack>,
     pub compatibility_mode: bool,
     pub compatibility_transcoded: bool,
+    pub live_transcode: bool,
+    pub segmented_stream: bool,
+    pub stream_start_seconds: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]

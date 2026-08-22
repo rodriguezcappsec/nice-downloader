@@ -774,6 +774,9 @@ export interface LibraryPlaybackSession {
   subtitles: LibrarySubtitleTrack[];
   compatibilityMode: boolean;
   compatibilityTranscoded: boolean;
+  liveTranscode: boolean;
+  segmentedStream: boolean;
+  streamStartSeconds: number;
 }
 
 export interface LibraryImageSession {

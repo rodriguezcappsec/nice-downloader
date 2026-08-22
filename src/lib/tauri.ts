@@ -272,6 +272,10 @@ export const api = {
     invoke<LibraryPlaybackPreflight>("inspect_library_playback_fallback", { id }),
   prepareLibraryPlayback: (id: string, userApproved = false) =>
     invoke<LibraryPlaybackSession>("prepare_library_playback", { id, userApproved }),
+  prepareLibraryLivePlayback: (id: string, startSeconds = 0) =>
+    invoke<LibraryPlaybackSession>("prepare_library_live_playback", { id, startSeconds }),
+  prepareLibraryHlsPlayback: (id: string, startSeconds = 0) =>
+    invoke<LibraryPlaybackSession>("prepare_library_hls_playback", { id, startSeconds }),
   prepareLibraryPlaybackFallback: (id: string, userApproved = false) =>
     invoke<LibraryPlaybackSession>("prepare_library_playback_fallback", { id, userApproved }),
   getLibraryPlaybackPreparation: (id: string) =>

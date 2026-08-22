@@ -3,6 +3,8 @@ import type { AppError } from "../types";
 const FALLBACK_ELIGIBLE_ERRORS = new Set([
   "embedded_playback_decode_failed",
   "embedded_playback_timeout",
+  "live_transcode_unavailable",
+  "segmented_playback_unavailable",
 ]);
 
 export const EMBEDDED_PLAYBACK_TIMEOUT_MS = 8_000;
