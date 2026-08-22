@@ -86,6 +86,21 @@ test("playback diagnostics explain the active renderer without exposing paths", 
   await expect(page.getByText("/tmp/media/playwright-clip.mp4", { exact: true })).toHaveCount(0);
 });
 
+test("video playback uses one accessible frame-preview control strip", async ({ page }) => {
+  await page.getByRole("button", { name: "Watch", exact: true }).click();
+  const controls = page.getByLabel("Playback controls with frame previews");
+  await expect(controls).toBeVisible();
+  await expect(controls.getByRole("button", { name: "Play", exact: true })).toBeVisible();
+  await expect(controls.getByRole("button", { name: "Go back 15 seconds" })).toBeVisible();
+  await expect(controls.getByRole("button", { name: "Go forward 15 seconds" })).toBeVisible();
+  await expect(controls.getByRole("slider", { name: "Seek through video with frame previews" })).toBeVisible();
+  await expect(controls.getByRole("slider", { name: "Playback volume" })).toBeVisible();
+  await expect(controls.getByRole("button", { name: "Subtitle Center" })).toBeVisible();
+  await expect(controls.getByRole("button", { name: "Toggle fullscreen" })).toBeVisible();
+  await expect(page.locator("video")).not.toHaveAttribute("controls", "");
+  await expect.poll(() => page.locator("video").evaluate((video) => (video as HTMLVideoElement).controls)).toBe(false);
+});
+
 test("Library activity inbox links attention counts to existing workspaces", async ({ page }) => {
   const inbox = page.locator("details").filter({ hasText: "Library activity" });
   await expect(inbox).toContainText("1 attention signal");

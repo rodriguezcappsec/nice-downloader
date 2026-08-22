@@ -983,6 +983,7 @@ export type EmbeddedMpvControl =
   | "frameStep"
   | "frameBackStep"
   | "setRate"
+  | "setVolume"
   | "setMuted";
 
 export interface EmbeddedMpvControlRequest {

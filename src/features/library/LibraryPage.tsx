@@ -59,6 +59,8 @@ import {
   Trash2,
   Tv,
   Undo2,
+  Volume2,
+  VolumeX,
   X,
   ZoomIn,
   ZoomOut,
@@ -3307,17 +3309,28 @@ function PlaybackPreparationStatus({ preparation, reencodeRequired, cancelling }
   </div>;
 }
 
-function PlaybackPreviewTimeline({ currentTime, duration, pendingTime, compact, storyboard, storyboardBusy, storyboardUnavailable, onPreviewRequested, onPendingTime, onCommit }: {
+function PlaybackPreviewTimeline({ currentTime, duration, pendingTime, compact, isPlaying, muted, volume, subtitlesAvailable, subtitlesOpen, storyboard, storyboardBusy, storyboardUnavailable, onPreviewRequested, onPendingTime, onCommit, onTogglePlayback, onSeekRelative, onToggleMuted, onVolumeChange, onToggleSubtitles, onToggleFullscreen }: {
   currentTime: number;
   duration: number;
   pendingTime: number | null;
   compact: boolean;
+  isPlaying: boolean;
+  muted: boolean;
+  volume: number;
+  subtitlesAvailable: boolean;
+  subtitlesOpen: boolean;
   storyboard: LibraryStoryboard | null;
   storyboardBusy: boolean;
   storyboardUnavailable: boolean;
   onPreviewRequested: () => void;
   onPendingTime: (seconds: number | null) => void;
   onCommit: (seconds: number) => void;
+  onTogglePlayback: () => void;
+  onSeekRelative: (seconds: number) => void;
+  onToggleMuted: () => void;
+  onVolumeChange: (volume: number) => void;
+  onToggleSubtitles?: () => void;
+  onToggleFullscreen: () => void;
 }) {
   const [hover, setHover] = useState<{ seconds: number; percent: number } | null>(null);
   const safeDuration = Math.max(0.1, Number.isFinite(duration) ? duration : 0.1);
@@ -3333,20 +3346,30 @@ function PlaybackPreviewTimeline({ currentTime, duration, pendingTime, compact, 
     setHover({ percent, seconds: percent * safeDuration });
   }
 
-  return <div className={`relative border-t border-white/10 bg-[#100e0b] ${compact ? "px-2.5 py-1.5" : "px-5 py-2.5"}`} aria-label="Playback timeline with frame previews">
-    <div className="flex items-center gap-2">
-      <span className={`${compact ? "text-[9px]" : "text-[10px]"} number-font min-w-9 text-right text-white/55`}>{formatDuration(value)}</span>
-      <div className="relative min-w-0 flex-1" onPointerEnter={onPreviewRequested} onPointerMove={updateHover} onPointerLeave={() => setHover(null)}>
+  const controlClass = "grid size-9 shrink-0 place-items-center rounded-[8px] text-white/65 transition-[background-color,color,transform] duration-150 hover:bg-white/10 hover:text-white active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/75";
+
+  return <div className={`relative border-t border-white/10 bg-[linear-gradient(180deg,#14110d,#0c0b09)] ${compact ? "px-2 py-2" : "px-4 py-2.5"}`} aria-label="Playback controls with frame previews">
+    <div className="flex items-center gap-1.5">
+      <button className={controlClass} onClick={() => onSeekRelative(-15)} aria-label="Go back 15 seconds" title="Back 15 seconds"><span className="relative grid place-items-center"><RotateCcw size={18} strokeWidth={1.8} /><span className="number-font absolute mt-px text-[7px] font-bold leading-none">15</span></span></button>
+      <button className="grid size-9 shrink-0 place-items-center rounded-[9px] bg-accent text-accentInk shadow-[0_5px_18px_rgb(var(--accent)/0.24),inset_0_1px_0_rgba(255,255,255,0.34)] transition-[filter,transform] duration-150 hover:brightness-110 active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/80 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0d0c09]" onClick={onTogglePlayback} aria-label={isPlaying ? "Pause" : "Play"} title={isPlaying ? "Pause" : "Play"}>{isPlaying ? <Pause size={15} fill="currentColor" /> : <Play className="translate-x-px" size={15} fill="currentColor" />}</button>
+      <button className={controlClass} onClick={() => onSeekRelative(15)} aria-label="Go forward 15 seconds" title="Forward 15 seconds"><span className="relative grid place-items-center"><RotateCw size={18} strokeWidth={1.8} /><span className="number-font absolute mt-px text-[7px] font-bold leading-none">15</span></span></button>
+      <span className={`${compact ? "hidden" : "block"} number-font ml-1 min-w-9 text-right text-[10px] text-white/55`}>{formatDuration(value)}</span>
+      <div className="relative mx-1 min-w-0 flex-1" onPointerEnter={onPreviewRequested} onPointerMove={updateHover} onPointerLeave={() => setHover(null)}>
         {hover ? <div className="pointer-events-none absolute bottom-[calc(100%+10px)] z-20 -translate-x-1/2 overflow-hidden rounded-[8px] border border-white/15 bg-[#090806] shadow-[0_16px_45px_rgb(0_0_0/0.65)]" style={{ left: `${Math.min(90, Math.max(10, hover.percent * 100))}%` }} aria-hidden="true">
           <div className={`${compact ? "w-28" : "w-40"} aspect-video bg-black`}>
             {previewFrame ? <img className="h-full w-full object-cover" src={previewFrame.imageDataUrl} alt="" /> : <div className="grid h-full place-items-center text-white/35">{storyboardBusy ? <LoaderCircle className="animate-spin" size={15} /> : <Film size={17} />}</div>}
           </div>
           <div className="number-font flex items-center justify-between gap-3 px-2 py-1 text-[9px] text-white/65"><span>{formatDuration(hover.seconds)}</span><span className="text-white/35">{storyboardUnavailable ? "Preview unavailable" : storyboardBusy ? "Preparing…" : previewFrame ? "Frame preview" : "Hover preview"}</span></div>
         </div> : null}
-        <input className="h-5 w-full cursor-pointer accent-[var(--color-accent)]" type="range" min={0} max={safeDuration} step={0.1} value={value} aria-label="Seek through video with frame previews" aria-valuetext={`${formatDuration(value)} of ${formatDuration(duration)}`} onFocus={onPreviewRequested} onChange={(event) => onPendingTime(Number(event.currentTarget.value))} onPointerUp={(event) => onCommit(Number(event.currentTarget.value))} onPointerCancel={() => onPendingTime(null)} onKeyUp={(event) => onCommit(Number(event.currentTarget.value))} onBlur={(event) => { if (pendingTime != null) onCommit(Number(event.currentTarget.value)); }} />
+        <input className="h-7 w-full cursor-pointer accent-[var(--color-accent)]" type="range" min={0} max={safeDuration} step={0.1} value={value} aria-label="Seek through video with frame previews" aria-valuetext={`${formatDuration(value)} of ${formatDuration(duration)}`} onFocus={onPreviewRequested} onChange={(event) => onPendingTime(Number(event.currentTarget.value))} onPointerUp={(event) => onCommit(Number(event.currentTarget.value))} onPointerCancel={() => onPendingTime(null)} onKeyUp={(event) => onCommit(Number(event.currentTarget.value))} onBlur={(event) => { if (pendingTime != null) onCommit(Number(event.currentTarget.value)); }} />
       </div>
-      <span className={`${compact ? "text-[9px]" : "text-[10px]"} number-font min-w-9 text-white/45`}>{formatDuration(duration)}</span>
+      <span className={`${compact ? "hidden" : "block"} number-font min-w-9 text-[10px] text-white/45`}>{formatDuration(duration)}</span>
+      <button className={controlClass} onClick={onToggleMuted} aria-label={muted || volume === 0 ? "Unmute" : "Mute"} title={muted || volume === 0 ? "Unmute" : "Mute"}>{muted || volume === 0 ? <VolumeX size={16} /> : <Volume2 size={16} />}</button>
+      {!compact ? <input className="h-7 w-20 cursor-pointer accent-[var(--color-accent)]" type="range" min={0} max={1} step={0.05} value={muted ? 0 : volume} onChange={(event) => onVolumeChange(Number(event.currentTarget.value))} aria-label="Playback volume" aria-valuetext={`${Math.round((muted ? 0 : volume) * 100)} percent`} /> : null}
+      {subtitlesAvailable && onToggleSubtitles ? <button className={`${controlClass} ${subtitlesOpen ? "bg-white/10 text-accent" : ""}`} onClick={onToggleSubtitles} aria-expanded={subtitlesOpen} aria-controls="subtitle-center" aria-label="Subtitle Center" title="Subtitle Center"><Captions size={16} /></button> : null}
+      {!compact ? <button className={controlClass} onClick={onToggleFullscreen} aria-label="Toggle fullscreen" title="Fullscreen"><Maximize size={16} /></button> : null}
     </div>
+    {compact ? <div className="number-font mt-0.5 flex items-center justify-center gap-1 text-[9px] text-white/45"><span>{formatDuration(value)}</span><span aria-hidden="true">/</span><span>{formatDuration(duration)}</span></div> : null}
   </div>;
 }
 
@@ -3458,7 +3481,8 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
   const [embeddedMpvStatus, setEmbeddedMpvStatus] = useState<EmbeddedMpvStatus | null>(null);
   const [embeddedMpvSession, setEmbeddedMpvSession] = useState<EmbeddedMpvSession | null>(null);
   const [embeddedMpvBusy, setEmbeddedMpvBusy] = useState(false);
-  const [embeddedMpvMuted, setEmbeddedMpvMuted] = useState(false);
+  const [playbackMuted, setPlaybackMuted] = useState(false);
+  const [playbackVolume, setPlaybackVolume] = useState(1);
   const [playbackRenderer, setPlaybackRenderer] = useState<"native" | "web">("web");
   const [nativeFallbackMessage, setNativeFallbackMessage] = useState<string | null>(null);
   const [resumedAt, setResumedAt] = useState<number | null>(null);
@@ -3508,7 +3532,8 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
     setNativeBusy(false);
     setEmbeddedMpvSession(null);
     setEmbeddedMpvBusy(false);
-    setEmbeddedMpvMuted(false);
+    setPlaybackMuted(false);
+    setPlaybackVolume(1);
     setPlaybackRenderer("web");
     setNativeFallbackMessage(null);
     setIsPlaying(false);
@@ -4041,6 +4066,39 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
     else video.pause();
   }
 
+  function toggleMuted() {
+    const restoringVolume = playbackVolume === 0;
+    const volume = restoringVolume ? 1 : playbackVolume;
+    const muted = restoringVolume ? false : !playbackMuted;
+    if (restoringVolume) setPlaybackVolume(volume);
+    setPlaybackMuted(muted);
+    if (embeddedMpvSession) {
+      if (restoringVolume) void api.controlEmbeddedMpv({ action: "setVolume", value: volume * 100 }).catch((error) => setError(normalizeError(error)));
+      void api.controlEmbeddedMpv({ action: "setMuted", value: muted ? 1 : 0 }).catch((error) => setError(normalizeError(error)));
+    }
+    const video = videoRef.current;
+    if (video) {
+      if (restoringVolume) video.volume = volume;
+      video.muted = muted;
+    }
+  }
+
+  function changeVolume(volume: number) {
+    const normalized = Math.min(1, Math.max(0, Number.isFinite(volume) ? volume : 1));
+    const muted = normalized === 0;
+    setPlaybackVolume(normalized);
+    setPlaybackMuted(muted);
+    if (embeddedMpvSession) {
+      void api.controlEmbeddedMpv({ action: "setVolume", value: normalized * 100 }).catch((error) => setError(normalizeError(error)));
+      void api.controlEmbeddedMpv({ action: "setMuted", value: muted ? 1 : 0 }).catch((error) => setError(normalizeError(error)));
+    }
+    const video = videoRef.current;
+    if (video) {
+      video.volume = normalized;
+      video.muted = muted;
+    }
+  }
+
   function seek(seconds: number) {
     if (embeddedMpvSession) {
       void api.controlEmbeddedMpv({ action: "seekRelative", value: seconds }).catch((error) => setError(normalizeError(error)));
@@ -4235,15 +4293,9 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
       const key = event.key.toLocaleLowerCase();
       if (key === "escape" && !document.fullscreenElement) { event.preventDefault(); if (leanBack) onExitLeanBack?.(); else closePlayer(); }
       else if (key === " " || key === "k") { event.preventDefault(); togglePlayback(); }
-      else if (key === "j" || key === "arrowleft") { event.preventDefault(); seek(-10); }
-      else if (key === "l" || key === "arrowright") { event.preventDefault(); seek(10); }
-      else if (key === "m" && embeddedMpvSession) {
-        event.preventDefault();
-        const muted = !embeddedMpvMuted;
-        setEmbeddedMpvMuted(muted);
-        void api.controlEmbeddedMpv({ action: "setMuted", value: muted ? 1 : 0 }).catch(() => {});
-      }
-      else if (key === "m" && videoRef.current) { event.preventDefault(); videoRef.current.muted = !videoRef.current.muted; }
+      else if (key === "j" || key === "arrowleft") { event.preventDefault(); seek(-15); }
+      else if (key === "l" || key === "arrowright") { event.preventDefault(); seek(15); }
+      else if (key === "m" && (embeddedMpvSession || videoRef.current)) { event.preventDefault(); toggleMuted(); }
       else if (key === "f") { event.preventDefault(); toggleFullscreen(); }
       else if (key === ",") { event.preventDefault(); stepFrame(-1); }
       else if (key === ".") { event.preventDefault(); stepFrame(1); }
@@ -4252,7 +4304,7 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [compact, consent, currentPosition, embeddedMpvMuted, embeddedMpvSession, item.fps, leanBack, loopEnd, loopStart, onExitLeanBack, session?.liveTranscode]);
+  }, [compact, consent, currentPosition, embeddedMpvSession, item.fps, leanBack, loopEnd, loopStart, onExitLeanBack, playbackMuted, session?.liveTranscode]);
 
   useEffect(() => {
     if (!leanBack || consent || typeof navigator.getGamepads !== "function") return;
@@ -4275,8 +4327,8 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
         else if (action === "exit") onExitLeanBack?.();
         else if (action === "previous") changeVideo(onPrevious);
         else if (action === "next") changeVideo(onNext);
-        else if (action === "seek-back") seek(-10);
-        else if (action === "seek-forward") seek(10);
+        else if (action === "seek-back") seek(-15);
+        else if (action === "seek-forward") seek(15);
       }
       previousActions = actions;
       frame = window.requestAnimationFrame(poll);
@@ -4448,6 +4500,8 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
       setSession(null);
       setNativeSession(null);
       setEmbeddedMpvSession(opened);
+      void api.controlEmbeddedMpv({ action: "setVolume", value: playbackVolume * 100 }).catch((error) => setError(normalizeError(error)));
+      void api.controlEmbeddedMpv({ action: "setMuted", value: playbackMuted ? 1 : 0 }).catch((error) => setError(normalizeError(error)));
       setCurrentPosition(opened.positionSeconds);
       setPlaybackDuration(opened.durationSeconds);
       setIsPlaying(!opened.paused);
@@ -4551,6 +4605,8 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
     if (!video) return;
     setLoading(false);
     video.playbackRate = playbackRate;
+    video.volume = playbackVolume;
+    video.muted = playbackMuted;
     if (session?.liveTranscode) {
       const position = logicalVideoPosition(video);
       const duration = item.durationSeconds || Math.max(playbackDuration, position);
@@ -4625,18 +4681,12 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
       {embeddedMpvStatus?.available && !embeddedMpvSession ? <Button variant="ghost" className={`${compact ? "size-8 px-0" : ""} text-accent hover:text-accent`} disabled={embeddedMpvBusy} onClick={() => void playWithEmbeddedMpv()} aria-label="Use native libmpv player"><MonitorPlay size={15} />{compact ? null : " Use native player"}</Button> : null}
       {embeddedMpvSession ? <div className={`flex shrink-0 items-center ${compact ? "gap-1" : "gap-2"}`} aria-label="Native libmpv controls">
         {!compact ? <span className="inline-flex h-8 items-center gap-1.5 rounded-[8px] border border-accent/20 bg-accent/[0.08] px-2 text-[10px] font-semibold text-accent shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"><span className="size-1.5 rounded-full bg-accent shadow-[0_0_8px_rgb(var(--accent)/0.65)]" /> Native</span> : null}
-        <div className="flex items-center gap-0.5 rounded-[10px] border border-white/10 bg-white/[0.055] p-1 shadow-[inset_0_1px_0_rgba(255,255,255,0.04),0_8px_24px_rgba(0,0,0,0.18)]">
-          <button className={nativeControlClass} onClick={() => seek(-10)} aria-label="Seek back 10 seconds" title="Back 10 seconds"><RotateCcw size={14} strokeWidth={1.9} /></button>
-          <button className="grid size-8 shrink-0 place-items-center rounded-[8px] bg-accent text-accentInk shadow-[0_5px_16px_rgb(var(--accent)/0.24),inset_0_1px_0_rgba(255,255,255,0.35)] transition-[filter,transform] duration-150 hover:brightness-110 active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/80 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0d0c09]" onClick={togglePlayback} aria-label={embeddedMpvSession.paused ? "Play" : "Pause"} title={embeddedMpvSession.paused ? "Play" : "Pause"}>{embeddedMpvSession.paused ? <Play size={14} fill="currentColor" /> : <Pause size={14} fill="currentColor" />}</button>
-          <button className={nativeControlClass} onClick={() => seek(10)} aria-label="Seek forward 10 seconds" title="Forward 10 seconds"><RotateCw size={14} strokeWidth={1.9} /></button>
-        </div>
         {!compact ? <Select className="h-9 w-[72px] rounded-[9px] border-white/10 bg-white/[0.055] px-2 text-[11px] font-semibold text-white/75 shadow-[inset_0_1px_0_rgba(255,255,255,0.035)] hover:border-white/20 focus:border-accent/50 focus:bg-white/[0.08]" value={playbackRate} aria-label="Playback speed" title="Playback speed" onChange={(event) => { const rate = Number(event.target.value); setPlaybackRate(rate); void api.controlEmbeddedMpv({ action: "setRate", value: rate }).catch((error) => setError(normalizeError(error))); }}><option value={0.5}>0.5×</option><option value={0.75}>0.75×</option><option value={1}>1×</option><option value={1.25}>1.25×</option><option value={1.5}>1.5×</option><option value={2}>2×</option></Select> : null}
         <button className={`inline-flex h-9 shrink-0 items-center justify-center gap-1.5 rounded-[9px] border border-white/10 bg-white/[0.045] text-[11px] font-semibold text-white/65 transition-[background-color,border-color,color,transform] duration-150 hover:border-white/20 hover:bg-white/[0.09] hover:text-white active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/75 ${compact ? "w-9" : "px-2.5"}`} title="Switch to the WebView player" disabled={embeddedMpvBusy} onClick={() => void closeEmbeddedMpvPlayback()} aria-label="Switch to WebView player"><MonitorPlay size={14} strokeWidth={1.9} />{compact ? null : <span>Web player</span>}</button>
       </div> : null}
       <Button variant="ghost" className={`${compact ? "size-8 px-0" : "h-9 rounded-[9px] border-white/10 bg-white/[0.035] px-3 text-[11px]"} shrink-0 text-white/65 hover:border-white/20 hover:bg-white/[0.08] hover:text-white`} onClick={() => void openExternal()} aria-label="Open in system player"><ExternalLink size={14} strokeWidth={1.9} />{compact ? null : " System player"}</Button>
-      {compact && session && !embeddedMpvSession ? <button className={`${nativeControlClass} ${subtitleCenterOpen ? "bg-white/10 text-accent" : ""}`} onClick={toggleSubtitleCenter} aria-expanded={subtitleCenterOpen} aria-controls="subtitle-center" aria-label="Open Subtitle Center" title="Subtitle Center"><Captions size={15} /></button> : null}
       {compact ? <button className={`${nativeControlClass} touch-none cursor-ew-resize`} onPointerDown={onMiniPlayerResizeStart} onKeyDown={onMiniPlayerResizeKey} aria-label="Resize mini player. Drag horizontally or use arrow keys; hold Shift for larger steps." title="Drag horizontally to resize · Arrow keys resize"><Scaling size={15} /></button> : null}
-      {compact ? <button className={nativeControlClass} onClick={onRestore} aria-label="Return to full watch page" title="Restore full player"><Maximize size={15} /></button> : <button className="grid size-9 shrink-0 place-items-center rounded-[9px] border border-transparent text-white/60 transition hover:border-white/10 hover:bg-white/[0.07] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70" onClick={toggleFullscreen} aria-label="Toggle fullscreen" title="Fullscreen"><Maximize size={16} strokeWidth={1.9} /></button>}
+      {compact ? <button className={nativeControlClass} onClick={onRestore} aria-label="Return to full watch page" title="Restore full player"><Maximize size={15} /></button> : null}
       {compact ? <button className={nativeControlClass} onClick={closePlayer} aria-label="Close mini player" title="Close player"><X size={16} /></button> : null}
     </header>
     <div ref={playbackSurfaceRef} className={`relative flex min-h-0 items-center justify-center overflow-auto bg-black ${compact ? "aspect-video" : leanBack ? "flex-1" : "aspect-video min-h-[240px] max-h-[calc(100dvh-250px)]"}`}>
@@ -4650,7 +4700,7 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
         style={subtitleVideoStyle}
         crossOrigin="anonymous"
         src={session.url}
-        controls={!session.liveTranscode}
+        controls={false}
         playsInline
         preload="metadata"
         onLoadedMetadata={onLoadedMetadata}
@@ -4666,13 +4716,7 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
         {subtitleTracks.map((track, index) => <track key={`${track.label}:${index}:${session.streamStartSeconds}`} kind="subtitles" src={track.url} srcLang={track.language || "und"} label={track.label} default={index === selectedSubtitleIndex} onLoad={onSubtitleTrackLoaded} />)}
       </video> : null}
     </div>
-    {session?.liveTranscode ? <div className={`flex items-center gap-2 border-t border-white/10 bg-[#100e0b] ${compact ? "px-2 py-1.5" : "px-5 py-2"}`} aria-label="Live compatibility playback controls">
-      <button className={nativeControlClass} onClick={() => seek(-10)} aria-label="Seek back 10 seconds"><RotateCcw size={14} /></button>
-      <button className="grid size-8 shrink-0 place-items-center rounded-[8px] bg-accent text-accentInk focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/80" onClick={togglePlayback} aria-label={isPlaying ? "Pause" : "Play"}>{isPlaying ? <Pause size={14} fill="currentColor" /> : <Play size={14} fill="currentColor" />}</button>
-      <button className={nativeControlClass} onClick={() => seek(10)} aria-label="Seek forward 10 seconds"><RotateCw size={14} /></button>
-      <span className="number-font text-[9px] text-white/45">Live compatibility stream</span>
-    </div> : null}
-    {(embeddedMpvSession || session) && !playbackError && !nativeSession ? <PlaybackPreviewTimeline currentTime={currentPosition} duration={playbackDuration} pendingTime={pendingNativeSeek} compact={compact} storyboard={previewStoryboard} storyboardBusy={previewStoryboardBusy} storyboardUnavailable={previewStoryboardUnavailable} onPreviewRequested={requestPreviewStoryboard} onPendingTime={setPendingNativeSeek} onCommit={commitNativeSeek} /> : null}
+    {(embeddedMpvSession || session) && !playbackError && !nativeSession ? <PlaybackPreviewTimeline currentTime={currentPosition} duration={playbackDuration} pendingTime={pendingNativeSeek} compact={compact} isPlaying={isPlaying} muted={playbackMuted} volume={playbackVolume} subtitlesAvailable={Boolean(session && !embeddedMpvSession)} subtitlesOpen={subtitleCenterOpen} storyboard={previewStoryboard} storyboardBusy={previewStoryboardBusy} storyboardUnavailable={previewStoryboardUnavailable} onPreviewRequested={requestPreviewStoryboard} onPendingTime={setPendingNativeSeek} onCommit={commitNativeSeek} onTogglePlayback={togglePlayback} onSeekRelative={seek} onToggleMuted={toggleMuted} onVolumeChange={changeVolume} onToggleSubtitles={session && !embeddedMpvSession ? toggleSubtitleCenter : undefined} onToggleFullscreen={toggleFullscreen} /> : null}
     {!compact && !leanBack && (embeddedMpvSession || session) && !playbackError && !nativeSession ? <PlaybackTools currentTime={currentPosition} loopStart={loopStart} loopEnd={loopEnd} frameStepDisabled={Boolean(session?.liveTranscode)} screenshotBusy={screenshotBusy} onSetLoopStart={setLoopStartAtCurrentPosition} onSetLoopEnd={setLoopEndAtCurrentPosition} onClearLoop={clearLoop} onFrameStep={stepFrame} onScreenshot={() => void captureFrame()} /> : null}
     {subtitleCenterOpen && session && !embeddedMpvSession ? <section id="subtitle-center" className={`border-t border-white/10 bg-[linear-gradient(180deg,#15120e,#0d0c09)] ${compact ? "p-3" : "px-5 py-4"}`} aria-labelledby="subtitle-center-title">
       <div className="flex items-start gap-3"><div className="grid size-8 shrink-0 place-items-center rounded-[7px] bg-accent/10 text-accent"><Captions size={15} /></div><div className="min-w-0 flex-1"><h2 id="subtitle-center-title" className="text-xs font-semibold text-white/85">Subtitle Center</h2>{!compact ? <p className="mt-1 text-[10px] leading-4 text-white/40">Choose a local sidecar track and tune its timing and appearance. The original subtitle file is never modified.</p> : null}</div><button className={nativeControlClass} onClick={() => setSubtitleCenterOpen(false)} aria-label="Close Subtitle Center"><X size={14} /></button></div>
@@ -4690,7 +4734,6 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
     <footer className={`${compact ? "hidden" : "flex"} flex-wrap items-center gap-3 border-t border-white/10 bg-[#100e0b] ${leanBack ? "justify-center px-5 py-4" : "px-5 py-3"}`}>
       {leanBack ? <><Button variant="ghost" className="h-14 min-w-32 text-base text-white/75" disabled={!onPrevious} onClick={() => changeVideo(onPrevious)}><SkipBack size={21} /> Previous</Button><Button className="h-14 min-w-44 text-base" disabled={(!videoRef.current && !embeddedMpvSession) || Boolean(playbackError) || Boolean(nativeSession)} onClick={togglePlayback}>{isPlaying ? <Pause size={22} /> : <Play size={22} fill="currentColor" />} {isPlaying ? "Pause" : "Play"}</Button><Button variant="ghost" className="h-14 min-w-32 text-base text-white/75" disabled={!onNext} onClick={() => changeVideo(onNext)}>Next <SkipForward size={21} /></Button><Button variant="secondary" className="h-14 min-w-28 border-white/10 bg-white/10 text-white" onClick={onExitLeanBack}><Minimize2 size={19} /> Exit</Button><p className="w-full text-center text-[11px] text-white/45">Gamepad: A/Start play · B exit · D-pad browse · LB/RB seek · Keyboard: Space/K · J/L · M · F · Esc</p></> : <><Button variant="ghost" className="h-9 text-white/70" disabled={!onPrevious} onClick={() => changeVideo(onPrevious)}><ChevronRight className="rotate-180" size={15} /> Previous</Button><Button variant="ghost" className="h-9 text-white/70" disabled={!onNext} onClick={() => changeVideo(onNext)}>Next <ChevronRight size={15} /></Button><span className="h-5 w-px bg-white/10" /><label className="flex items-center gap-2 text-xs text-white/55"><span>Speed</span><Select className="h-8 w-24 border-white/10 bg-white/5 text-xs text-white" value={playbackRate} onChange={(event) => { const rate = Number(event.target.value); setPlaybackRate(rate); if (embeddedMpvSession) void api.controlEmbeddedMpv({ action: "setRate", value: rate }).catch((error) => setError(normalizeError(error))); else if (videoRef.current) videoRef.current.playbackRate = rate; }}><option value={0.5}>0.5×</option><option value={0.75}>0.75×</option><option value={1}>1×</option><option value={1.25}>1.25×</option><option value={1.5}>1.5×</option><option value={2}>2×</option></Select></label><p className="ml-auto text-[10px] text-white/40">Space/K play · J/L seek · M mute · F fullscreen · Esc close</p></>}
       {resumedAt != null ? <p className="w-full text-[10px] text-accent" role="status">{seekRequest?.itemId === item.id ? "Started from transcript" : "Resumed"} at {formatDuration(resumedAt)}</p> : null}
-      {!leanBack && session && !embeddedMpvSession ? <Button variant="ghost" className={`h-8 text-[10px] ${subtitleCenterOpen ? "text-accent" : "text-white/55"}`} onClick={toggleSubtitleCenter} aria-expanded={subtitleCenterOpen} aria-controls="subtitle-center"><Captions size={13} /> Subtitles · {selectedSubtitleIndex < 0 ? "Off" : subtitleTracks[selectedSubtitleIndex]?.label || "On"}</Button> : null}
       {session?.compatibilityMode ? <p className="w-full text-[10px] text-accent" role="status">{session.compatibilityTranscoded ? "Using an H.264/AAC embedded-playback copy." : preflight?.compatibilityCached ? "Using an existing cached compatibility copy. AV1 timing is optimized for the embedded player." : "A lossless AV1 timing copy was created for this playback."} The original is unchanged.</p> : null}
       {session?.liveTranscode ? <p className="w-full text-[10px] text-accent" role="status">{session.segmentedStream ? "Using temporary HLS segments for resilient H.264/AAC playback." : "Streaming a fragmented H.264/AAC compatibility feed without a completed copy."} The original is unchanged.</p> : null}
       {nativeFallbackMessage && session ? <p className="w-full text-[10px] text-white/45" role="status">Native libmpv was unavailable for this playback. Using the web player. {nativeFallbackMessage}</p> : null}

@@ -1303,6 +1303,7 @@ pub enum EmbeddedMpvControl {
     FrameStep,
     FrameBackStep,
     SetRate,
+    SetVolume,
     SetMuted,
 }
 
