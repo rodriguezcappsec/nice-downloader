@@ -159,15 +159,16 @@ An optional Rust-owned native mpv backend sits before compatibility-copy fallbac
 
 The libmpv experiment documented in `docs/experiments/libmpv-gtk.md` proves AV1 + AAC rendering in an application-owned GTK `GLArea` under native Wayland. Its opt-in phase-two path reparents the Tauri WebView into a GTK overlay and positions an input-pass-through libmpv surface from bounded React geometry while Rust retains catalog-ID path authority. WebView/copy/external-player fallbacks remain intact; packaging, license review, broader distribution coverage, and automated interaction/accessibility proof remain gates before this can become a default player.
 
-Linux AppImages stage a curated GStreamer plugin set and matching
-`gst-plugin-scanner` before the final `linuxdeploy` dependency pass. A small
+Linux AppImages stage a curated GStreamer plugin set, matching
+`gst-plugin-scanner`, and matching `gst-inspect-1.0` before the final
+`linuxdeploy` dependency pass. A small
 AppRun wrapper pins WebKitGTK to that packaged runtime rather than mixing the
 bundled GStreamer core with host plugins from another distribution.
 The final AppDir excludes `libwayland-client` so WebKitGTK resolves that
 ABI-stable graphics boundary from the host instead of overriding a newer
 compositor and driver stack with the Ubuntu build host's copy.
-Rust checks
-the required audio-output element before compatibility preflight, so a missing
+Rust checks the required audio-output element with that packaged inspector
+before compatibility preflight, so a missing
 runtime is reported before any copy consent. React retains the typed error code
 and offers H.264 fallback only for decode or readiness failures.
 

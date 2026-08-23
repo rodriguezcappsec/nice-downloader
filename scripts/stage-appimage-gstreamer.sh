@@ -8,6 +8,7 @@ fi
 
 app_dir="$1"
 plugin_target="$app_dir/usr/lib/gstreamer-1.0"
+inspector_target="$app_dir/usr/bin/gst-inspect-1.0"
 
 for executable in gst-inspect-1.0 pkg-config; do
   if ! command -v "$executable" >/dev/null 2>&1; then
@@ -31,7 +32,7 @@ if [[ -z "$plugin_source" || -z "$scanner_directory" || ! -d "$plugin_source" ||
   exit 1
 fi
 
-mkdir -p "$plugin_target"
+mkdir -p "$plugin_target" "$(dirname "$inspector_target")"
 
 declare -A staged_plugins=()
 
@@ -106,5 +107,6 @@ if [[ "$av1_decoder_found" != true ]]; then
 fi
 
 install -m 755 "$scanner_source" "$plugin_target/gst-plugin-scanner"
+install -m 755 "$(command -v gst-inspect-1.0)" "$inspector_target"
 
-echo "Staged ${#staged_plugins[@]} GStreamer plugins and the matching scanner."
+echo "Staged ${#staged_plugins[@]} GStreamer plugins, scanner, and inspector."

@@ -98,7 +98,7 @@ Cached compatibility files still serve useful recovery cases:
 - An explicitly approved H.264/AAC copy can recover a file that the available streaming and native paths still cannot render reliably.
 - Large or re-encoded copies require confirmation. Cache use and clearing remain visible in Settings.
 
-Release AppImages include a curated GStreamer plugin set with its matching plugin scanner. Development and native distribution builds use the host GStreamer runtime. For broad host playback support and the optional mpv fallback:
+Release AppImages include a curated GStreamer plugin set with its matching plugin scanner and inspection utility. Development and native distribution builds use the host GStreamer runtime. For broad host playback support and the optional mpv fallback:
 
 ```bash
 # Arch Linux

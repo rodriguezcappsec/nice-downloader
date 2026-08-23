@@ -1856,14 +1856,26 @@ pub fn start(database: Database, cache_directory: PathBuf) -> Result<MediaServer
 
 #[cfg(target_os = "linux")]
 async fn detect_webview_dependency_error() -> Option<String> {
-    let mut command = tokio::process::Command::new("gst-inspect-1.0");
-    command.arg("autoaudiosink").kill_on_drop(true);
+    let mut command = tokio::process::Command::new(webview_gst_inspector());
+    command
+        .arg("autoaudiosink")
+        .env("LC_ALL", "C")
+        .kill_on_drop(true);
     match timeout(Duration::from_secs(3), command.output()).await {
-        Ok(Ok(output)) if output.status.success() => None,
-        Ok(Ok(_)) => Some(
-            "Embedded playback needs the GStreamer audio-output plugins used by WebKitGTK. Install the package that provides autoaudiosink (Arch Linux: gst-plugins-good; Debian/Ubuntu: gstreamer1.0-plugins-good), restart Nice Downloader, or open this video in your system player."
-                .to_owned(),
-        ),
+        Ok(Ok(output)) => {
+            let dependency_error = classify_webview_dependency_probe(
+                output.status.success(),
+                &output.stdout,
+                &output.stderr,
+            );
+            if dependency_error.is_none() && !output.status.success() {
+                tracing::debug!(
+                    stderr = %String::from_utf8_lossy(&output.stderr),
+                    "GStreamer inspection failed without proving autoaudiosink is missing"
+                );
+            }
+            dependency_error
+        }
         Ok(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => {
             // Some distributions ship the WebKitGTK GStreamer runtime without the
             // gst-inspect utility. Let WebKit try playback and rely on the UI timeout.
@@ -1878,6 +1890,41 @@ async fn detect_webview_dependency_error() -> Option<String> {
             None
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn webview_gst_inspector() -> PathBuf {
+    std::env::var_os("APPDIR")
+        .map(PathBuf::from)
+        .map(|app_dir| app_dir.join("usr/bin/gst-inspect-1.0"))
+        .filter(|inspector| inspector.is_file())
+        .unwrap_or_else(|| PathBuf::from("gst-inspect-1.0"))
+}
+
+#[cfg(target_os = "linux")]
+fn classify_webview_dependency_probe(
+    succeeded: bool,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> Option<String> {
+    if succeeded {
+        return None;
+    }
+
+    let diagnostic = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(stdout),
+        String::from_utf8_lossy(stderr)
+    )
+    .to_ascii_lowercase();
+    if diagnostic.contains("no such element or plugin") && diagnostic.contains("autoaudiosink") {
+        return Some(
+            "Embedded playback needs the GStreamer audio-output plugins used by WebKitGTK. Install the package that provides autoaudiosink (Arch Linux: gst-plugins-good; Debian/Ubuntu: gstreamer1.0-plugins-good), restart Nice Downloader, or open this video in your system player."
+                .to_owned(),
+        );
+    }
+
+    None
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -2867,6 +2914,41 @@ mod tests {
     use crate::models::{LibraryItem, LibraryMetadataState};
     use chrono::Utc;
     use tempfile::tempdir;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn webview_dependency_probe_reports_missing_auto_audio_sink() {
+        let error = classify_webview_dependency_probe(
+            false,
+            b"",
+            b"No such element or plugin 'autoaudiosink'",
+        )
+        .expect("missing audio sink should be actionable");
+
+        assert!(error.contains("autoaudiosink"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn webview_dependency_probe_ignores_inspector_loader_mismatch() {
+        assert_eq!(
+            classify_webview_dependency_probe(
+                false,
+                b"",
+                b"gst-inspect-1.0: symbol lookup error: undefined symbol: gst_id_str_as_str",
+            ),
+            None
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn webview_dependency_probe_accepts_success() {
+        assert_eq!(
+            classify_webview_dependency_probe(true, b"Factory Details", b""),
+            None
+        );
+    }
 
     #[test]
     fn parses_ffmpeg_progress_timestamps() {

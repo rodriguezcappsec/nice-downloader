@@ -162,6 +162,25 @@ if [[ -n "$(
   exit 1
 fi
 
+gst_runtime_directory="$app_dir/usr/lib/gstreamer-1.0"
+gst_inspector="$app_dir/usr/bin/gst-inspect-1.0"
+appimage_library_path="$app_dir/usr/lib:$app_dir/usr/lib/x86_64-linux-gnu:$app_dir/usr/lib64"
+if [[ ! -x "$gst_inspector" ]]; then
+  echo "error: matching GStreamer inspector is missing from the AppDir" >&2
+  exit 1
+fi
+
+if ! LC_ALL=C \
+  LD_LIBRARY_PATH="$appimage_library_path" \
+  GST_PLUGIN_SYSTEM_PATH="$gst_runtime_directory" \
+  GST_PLUGIN_SYSTEM_PATH_1_0="$gst_runtime_directory" \
+  GST_PLUGIN_SCANNER="$gst_runtime_directory/gst-plugin-scanner" \
+  GST_PLUGIN_SCANNER_1_0="$gst_runtime_directory/gst-plugin-scanner" \
+  "$gst_inspector" autoaudiosink >/dev/null 2>&1; then
+  echo "error: packaged GStreamer inspector could not load autoaudiosink" >&2
+  exit 1
+fi
+
 if [[ ! -x "$app_dir/AppRun" ]]; then
   echo "error: linuxdeploy did not create the AppDir launcher" >&2
   exit 1

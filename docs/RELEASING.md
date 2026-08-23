@@ -34,8 +34,9 @@ The script sets `NO_STRIP=1` and runs `linuxdeploy` directly on ordinary build
 hosts. When it detects an unreadable `/var/lib/searxng`, it uses Bubblewrap to
 mask only that path inside the build process's mount namespace. It does not
 change system permissions.
-The AppImage wrapper stages a curated GStreamer playback plugin set and matching
-scanner, reruns `linuxdeploy` so their shared-library dependencies are included,
+The AppImage wrapper stages a curated GStreamer playback plugin set, matching
+scanner, and matching inspector; reruns `linuxdeploy` so their shared-library
+dependencies are included; verifies `autoaudiosink` through the packaged probe;
 excludes the build host's `libwayland-client` so WebKitGTK uses the target host's
 graphics boundary,
 and installs the project AppRun launcher before generating the final image. The
