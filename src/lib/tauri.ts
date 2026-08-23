@@ -426,6 +426,7 @@ export const api = {
   getLibraryPrivacyStatus: () => invoke<LibraryPrivacyStatus>("get_library_privacy_status"),
   configureLibraryPrivacy: (request: ConfigureLibraryPrivacyRequest) => invoke<LibraryPrivacyStatus>("configure_library_privacy", { request }),
   unlockLibraryPrivacy: (passphrase: string) => invoke<LibraryPrivacyStatus>("unlock_library_privacy", { passphrase }),
+  disableLibraryPrivacy: (passphrase: string) => invoke<LibraryPrivacyStatus>("disable_library_privacy", { passphrase }),
   lockLibraryPrivacy: () => invoke<LibraryPrivacyStatus>("lock_library_privacy"),
   touchLibraryPrivacy: () => invoke<void>("touch_library_privacy"),
   onLibraryPrivacyChanged: (callback: (status: LibraryPrivacyStatus) => void) =>

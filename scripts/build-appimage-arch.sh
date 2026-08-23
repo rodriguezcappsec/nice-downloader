@@ -3,6 +3,11 @@ set -u
 set -o pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+build_profile="${1:-bundled}"
+if [[ "$build_profile" != "bundled" && "$build_profile" != "slim" ]]; then
+  echo "error: AppImage profile must be 'bundled' or 'slim'" >&2
+  exit 2
+fi
 target_dir="${CARGO_TARGET_DIR:-$repo_root/src-tauri/target}"
 bundle_dir="$target_dir/release/bundle/appimage"
 app_dir="$bundle_dir/Nice Downloader.AppDir"
@@ -10,7 +15,9 @@ tauri_cache="${XDG_CACHE_HOME:-$HOME/.cache}/tauri"
 linuxdeploy="$tauri_cache/linuxdeploy-x86_64.AppImage"
 appimage_plugin="$tauri_cache/linuxdeploy-plugin-appimage.AppImage"
 
-npm run engines:prepare || exit $?
+if [[ "$build_profile" == "bundled" && "${NICE_DOWNLOADER_ENGINES_PREPARED:-0}" != "1" ]]; then
+  npm run engines:prepare || exit $?
+fi
 
 if ! command -v bwrap >/dev/null 2>&1; then
   echo "error: bubblewrap (bwrap) is required for the AppImage build" >&2
@@ -18,10 +25,15 @@ if ! command -v bwrap >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "Preparing the AppImage directory with Tauri..."
+echo "Preparing the $build_profile AppImage directory with Tauri..."
+echo "Note: Tauri's first linuxdeploy pass may fail on Arch; this script will continue from the generated AppDir."
 (
   cd "$repo_root"
-  APPIMAGE_EXTRACT_AND_RUN=1 NO_STRIP=1 npm run tauri:build -- --bundles appimage
+  if [[ "$build_profile" == "slim" ]]; then
+    APPIMAGE_EXTRACT_AND_RUN=1 NO_STRIP=1 npm run tauri:build:slim -- --bundles appimage
+  else
+    APPIMAGE_EXTRACT_AND_RUN=1 NO_STRIP=1 npm run tauri:build:bundled:prepared -- --bundles appimage
+  fi
 )
 tauri_status=$?
 
@@ -30,6 +42,10 @@ set -e
 if [[ ! -d "$app_dir" ]]; then
   echo "error: Tauri failed before creating: $app_dir" >&2
   exit "$tauri_status"
+fi
+
+if [[ "$tauri_status" -ne 0 ]]; then
+  echo "Recovered the expected initial linuxdeploy failure; continuing with the Arch-safe packaging pass."
 fi
 
 if [[ ! -x "$linuxdeploy" || ! -x "$appimage_plugin" ]]; then
@@ -51,6 +67,9 @@ fi
 # that payload outside the AppDir while dynamic application dependencies and
 # GStreamer plugins are scanned, then restore it before AppImage creation.
 engine_dir="$app_dir/usr/lib/Nice Downloader/engines"
+if [[ "$build_profile" == "slim" && -d "$engine_dir" ]]; then
+  rm -rf -- "$engine_dir"
+fi
 engine_staging="$(mktemp -d "${TMPDIR:-/tmp}/nice-downloader-engines.XXXXXX")"
 if [[ -d "$engine_dir" ]]; then
   mv "$engine_dir" "$engine_staging/engines"
@@ -103,6 +122,11 @@ echo "Running linuxdeploy with the packaged playback runtime..."
 
 restore_engines
 
+if [[ "$build_profile" == "slim" && -d "$engine_dir" ]]; then
+  echo "error: Slim AppImage staging unexpectedly contains bundled engines" >&2
+  exit 1
+fi
+
 if [[ ! -x "$app_dir/AppRun" ]]; then
   echo "error: linuxdeploy did not create the AppDir launcher" >&2
   exit 1
@@ -124,6 +148,12 @@ appimage="$(find "$bundle_dir" -maxdepth 1 -type f -name '*.AppImage' -print -qu
 if [[ -z "$appimage" ]]; then
   echo "error: linuxdeploy exited successfully but produced no AppImage" >&2
   exit 1
+fi
+
+if [[ "$build_profile" == "slim" ]]; then
+  slim_appimage="${appimage%.AppImage}-slim.AppImage"
+  mv "$appimage" "$slim_appimage"
+  appimage="$slim_appimage"
 fi
 
 echo "AppImage created: $appimage"

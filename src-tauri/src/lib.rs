@@ -1,3 +1,6 @@
+#[cfg(not(target_os = "linux"))]
+compile_error!("Nice Downloader supports Linux only.");
+
 mod authentication;
 mod chapter_suggestions;
 mod commands;
@@ -374,6 +377,7 @@ pub fn run() {
             commands::get_library_privacy_status,
             commands::configure_library_privacy,
             commands::unlock_library_privacy,
+            commands::disable_library_privacy,
             commands::lock_library_privacy,
             commands::touch_library_privacy,
             commands::list_library_privacy_rules,

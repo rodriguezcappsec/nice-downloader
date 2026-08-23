@@ -1,4 +1,7 @@
-use crate::{errors::AppError, models::EngineId};
+use crate::{
+    errors::AppError,
+    models::{EngineId, EngineSource},
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -64,10 +67,34 @@ pub fn initialize(app_data: &Path, resource_dir: &Path) -> Result<(), AppError> 
 }
 
 pub fn resolve(executable: &str) -> Option<PathBuf> {
+    resolve_with_source(executable).map(|resolved| resolved.path)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedEngine {
+    pub path: PathBuf,
+    pub source: EngineSource,
+}
+
+pub fn resolve_with_source(executable: &str) -> Option<ResolvedEngine> {
     managed_engine(executable)
         .and_then(|engine| active_path(engine).ok().flatten())
-        .or_else(|| bundled_engine(executable))
-        .or_else(|| resolve_host_executable(executable))
+        .map(|path| ResolvedEngine {
+            path,
+            source: EngineSource::Managed,
+        })
+        .or_else(|| {
+            bundled_engine(executable).map(|path| ResolvedEngine {
+                path,
+                source: EngineSource::Bundled,
+            })
+        })
+        .or_else(|| {
+            resolve_host_executable(executable).map(|path| ResolvedEngine {
+                path,
+                source: EngineSource::System,
+            })
+        })
 }
 
 fn bundled_engine(executable: &str) -> Option<PathBuf> {

@@ -8,11 +8,20 @@ pub struct EngineInfo {
     pub id: EngineId,
     pub display_name: String,
     pub installed: bool,
+    pub source: Option<EngineSource>,
     pub executable_path: Option<String>,
     pub version: Option<String>,
     pub required: bool,
     pub status_message: String,
     pub capabilities: Vec<EngineCapability>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum EngineSource {
+    Managed,
+    Bundled,
+    System,
 }
 
 #[derive(Debug, Clone, Serialize)]

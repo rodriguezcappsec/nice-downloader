@@ -1,4 +1,5 @@
 import {
+  AlertTriangle,
   CheckCircle2,
   CircleX,
   Cookie,
@@ -81,6 +82,7 @@ export function SettingsPage() {
   const [candidate, setCandidate] = useState<EngineUpdateCandidate | null>(null);
   const [managing, setManaging] = useState<EngineId | null>(null);
   const [settingsTab, setSettingsTab] = useState<"access" | "profiles" | "privacy" | "desktop" | "engines">("access");
+  const missingRequiredEngines = engines.filter((engine) => engine.required && !engine.installed);
 
   useEffect(() => {
     void api.listManagedEngines().then(setManaged).catch((error) => setError(normalizeError(error)));
@@ -301,6 +303,17 @@ export function SettingsPage() {
       {settingsTab === "desktop" ? <DesktopSettings /> : null}
 
       {settingsTab === "engines" ? <>
+      {missingRequiredEngines.length > 0 ? (
+        <div className="mb-6 flex items-start gap-3 rounded-[11px] border border-amber-400/25 bg-amber-400/[0.07] p-4" role="status">
+          <AlertTriangle className="mt-0.5 shrink-0 text-amber-400" size={18} />
+          <div>
+            <h2 className="text-sm font-semibold text-ink">Required tools are missing</h2>
+            <p className="mt-1 text-xs leading-5 text-muted">
+              This may be a Slim build. Install {missingRequiredEngines.map((engine) => engine.displayName).join(" and ")} through your operating system, or install a verified managed version when offered below. Then select Detect again.
+            </p>
+          </div>
+        </div>
+      ) : null}
       <section className="mb-8">
         <div className="mb-3 flex items-center gap-2">
           <DownloadCloud size={17} className="text-muted" />
@@ -368,6 +381,7 @@ export function SettingsPage() {
                   <div className="flex items-center gap-2">
                     <h3 className="text-sm font-semibold">{engine.displayName}</h3>
                     {engine.required ? <span className="rounded-[4px] bg-accent/10 px-1.5 py-0.5 text-[9px] font-semibold tracking-[0.04em] text-accent">Required</span> : null}
+                    {engine.source ? <span className="rounded-[4px] border border-line/70 px-1.5 py-0.5 text-[9px] font-semibold tracking-[0.04em] text-muted">{engine.source === "managed" ? "Managed" : engine.source === "bundled" ? "Bundled" : "System"}</span> : null}
                   </div>
                   <p className="mt-1 truncate font-mono text-xs text-muted">{engine.executablePath || engine.statusMessage}</p>
                 </div>
@@ -393,7 +407,7 @@ export function SettingsPage() {
           ))}
           {!loading && engines.length === 0 ? <div className="p-5 text-sm text-muted">No engine status is available.</div> : null}
         </div>
-        <p className="mt-3 text-xs leading-5 text-muted">Resolution order: managed update, bundled baseline, then PATH and standard user executable folders. The executable path above shows the active source.</p>
+        <p className="mt-3 text-xs leading-5 text-muted">Resolution order: managed update, bundled baseline when present, then PATH and standard user executable folders. Slim builds omit the bundled baseline.</p>
         <div className="panel-shadow mt-5 flex items-center justify-between rounded-[10px] border border-line/60 bg-panel/70 p-4">
           <div><h3 className="text-sm font-semibold">Support diagnostics</h3><p className="mt-1 text-xs text-muted">Export engine status and sanitized recent errors. URLs, cookies, proxy values, and profile names are excluded.</p></div>
           <Button variant="secondary" onClick={() => void exportDiagnostics()}>Export diagnostics</Button>
@@ -410,6 +424,9 @@ function LibraryPrivacySettings() {
   const [status, setStatus] = useState<LibraryPrivacyStatus | null>(null);
   const [passphrase, setPassphrase] = useState("");
   const [confirmation, setConfirmation] = useState("");
+  const [disablePassphrase, setDisablePassphrase] = useState("");
+  const [disableConfirmed, setDisableConfirmed] = useState(false);
+  const [disableOpen, setDisableOpen] = useState(false);
   const [autoLockMinutes, setAutoLockMinutes] = useState(15);
   const [busy, setBusy] = useState(false);
 
@@ -420,6 +437,11 @@ function LibraryPrivacySettings() {
       if (disposed) return;
       setStatus(next);
       setAutoLockMinutes(next.autoLockMinutes);
+      if (!next.configured || next.locked) {
+        setDisablePassphrase("");
+        setDisableConfirmed(false);
+        setDisableOpen(false);
+      }
     };
     void api.getLibraryPrivacyStatus().then(update).catch((error) => setError(normalizeError(error)));
     void api.onLibraryPrivacyChanged(update).then((stop) => {
@@ -476,7 +498,31 @@ function LibraryPrivacySettings() {
     }
   }
 
+  async function disableProtection() {
+    setBusy(true);
+    try {
+      const next = await api.disableLibraryPrivacy(disablePassphrase);
+      setStatus(next);
+      setDisablePassphrase("");
+      setDisableConfirmed(false);
+      setDisableOpen(false);
+      const retainedRules = next.privateSourceCount + next.privateFolderCount + next.privateItemCount;
+      setNotice({
+        message: retainedRules > 0
+          ? `Library privacy disabled. ${retainedRules} retained privacy rule${retainedRules === 1 ? " is" : "s are"} currently visible.`
+          : "Library privacy disabled and the passphrase was removed.",
+        view: "settings",
+      });
+    } catch (error) {
+      setError(normalizeError(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   if (!status) return <div className="p-8 text-sm text-muted">Loading Library privacy…</div>;
+
+  const retainedRuleCount = status.privateSourceCount + status.privateFolderCount + status.privateItemCount;
 
   return (
     <section className="mb-8">
@@ -489,7 +535,11 @@ function LibraryPrivacySettings() {
           <div className="min-w-0 flex-1">
             <h3 className="text-[15px] font-semibold">{!status.configured ? "Set a privacy passphrase" : status.locked ? "Private media is hidden" : "Private media is visible"}</h3>
             <p className="mt-1 text-xs leading-5 text-muted">
-              {status.configured ? `${status.privateSourceCount} private sources · ${status.privateFolderCount} private folders · ${status.privateItemCount} individual items` : "Protect selected sources, folders, and videos behind an in-memory unlock state."}
+              {status.configured
+                ? `${status.privateSourceCount} private sources · ${status.privateFolderCount} private folders · ${status.privateItemCount} individual items`
+                : retainedRuleCount > 0
+                  ? `${retainedRuleCount} retained privacy rule${retainedRuleCount === 1 ? " is" : "s are"} currently visible. Enable protection to lock them again.`
+                  : "Protect selected sources, folders, and videos behind an in-memory unlock state."}
             </p>
           </div>
           {status.configured && !status.locked ? <Button variant="secondary" disabled={busy} onClick={() => void lock()}><Lock size={15} /> Lock now</Button> : null}
@@ -506,7 +556,24 @@ function LibraryPrivacySettings() {
         <div className="mx-5 mb-5 rounded-[10px] border border-amber-400/20 bg-amber-400/5 p-4 text-xs leading-5 text-muted">
           <strong className="text-ink">App-level privacy, not disk encryption.</strong> Locked items are blocked from the UI, playback, search, analysis, backups, and LAN sharing. Original media files and the SQLite database remain readable to someone with filesystem access.
         </div>
-        <div className="flex justify-end border-t border-line/60 px-5 py-4">
+        {disableOpen && status.configured && !status.locked ? (
+          <div className="mx-5 mb-5 rounded-[10px] border border-red-400/25 bg-red-400/[0.06] p-4" aria-labelledby="disable-library-privacy-title">
+            <h4 id="disable-library-privacy-title" className="text-sm font-semibold text-red-300">Disable Library privacy?</h4>
+            <p className="mt-1 text-xs leading-5 text-muted">The passphrase verifier will be deleted. Existing private item, folder, and source rules will be preserved, but their media will be visible in the Library, search, recent activity, playback, and sharing until protection is enabled again.</p>
+            <div className="mt-4 grid gap-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
+              <Field label="Current passphrase" hint="Required even though the Library is currently unlocked.">
+                <Input type="password" autoComplete="current-password" value={disablePassphrase} onChange={(event) => setDisablePassphrase(event.target.value)} />
+              </Field>
+              <Button variant="danger" disabled={busy || disablePassphrase.length < 6 || !disableConfirmed} onClick={() => void disableProtection()}><Trash2 size={15} /> {busy ? "Disabling…" : "Remove passphrase"}</Button>
+            </div>
+            <label className="mt-3 flex items-start gap-2 text-xs leading-5 text-muted">
+              <input className="mt-1" type="checkbox" checked={disableConfirmed} onChange={(event) => setDisableConfirmed(event.target.checked)} />
+              <span>I understand that retained private media will be visible until I enable protection again.</span>
+            </label>
+          </div>
+        ) : null}
+        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-line/60 px-5 py-4">
+          {status.configured && !status.locked ? <Button variant="ghost" disabled={busy} aria-expanded={disableOpen} onClick={() => { setDisableOpen((open) => !open); setDisablePassphrase(""); setDisableConfirmed(false); }}><Trash2 size={15} /> {disableOpen ? "Cancel disabling" : "Disable protection"}</Button> : <span />}
           {status.configured && status.locked
             ? <Button disabled={busy || passphrase.length < 6} onClick={() => void unlock()}><KeyRound size={15} /> {busy ? "Unlocking…" : "Unlock private Library"}</Button>
             : <Button disabled={busy || passphrase.length < 6 || confirmation.length < 6} onClick={() => void configure()}><ShieldCheck size={15} /> {busy ? "Saving…" : status.configured ? "Update protection" : "Enable protection"}</Button>}

@@ -76,7 +76,7 @@ Status: implemented on `feat/library-creative-workspaces`.
 
 ## Maturity roadmap delivered
 
-- First-run engine/privacy onboarding and Linux AppImage/DEB plus Windows NSIS release workflows.
+- First-run engine/privacy onboarding and Linux AppImage/DEB release workflows.
 - Rust-owned scheduled subscriptions and searchable, archive-aware playlist selection.
 - Typed FFmpeg transformations with progress, cancellation, recovery, and persistence.
 - Local media library with tags, filters, missing-file reconciliation, sidecar imports, and backup/restore.
@@ -168,10 +168,10 @@ Delivered:
 
 - Managed yt-dlp/gallery-dl storage with vendor SHA-256 verification, version probing, pinning, and rollback.
 - Linux packaging and desktop integration.
-- Windows and macOS platform adapters and packaging.
+- Linux-only native build and release boundary.
 
-Linux `.deb` and AppImage bundle targets plus first-run required-engine guidance are configured. Flatpak and cross-platform packages remain distribution work.
+Linux `.deb` and AppImage bundle targets plus first-run required-engine guidance are configured. Flatpak remains optional Linux distribution work.
 
 ## Deferred by design
 
-Browser extensions, subscriptions, standalone cookie-file importing, and broad platform packaging remain outside milestone 1.
+Browser extensions, subscriptions, and standalone cookie-file importing remain outside milestone 1.

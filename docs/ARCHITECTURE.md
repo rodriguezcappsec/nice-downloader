@@ -10,7 +10,7 @@ Filename templates remain typed intent. Rust rejects empty templates, path separ
 
 Subscriptions persist a channel or playlist URL, preset, destination, bounded recent-entry limit, and check interval. A Rust-owned scheduler loads due records once per minute, expands at most 20 recent entries through structured yt-dlp output, analyzes each entry, consults the durable download archive, and enqueues typed requests. The frontend can request an immediate check but never owns timers or deduplication state.
 
-Nice Downloader is a Linux-first Tauri desktop media hub that combines a non-destructive local library with a stable, task-oriented interface over mature media tools. React renders the desktop experience; Rust owns every privileged or authoritative operation.
+Nice Downloader is a Linux-only Tauri desktop media hub that combines a non-destructive local library with a stable, task-oriented interface over mature media tools. React renders the desktop experience; Rust owns every privileged or authoritative operation.
 
 ## Design principles
 
@@ -19,7 +19,7 @@ Nice Downloader is a Linux-first Tauri desktop media hub that combines a non-des
 - **No shell interpolation.** Engines are started directly with `tokio::process::Command`; URLs and metadata are always treated as untrusted data.
 - **Structured data first.** Analysis uses engine JSON (`yt-dlp --dump-single-json` or bounded gallery-dl events); progress uses explicit engine templates.
 - **Replaceable engines.** The application models normalized media and download concepts separately from yt-dlp. Gallery-dl and aria2 adapters can be added behind the same routing boundary.
-- **Portable core, Linux-first integration.** Platform-neutral models and services sit behind small filesystem, executable-discovery, and process layers.
+- **Linux-only product, portable core.** Platform-neutral models and services remain behind small Linux filesystem, executable-discovery, and process layers where that separation improves maintainability.
 
 ## System boundaries
 
@@ -62,6 +62,7 @@ The frontend never receives a generic command-execution primitive. Tauri capabil
 - `features/downloads`: live jobs and cancellation.
 - `features/history`: completed-download records.
 - `features/settings`: engine discovery, optional capability status, and typed site-access preferences.
+- Packaging has explicit standard and Slim profiles. The standard profile merges verified engine resources at bundle time; the base Tauri configuration stays resource-free so Slim packages cannot accidentally capture locally prepared engines. Runtime discovery and application behavior remain shared, and engine status reports whether each executable is managed, bundled, or system-provided.
 - `stores`: Zustand state synchronized from Tauri commands/events.
 - `types`: TypeScript mirrors of the command/event contracts.
 
