@@ -70,7 +70,13 @@ import { Button, Field, Input, Select, Textarea } from "../../components/ui";
 import { formatBytes, formatDuration } from "../../lib/format";
 import { invalidateLibraryArtwork, loadLibraryArtwork } from "../../lib/library-artwork";
 import { assessEmbeddedCompatibility, embeddedPlaybackFingerprint, formatMediaCodec } from "../../lib/media-compatibility";
-import { canOfferPlaybackFallback, createPlaybackError, EMBEDDED_PLAYBACK_TIMEOUT_MS } from "../../lib/playback";
+import {
+  canOfferPlaybackFallback,
+  classifyPlaybackMediaError,
+  createPlaybackError,
+  EMBEDDED_PLAYBACK_TIMEOUT_MS,
+  isCurrentPlaybackSource,
+} from "../../lib/playback";
 import { api, normalizeError } from "../../lib/tauri";
 import { useAppStore } from "../../stores/app-store";
 import { CreativeTimeline } from "./CreativeTimeline";
@@ -3638,6 +3644,7 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
   const consentReturnFocus = useRef<HTMLElement | null>(null);
   const lastSavedPosition = useRef(0);
   const playbackWatchdog = useRef<number | null>(null);
+  const playbackWatchdogSourceUrl = useRef<string | null>(null);
   const playbackProgress = useRef<{ position: number; observedAt: number } | null>(null);
   const playbackVerification = useRef<{ lastPosition: number; accumulatedSeconds: number; recorded: boolean } | null>(null);
   const webPlaybackHandoff = useRef<{ positionSeconds: number; shouldPlay: boolean } | null>(null);
@@ -3650,7 +3657,9 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
   const displayPanGesture = useRef<{ pointerId: number; startX: number; startY: number; panX: number; panY: number } | null>(null);
   const displaySettingsLoaded = useRef(false);
   const lastSavedDisplaySettings = useRef<string | null>(null);
-  const [session, setSession] = useState<LibraryPlaybackSession | null>(null);
+  const playbackTransition = useRef(0);
+  const activePlaybackSourceUrl = useRef<string | null>(null);
+  const [session, setSessionState] = useState<LibraryPlaybackSession | null>(null);
   const [preflight, setPreflight] = useState<LibraryPlaybackPreflight | null>(null);
   const [consent, setConsent] = useState<LibraryPlaybackPreflight | null>(null);
   const [consentBusy, setConsentBusy] = useState(false);
@@ -3699,6 +3708,29 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
   const [displayRemembered, setDisplayRemembered] = useState(false);
   const [displayRememberBusy, setDisplayRememberBusy] = useState(false);
 
+  function beginPlaybackTransition() {
+    playbackTransition.current += 1;
+    activePlaybackSourceUrl.current = null;
+    setSessionState(null);
+    return playbackTransition.current;
+  }
+
+  function activatePlaybackSession(prepared: LibraryPlaybackSession, transition: number) {
+    if (transition !== playbackTransition.current) return false;
+    activePlaybackSourceUrl.current = prepared.url;
+    setSessionState(prepared);
+    return true;
+  }
+
+  function isCurrentVideoEvent(video: HTMLVideoElement, eventSessionUrl: string) {
+    return isCurrentPlaybackSource({
+      activeSessionUrl: activePlaybackSourceUrl.current,
+      eventSessionUrl,
+      currentSrc: video.currentSrc,
+      declaredSrc: video.src,
+    });
+  }
+
   function recordDirectPlaybackEvidence(evidence: "played" | "failed") {
     if (!session || session.compatibilityMode || session.liveTranscode) return;
     recordEmbeddedPlaybackEvidence(playbackFingerprint, evidence);
@@ -3706,8 +3738,8 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
 
   useEffect(() => {
     let disposed = false;
+    const transition = beginPlaybackTransition();
     nativeInitializationItemId.current = item.id;
-    setSession(null);
     setPreflight(null);
     setConsent(null);
     setConsentBusy(false);
@@ -3776,7 +3808,7 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
             ? await api.prepareLibraryHlsPlayback(item.id, requestedStart)
             : await api.prepareLibraryLivePlayback(item.id, requestedStart);
         }
-        if (isCurrent()) setSession(prepared);
+        if (isCurrent()) activatePlaybackSession(prepared, transition);
         return;
       }
       if (inspected.requiresConfirmation) {
@@ -3786,7 +3818,7 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
         return;
       }
       const prepared = await api.prepareLibraryPlayback(item.id, false);
-      if (isCurrent()) setSession(prepared);
+      if (isCurrent()) activatePlaybackSession(prepared, transition);
     };
 
     void (async () => {
@@ -4065,9 +4097,11 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
 
   useEffect(() => {
     if (!session || !loading) return;
+    const sourceUrl = session.url;
     const timer = window.setTimeout(() => {
-      recordDirectPlaybackEvidence("failed");
-      if (advanceCompatibilitySource(videoRef.current, true)) return;
+      const video = videoRef.current;
+      if (!video || !isCurrentVideoEvent(video, sourceUrl)) return;
+      if (advanceCompatibilitySource(video, true)) return;
       setPlaybackError(createPlaybackError(
         "embedded_playback_timeout",
         session.liveTranscode
@@ -4080,9 +4114,9 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
   }, [session, loading]);
 
   function clearPlaybackWatchdog() {
-    if (playbackWatchdog.current == null) return;
-    window.clearTimeout(playbackWatchdog.current);
+    if (playbackWatchdog.current != null) window.clearTimeout(playbackWatchdog.current);
     playbackWatchdog.current = null;
+    playbackWatchdogSourceUrl.current = null;
   }
 
   function logicalVideoPosition(video: HTMLVideoElement) {
@@ -4104,6 +4138,7 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
   async function startHlsPlaybackAt(positionSeconds: number, shouldPlay: boolean) {
     if (!Number.isFinite(positionSeconds)) return;
     clearPlaybackWatchdog();
+    const transition = beginPlaybackTransition();
     hlsFallbackAttempted.current = true;
     livePlaybackShouldPlay.current = shouldPlay;
     videoRef.current?.pause();
@@ -4113,10 +4148,11 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
     const target = Math.min(maximum, Math.max(0, positionSeconds));
     try {
       const prepared = await api.prepareLibraryHlsPlayback(item.id, target);
-      setSession(prepared);
+      if (!activatePlaybackSession(prepared, transition)) return;
       setCurrentPosition(target);
       setPlaybackDuration(item.durationSeconds || playbackDuration);
     } catch {
+      if (transition !== playbackTransition.current) return;
       if (!liveFallbackAttempted.current) {
         await startLivePlaybackAt(target, shouldPlay);
         return;
@@ -4132,6 +4168,7 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
   async function startLivePlaybackAt(positionSeconds: number, shouldPlay: boolean) {
     if (!Number.isFinite(positionSeconds)) return;
     clearPlaybackWatchdog();
+    const transition = beginPlaybackTransition();
     liveFallbackAttempted.current = true;
     livePlaybackShouldPlay.current = shouldPlay;
     videoRef.current?.pause();
@@ -4141,10 +4178,11 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
       const maximum = item.durationSeconds ? Math.max(0, item.durationSeconds - 0.25) : Number.MAX_SAFE_INTEGER;
       const target = Math.min(maximum, Math.max(0, positionSeconds));
       const prepared = await api.prepareLibraryLivePlayback(item.id, target);
-      setSession(prepared);
+      if (!activatePlaybackSession(prepared, transition)) return;
       setCurrentPosition(target);
       setPlaybackDuration(item.durationSeconds || playbackDuration);
     } catch (error) {
+      if (transition !== playbackTransition.current) return;
       livePlaybackShouldPlay.current = false;
       setPlaybackError(normalizeError(error));
       setLoading(false);
@@ -4192,12 +4230,14 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
     }
   }
 
-  function armPlaybackWatchdog() {
+  function armPlaybackWatchdog(sourceUrl: string) {
     if (playbackWatchdog.current != null) return;
+    playbackWatchdogSourceUrl.current = sourceUrl;
     const checkProgress = () => {
       playbackWatchdog.current = null;
+      if (playbackWatchdogSourceUrl.current !== sourceUrl) return;
       const video = videoRef.current;
-      if (!video || video.paused || video.ended) return;
+      if (!video || !isCurrentVideoEvent(video, sourceUrl) || video.paused || video.ended) return;
       notePlaybackProgress(video);
       const observedAt = playbackProgress.current?.observedAt ?? performance.now();
       const stalledFor = performance.now() - observedAt;
@@ -4209,7 +4249,6 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
         return;
       }
       video.pause();
-      recordDirectPlaybackEvidence("failed");
       if (advanceCompatibilitySource(video, true)) return;
       setLoading(false);
       setPlaybackError(createPlaybackError(
@@ -4222,18 +4261,16 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
     playbackWatchdog.current = window.setTimeout(checkProgress, EMBEDDED_PLAYBACK_TIMEOUT_MS);
   }
 
-  function startPlaybackWatchdog() {
+  function startPlaybackWatchdog(video: HTMLVideoElement, sourceUrl: string) {
     clearPlaybackWatchdog();
-    const video = videoRef.current;
-    if (video && Number.isFinite(video.currentTime)) {
+    if (Number.isFinite(video.currentTime)) {
       playbackProgress.current = { position: logicalVideoPosition(video), observedAt: performance.now() };
     }
-    armPlaybackWatchdog();
+    armPlaybackWatchdog(sourceUrl);
   }
 
-  function armPlaybackWatchdogWhilePlaying() {
-    const video = videoRef.current;
-    if (video && !video.paused && !video.ended) armPlaybackWatchdog();
+  function armPlaybackWatchdogWhilePlaying(video: HTMLVideoElement, sourceUrl: string) {
+    if (!video.paused && !video.ended) armPlaybackWatchdog(sourceUrl);
   }
 
   useEffect(() => () => {
@@ -4694,6 +4731,7 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
 
   async function approveCompatibilityCopy() {
     if (!consent || consentBusy) return;
+    const transition = beginPlaybackTransition();
     setConsentBusy(true);
     setCopyPreparationBusy(true);
     setPreparation(null);
@@ -4704,10 +4742,11 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
       const prepared = consent.reencodeRequired
         ? await api.prepareLibraryPlaybackFallback(item.id, true)
         : await api.prepareLibraryPlayback(item.id, true);
-      setSession(prepared);
+      if (!activatePlaybackSession(prepared, transition)) return;
       setConsent(null);
       restoreConsentFocus();
     } catch (error) {
+      if (transition !== playbackTransition.current) return;
       const normalized = normalizeError(error);
       setConsent(null);
       if (!(cancelRequested.current && normalized.code === "embedded_playback_preparation_cancelled")) {
@@ -4717,8 +4756,10 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
       restoreConsentFocus();
     } finally {
       cancelRequested.current = false;
-      setCopyPreparationBusy(false);
-      setConsentBusy(false);
+      if (transition === playbackTransition.current) {
+        setCopyPreparationBusy(false);
+        setConsentBusy(false);
+      }
     }
   }
 
@@ -4809,7 +4850,7 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
       const opened = await api.openLibraryEmbeddedMpv(item.id, bounds, transcriptStart);
       embeddedMpvStopRequested.current = false;
       await api.releaseLibraryPlayback(item.id).catch(() => {});
-      setSession(null);
+      beginPlaybackTransition();
       setNativeSession(null);
       setEmbeddedMpvSession(opened);
       void api.controlEmbeddedMpv({ action: "setVolume", value: playbackVolume * 100 }).catch((error) => setError(normalizeError(error)));
@@ -4862,10 +4903,10 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
 
   async function restartEmbeddedPlaybackAfterNative(handoff: { positionSeconds: number; shouldPlay: boolean } | null = null) {
     clearPlaybackWatchdog();
+    const transition = beginPlaybackTransition();
     webPlaybackHandoff.current = handoff;
     setPlaybackRenderer("web");
     setPlaybackError(null);
-    setSession(null);
     setLoading(true);
     try {
       await api.releaseLibraryPlayback(item.id).catch(() => {});
@@ -4882,8 +4923,9 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
         return;
       }
       const prepared = await api.prepareLibraryPlayback(item.id, false);
-      setSession(prepared);
+      activatePlaybackSession(prepared, transition);
     } catch (error) {
+      if (transition !== playbackTransition.current) return;
       webPlaybackHandoff.current = null;
       setPlaybackError(normalizeError(error));
       setLoading(false);
@@ -4892,8 +4934,8 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
 
   async function retryEmbeddedPlayback() {
     clearPlaybackWatchdog();
+    const transition = beginPlaybackTransition();
     setPlaybackError(null);
-    setSession(null);
     setLoading(true);
     try {
       const inspected = await api.inspectLibraryPlaybackFallback(item.id);
@@ -4905,16 +4947,15 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
         return;
       }
       const prepared = await api.prepareLibraryPlaybackFallback(item.id, false);
-      setSession(prepared);
+      activatePlaybackSession(prepared, transition);
     } catch (error) {
+      if (transition !== playbackTransition.current) return;
       setPlaybackError(normalizeError(error));
       setLoading(false);
     }
   }
 
-  function onLoadedMetadata() {
-    const video = videoRef.current;
-    if (!video) return;
+  function onLoadedMetadata(video: HTMLVideoElement) {
     setLoading(false);
     video.playbackRate = playbackRate;
     video.volume = playbackVolume;
@@ -4959,6 +5000,17 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
       lastSavedPosition.current = saved.positionSeconds;
       setResumedAt(saved.positionSeconds);
     }
+  }
+
+  function handlePlaybackMediaError(video: HTMLVideoElement, eventSession: LibraryPlaybackSession) {
+    if (!isCurrentVideoEvent(video, eventSession.url)) return;
+
+    const failure = classifyPlaybackMediaError(video.error?.code, eventSession.liveTranscode);
+    if (failure.shouldRecordCompatibilityFailure) recordDirectPlaybackEvidence("failed");
+    clearPlaybackWatchdog();
+    if (failure.shouldAdvanceFallback && advanceCompatibilitySource(video, true)) return;
+    setLoading(false);
+    setPlaybackError(createPlaybackError(failure.code, failure.message));
   }
 
   useEffect(() => {
@@ -5008,6 +5060,7 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
       {nativeSession ? <div className="max-w-lg border border-accent/25 bg-accent/5 p-6 text-center"><MonitorPlay className="mx-auto text-accent" size={36} /><h2 className="mt-4 text-lg font-semibold">Playing with native mpv</h2><p className="mt-2 text-sm leading-6 text-white/60">mpv is decoding this video in its native window without creating a compatibility copy.</p>{nativeSession.resumedAtSeconds > 0 ? <p className="mt-2 text-xs text-accent">{seekRequest?.itemId === item.id ? "Started from transcript" : "Resumed"} at {formatDuration(nativeSession.resumedAtSeconds)}</p> : null}<div className="mt-5 flex flex-wrap justify-center gap-2"><Button variant="secondary" disabled={nativeBusy} onClick={() => void closeNativePlayback()}>{nativeBusy ? <LoaderCircle className="animate-spin" size={15} /> : <Square size={15} />} Stop native player</Button><Button onClick={() => void openExternal()}><ExternalLink size={15} /> System player</Button></div></div> : null}
         {playbackError && !nativeSession && !embeddedMpvSession ? <div className="max-w-lg border border-white/10 bg-white/5 p-6 text-center"><Film className="mx-auto text-white/35" size={34} /><h2 className="mt-4 text-lg font-semibold">This video could not be played here</h2><p className="mt-2 text-sm leading-6 text-white/55">{playbackError.message}</p><div className="mt-5 flex flex-wrap justify-center gap-2">{embeddedMpvStatus?.available ? <Button disabled={embeddedMpvBusy} onClick={() => void playWithEmbeddedMpv()}>{embeddedMpvBusy ? <LoaderCircle className="animate-spin" size={15} /> : <MonitorPlay size={15} />} Play here with libmpv</Button> : null}{nativeStatus?.available ? <Button variant={embeddedMpvStatus?.available ? "secondary" : "primary"} disabled={nativeBusy} onClick={() => void playWithNativeMpv()}>{nativeBusy ? <LoaderCircle className="animate-spin" size={15} /> : <MonitorPlay size={15} />} Open native mpv window</Button> : null}{canOfferPlaybackFallback(playbackError) && !session?.compatibilityTranscoded ? <Button variant="secondary" onClick={() => void retryEmbeddedPlayback()}><RotateCcw size={15} /> Create H.264 playback copy</Button> : null}<Button variant={nativeStatus?.available || embeddedMpvStatus?.available ? "secondary" : "primary"} onClick={() => void openExternal()}><ExternalLink size={15} /> Open in system player</Button></div></div> : null}
         {session && !playbackError && !nativeSession && !embeddedMpvSession ? <video
+        key={session.url}
         ref={videoRef}
         className="h-full w-full max-h-full max-w-full bg-black shadow-[0_30px_100px_rgb(0_0_0/0.65)] transition-transform duration-150 motion-reduce:transition-none"
         style={subtitleVideoStyle}
@@ -5016,15 +5069,15 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
         controls={false}
         playsInline
         preload="metadata"
-        onLoadedMetadata={onLoadedMetadata}
-        onPlay={() => { setIsPlaying(true); startPlaybackWatchdog(); }}
-        onPlaying={() => { setIsPlaying(true); clearPlaybackWatchdog(); }}
-        onWaiting={armPlaybackWatchdogWhilePlaying}
-        onStalled={armPlaybackWatchdogWhilePlaying}
-        onTimeUpdate={() => { const video = videoRef.current; if (!video) return; notePlaybackProgress(video); const position = logicalVideoPosition(video); setCurrentPosition(position); if (Math.abs(position - lastSavedPosition.current) >= 5) persistProgress(false); }}
-        onPause={() => { setIsPlaying(false); clearPlaybackWatchdog(); persistProgress(false); }}
-        onEnded={() => { recordDirectPlaybackEvidence("played"); setIsPlaying(false); clearPlaybackWatchdog(); persistProgress(true); window.setTimeout(() => onPlaybackEnded?.(), 0); }}
-        onError={() => { const video = videoRef.current; recordDirectPlaybackEvidence("failed"); clearPlaybackWatchdog(); if (advanceCompatibilitySource(video, true)) return; setLoading(false); setPlaybackError(createPlaybackError("embedded_playback_decode_failed", session.liveTranscode ? "The available H.264/AAC compatibility streams failed. Try libmpv, a cached playback copy, or your system player." : "The WebView does not support this file's container or codecs. The original file is unchanged and can still be opened with your system player.")); }}
+        onLoadedMetadata={(event) => { if (isCurrentVideoEvent(event.currentTarget, session.url)) onLoadedMetadata(event.currentTarget); }}
+        onPlay={(event) => { if (!isCurrentVideoEvent(event.currentTarget, session.url)) return; setIsPlaying(true); startPlaybackWatchdog(event.currentTarget, session.url); }}
+        onPlaying={(event) => { if (!isCurrentVideoEvent(event.currentTarget, session.url)) return; setIsPlaying(true); clearPlaybackWatchdog(); }}
+        onWaiting={(event) => { if (isCurrentVideoEvent(event.currentTarget, session.url)) armPlaybackWatchdogWhilePlaying(event.currentTarget, session.url); }}
+        onStalled={(event) => { if (isCurrentVideoEvent(event.currentTarget, session.url)) armPlaybackWatchdogWhilePlaying(event.currentTarget, session.url); }}
+        onTimeUpdate={(event) => { const video = event.currentTarget; if (!isCurrentVideoEvent(video, session.url)) return; notePlaybackProgress(video); const position = logicalVideoPosition(video); setCurrentPosition(position); if (Math.abs(position - lastSavedPosition.current) >= 5) persistProgress(false); }}
+        onPause={(event) => { if (!isCurrentVideoEvent(event.currentTarget, session.url)) return; setIsPlaying(false); clearPlaybackWatchdog(); persistProgress(false); }}
+        onEnded={(event) => { if (!isCurrentVideoEvent(event.currentTarget, session.url)) return; recordDirectPlaybackEvidence("played"); setIsPlaying(false); clearPlaybackWatchdog(); persistProgress(true); window.setTimeout(() => onPlaybackEnded?.(), 0); }}
+        onError={(event) => handlePlaybackMediaError(event.currentTarget, session)}
       >
         {subtitleTracks.map((track, index) => <track key={`${track.label}:${index}:${session.streamStartSeconds}`} kind="subtitles" src={track.url} srcLang={track.language || "und"} label={track.label} default={index === selectedSubtitleIndex} onLoad={onSubtitleTrackLoaded} />)}
       </video> : null}

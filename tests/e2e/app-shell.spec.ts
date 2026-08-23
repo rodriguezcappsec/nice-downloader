@@ -193,3 +193,40 @@ test("panic-lock clears sensitive Library state and announces the lock", async (
     };
   })).toEqual({ privacy: "locked", search: "", selectedItemId: null, view: "home" });
 });
+
+test("playback lifecycle rejects retired sources and classifies transport failures", async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    const modulePath = "/src/lib/playback.ts";
+    const playback = await import(/* @vite-ignore */ modulePath);
+    return {
+      current: playback.isCurrentPlaybackSource({
+        activeSessionUrl: "http://127.0.0.1:4100/media/current?session=2",
+        eventSessionUrl: "http://127.0.0.1:4100/media/current?session=2",
+        currentSrc: "http://127.0.0.1:4100/media/current?session=2",
+        declaredSrc: "",
+      }),
+      retired: playback.isCurrentPlaybackSource({
+        activeSessionUrl: "http://127.0.0.1:4100/media/current?session=2",
+        eventSessionUrl: "http://127.0.0.1:4100/media/retired?session=1",
+        currentSrc: "http://127.0.0.1:4100/media/retired?session=1",
+        declaredSrc: "",
+      }),
+      network: playback.classifyPlaybackMediaError(2, false),
+      decode: playback.classifyPlaybackMediaError(3, false),
+    };
+  });
+
+  expect(result.current).toBe(true);
+  expect(result.retired).toBe(false);
+  expect(result.network).toMatchObject({
+    code: "embedded_playback_network_failed",
+    shouldAdvanceFallback: true,
+    shouldRecordCompatibilityFailure: false,
+  });
+  expect(result.network.message).toContain("does not mean the codecs are unsupported");
+  expect(result.decode).toMatchObject({
+    code: "embedded_playback_decode_failed",
+    shouldAdvanceFallback: true,
+    shouldRecordCompatibilityFailure: true,
+  });
+});

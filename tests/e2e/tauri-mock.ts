@@ -66,8 +66,19 @@ export async function installTauriMock(page: Page) {
         case "list_library_playlists":
         case "list_continue_watching":
         case "list_library_watch_later":
-        case "list_recently_watched": return [];
-        case "list_library_sources": return [testSource];
+      case "list_recently_watched": return [];
+      case "get_library_home_snapshot": {
+        const videoResult = { ...emptyQuery, items: [testItem], totalItems: 1 };
+        return {
+          recent: videoResult,
+          videos: videoResult,
+          images: emptyQuery,
+          continueWatching: [],
+          watchLater: [],
+          recentlyWatched: [],
+        };
+      }
+      case "list_library_sources": return [testSource];
         case "get_library_source_automation": return { sourceId: testSource.id, tags: [], collectionId: null, favorite: false };
       case "get_library_watch_state": return { itemId: testItem.id, watchLater: false, playback: null };
       case "get_library_video_display_settings": { const saved = window.localStorage.getItem("playwright.video-display"); return saved ? JSON.parse(saved) : null; }

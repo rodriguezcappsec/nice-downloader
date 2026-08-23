@@ -17,7 +17,13 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button, Input, Select, Textarea } from "../../components/ui";
 import { formatBytes, formatDuration } from "../../lib/format";
-import { canOfferPlaybackFallback, createPlaybackError, EMBEDDED_PLAYBACK_TIMEOUT_MS } from "../../lib/playback";
+import {
+  canOfferPlaybackFallback,
+  classifyPlaybackMediaError,
+  createPlaybackError,
+  EMBEDDED_PLAYBACK_TIMEOUT_MS,
+  isCurrentPlaybackSource,
+} from "../../lib/playback";
 import { api, normalizeError } from "../../lib/tauri";
 import { useAppStore } from "../../stores/app-store";
 import type {
@@ -343,7 +349,9 @@ function CompareVideoTile({ item, position, sourceName, audible, multipleAudio, 
   const progress = useRef({ position: 0, duration: 0, lastSaved: 0, completed: false });
   const playbackWatchdog = useRef<number | null>(null);
   const playbackProgress = useRef<{ position: number; observedAt: number } | null>(null);
-  const [session, setSession] = useState<LibraryPlaybackSession | null>(null);
+  const playbackTransition = useRef(0);
+  const activePlaybackSourceUrl = useRef<string | null>(null);
+  const [session, setSessionState] = useState<LibraryPlaybackSession | null>(null);
   const [pending, setPending] = useState<PendingPlayback | null>(null);
   const [loading, setLoading] = useState(!item.missing && item.mediaKind === "video");
   const [busy, setBusy] = useState(false);
@@ -352,6 +360,29 @@ function CompareVideoTile({ item, position, sourceName, audible, multipleAudio, 
   const cancelRequested = useRef(false);
   const [playbackError, setPlaybackError] = useState<AppError | null>(null);
   const [playbackRate, setPlaybackRate] = useState(initialPlayback?.playbackRate || 1);
+
+  function beginPlaybackTransition() {
+    playbackTransition.current += 1;
+    activePlaybackSourceUrl.current = null;
+    setSessionState(null);
+    return playbackTransition.current;
+  }
+
+  function activatePlaybackSession(prepared: LibraryPlaybackSession, transition: number) {
+    if (transition !== playbackTransition.current) return false;
+    activePlaybackSourceUrl.current = prepared.url;
+    setSessionState(prepared);
+    return true;
+  }
+
+  function isCurrentVideoEvent(video: HTMLVideoElement, eventSessionUrl: string) {
+    return isCurrentPlaybackSource({
+      activeSessionUrl: activePlaybackSourceUrl.current,
+      eventSessionUrl,
+      currentSrc: video.currentSrc,
+      declaredSrc: video.src,
+    });
+  }
 
   useEffect(() => {
     if (!initialPlayback) return;
@@ -377,7 +408,7 @@ function CompareVideoTile({ item, position, sourceName, audible, multipleAudio, 
 
   useEffect(() => {
     let disposed = false;
-    setSession(null);
+    const transition = beginPlaybackTransition();
     setPending(null);
     setPlaybackError(null);
     onReady(item.id, false);
@@ -393,7 +424,7 @@ function CompareVideoTile({ item, position, sourceName, audible, multipleAudio, 
         }
         const prepared = await api.prepareLibraryPlayback(item.id, false);
         if (disposed) void api.releaseLibraryPlayback(item.id).catch(() => {});
-        else setSession(prepared);
+        else activatePlaybackSession(prepared, transition);
       })
       .catch((error) => {
         if (!disposed) {
@@ -406,7 +437,10 @@ function CompareVideoTile({ item, position, sourceName, audible, multipleAudio, 
 
   useEffect(() => {
     if (!session || !loading) return;
+    const sourceUrl = session.url;
     const timer = window.setTimeout(() => {
+      const video = videoRef.current;
+      if (!video || !isCurrentVideoEvent(video, sourceUrl)) return;
       setPlaybackError(createPlaybackError("embedded_playback_timeout", "Embedded playback did not become ready. Try the H.264 compatibility option or your system player."));
       setLoading(false);
     }, EMBEDDED_PLAYBACK_TIMEOUT_MS);
@@ -427,12 +461,12 @@ function CompareVideoTile({ item, position, sourceName, audible, multipleAudio, 
     }
   }
 
-  function armPlaybackWatchdog() {
+  function armPlaybackWatchdog(sourceUrl: string) {
     if (playbackWatchdog.current != null) return;
     const checkProgress = () => {
       playbackWatchdog.current = null;
       const video = videoRef.current;
-      if (!video || video.paused || video.ended) return;
+      if (!video || !isCurrentVideoEvent(video, sourceUrl) || video.paused || video.ended) return;
       notePlaybackProgress(video);
       const observedAt = playbackProgress.current?.observedAt ?? performance.now();
       const stalledFor = performance.now() - observedAt;
@@ -454,18 +488,16 @@ function CompareVideoTile({ item, position, sourceName, audible, multipleAudio, 
     playbackWatchdog.current = window.setTimeout(checkProgress, EMBEDDED_PLAYBACK_TIMEOUT_MS);
   }
 
-  function startPlaybackWatchdog() {
+  function startPlaybackWatchdog(video: HTMLVideoElement, sourceUrl: string) {
     clearPlaybackWatchdog();
-    const video = videoRef.current;
-    if (video && Number.isFinite(video.currentTime)) {
+    if (Number.isFinite(video.currentTime)) {
       playbackProgress.current = { position: video.currentTime, observedAt: performance.now() };
     }
-    armPlaybackWatchdog();
+    armPlaybackWatchdog(sourceUrl);
   }
 
-  function armPlaybackWatchdogWhilePlaying() {
-    const video = videoRef.current;
-    if (video && !video.paused && !video.ended) armPlaybackWatchdog();
+  function armPlaybackWatchdogWhilePlaying(video: HTMLVideoElement, sourceUrl: string) {
+    if (!video.paused && !video.ended) armPlaybackWatchdog(sourceUrl);
   }
 
   useEffect(() => () => {
@@ -523,9 +555,7 @@ function CompareVideoTile({ item, position, sourceName, audible, multipleAudio, 
     }
   }
 
-  function onLoadedMetadata() {
-    const video = videoRef.current;
-    if (!video) return;
+  function onLoadedMetadata(video: HTMLVideoElement) {
     setLoading(false);
     onReady(item.id, true);
     video.playbackRate = playbackRate;
@@ -543,8 +573,18 @@ function CompareVideoTile({ item, position, sourceName, audible, multipleAudio, 
     }
   }
 
+  function handlePlaybackMediaError(video: HTMLVideoElement, eventSession: LibraryPlaybackSession) {
+    if (!isCurrentVideoEvent(video, eventSession.url)) return;
+    const failure = classifyPlaybackMediaError(video.error?.code, eventSession.liveTranscode);
+    clearPlaybackWatchdog();
+    onReady(item.id, false);
+    setLoading(false);
+    setPlaybackError(createPlaybackError(failure.code, failure.message));
+  }
+
   async function approvePending() {
     if (!pending || busy) return;
+    const transition = beginPlaybackTransition();
     setBusy(true);
     setLoading(true);
     setPreparation(null);
@@ -557,7 +597,7 @@ function CompareVideoTile({ item, position, sourceName, audible, multipleAudio, 
         await api.releaseLibraryPlayback(item.id).catch(() => {});
         return;
       }
-      setSession(prepared);
+      if (!activatePlaybackSession(prepared, transition)) return;
       setPending(null);
     } catch (error) {
       if (mounted.current) {
@@ -588,12 +628,12 @@ function CompareVideoTile({ item, position, sourceName, audible, multipleAudio, 
   async function retryWithFallback() {
     if (busy) return;
     clearPlaybackWatchdog();
+    const transition = beginPlaybackTransition();
     setBusy(true);
     videoRef.current?.pause();
     captureProgress(false);
     onReady(item.id, false);
     setPlaybackError(null);
-    setSession(null);
     setLoading(true);
     try {
       await api.releaseLibraryPlayback(item.id);
@@ -609,7 +649,7 @@ function CompareVideoTile({ item, position, sourceName, audible, multipleAudio, 
           await api.releaseLibraryPlayback(item.id).catch(() => {});
           return;
         }
-        setSession(prepared);
+        activatePlaybackSession(prepared, transition);
       }
     } catch (error) {
       if (mounted.current) {
@@ -645,6 +685,7 @@ function CompareVideoTile({ item, position, sourceName, audible, multipleAudio, 
       {pending ? <div className="max-w-lg px-7 py-6 text-center"><Film className="mx-auto text-amber-300/70" size={30} /><h3 className="mt-3 text-sm font-semibold">Compatibility copy required</h3><p className="mt-2 text-xs leading-5 text-white/55">{pending.preflight.reason || "This video needs a private compatibility copy for embedded playback."}</p><p className="mt-2 text-[10px] text-white/40">Estimated copy: {formatBytes(pending.preflight.estimatedCopyBytes)} · original remains unchanged</p>{busy ? <ComparePreparationStatus preparation={preparation} cancelling={cancelBusy || cancelRequested.current} /> : null}<div className="mt-4 flex flex-wrap justify-center gap-2"><Button variant="secondary" className="h-8 text-xs" disabled={cancelBusy || (busy && !preparation)} onClick={busy ? () => void cancelPendingPreparation() : () => { setPending(null); setPlaybackError(createPlaybackError("embedded_playback_copy_skipped", "Compatibility copy was skipped for this tile.")); }}><X size={13} /> {busy ? cancelBusy ? "Cancelling…" : "Cancel copy" : "Skip"}</Button><Button className="h-8 text-xs" disabled={busy} onClick={() => void approvePending()}>{busy ? <LoaderCircle className="animate-spin" size={13} /> : <Film size={13} />} Create copy</Button></div></div> : null}
       {playbackError && !pending ? <div className="max-w-lg px-7 py-6 text-center"><Film className="mx-auto text-white/30" size={30} /><h3 className="mt-3 text-sm font-semibold">Could not play this tile</h3><p className="mt-2 text-xs leading-5 text-white/50">{playbackError.message}</p><div className="mt-4 flex flex-wrap justify-center gap-2">{canOfferPlaybackFallback(playbackError) ? <Button variant="secondary" className="h-8 text-xs" disabled={busy} onClick={() => void retryWithFallback()}><RotateCcw size={13} /> Try H.264 copy</Button> : null}<Button className="h-8 text-xs" onClick={() => void openExternal()}><ExternalLink size={13} /> System player</Button></div></div> : null}
       {session && !playbackError && !pending ? <video
+        key={session.url}
         ref={registerVideo}
         aria-label={`Comparison video ${position}: ${item.title}`}
         className="h-full w-full max-h-full max-w-full bg-black object-contain"
@@ -658,15 +699,15 @@ function CompareVideoTile({ item, position, sourceName, audible, multipleAudio, 
           const video = videoRef.current;
           if (!multipleAudio && !audible && video && !video.muted) onRequestAudio();
         }}
-        onLoadedMetadata={onLoadedMetadata}
-        onPlay={startPlaybackWatchdog}
-        onPlaying={clearPlaybackWatchdog}
-        onWaiting={armPlaybackWatchdogWhilePlaying}
-        onStalled={armPlaybackWatchdogWhilePlaying}
-        onTimeUpdate={() => { const video = videoRef.current; if (video) notePlaybackProgress(video); captureProgress(false); }}
-        onPause={() => { clearPlaybackWatchdog(); captureProgress(false); }}
-        onEnded={() => { clearPlaybackWatchdog(); captureProgress(true); }}
-        onError={() => { clearPlaybackWatchdog(); onReady(item.id, false); setLoading(false); setPlaybackError(createPlaybackError("embedded_playback_decode_failed", "The WebView could not decode this container or codec.")); }}
+        onLoadedMetadata={(event) => { if (isCurrentVideoEvent(event.currentTarget, session.url)) onLoadedMetadata(event.currentTarget); }}
+        onPlay={(event) => { if (isCurrentVideoEvent(event.currentTarget, session.url)) startPlaybackWatchdog(event.currentTarget, session.url); }}
+        onPlaying={(event) => { if (isCurrentVideoEvent(event.currentTarget, session.url)) clearPlaybackWatchdog(); }}
+        onWaiting={(event) => { if (isCurrentVideoEvent(event.currentTarget, session.url)) armPlaybackWatchdogWhilePlaying(event.currentTarget, session.url); }}
+        onStalled={(event) => { if (isCurrentVideoEvent(event.currentTarget, session.url)) armPlaybackWatchdogWhilePlaying(event.currentTarget, session.url); }}
+        onTimeUpdate={(event) => { if (!isCurrentVideoEvent(event.currentTarget, session.url)) return; notePlaybackProgress(event.currentTarget); captureProgress(false); }}
+        onPause={(event) => { if (!isCurrentVideoEvent(event.currentTarget, session.url)) return; clearPlaybackWatchdog(); captureProgress(false); }}
+        onEnded={(event) => { if (!isCurrentVideoEvent(event.currentTarget, session.url)) return; clearPlaybackWatchdog(); captureProgress(true); }}
+        onError={(event) => handlePlaybackMediaError(event.currentTarget, session)}
       >{session.subtitles.map((track) => <track key={track.url} kind="subtitles" src={track.url} srcLang={track.language || "und"} label={track.label} />)}</video> : null}
     </div>
     <footer className="flex min-h-11 flex-wrap items-center gap-3 border-t border-white/10 bg-[#0c0f14] px-4 py-2 text-[10px] text-white/40"><span>{item.width && item.height ? `${item.width} × ${item.height}` : "Resolution unknown"}{item.container ? ` · ${item.container.toLocaleUpperCase()}` : ""}</span><label className="ml-auto flex items-center gap-1.5"><span>Speed</span><Select className="h-7 w-20 border-white/10 bg-white/5 text-[10px] text-white" value={playbackRate} disabled={!session} onChange={(event) => { const rate = Number(event.target.value); setPlaybackRate(rate); if (videoRef.current) videoRef.current.playbackRate = rate; }}><option value={0.5}>0.5×</option><option value={0.75}>0.75×</option><option value={1}>1×</option><option value={1.25}>1.25×</option><option value={1.5}>1.5×</option><option value={2}>2×</option></Select></label><Button variant="ghost" className="h-7 px-2 text-[10px] text-white/55 hover:text-white" disabled={unavailable} onClick={() => void openExternal()}><ExternalLink size={12} /> System player</Button></footer>
