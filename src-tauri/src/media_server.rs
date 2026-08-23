@@ -180,6 +180,7 @@ pub struct MediaServerState {
     token: String,
     cache_directory: PathBuf,
     playback_paths: Arc<RwLock<HashMap<String, PathBuf>>>,
+    artwork_paths: Arc<RwLock<HashMap<String, PathBuf>>>,
     compatibility_lock: Arc<AsyncMutex<()>>,
     playback_preparations: Arc<RwLock<HashMap<String, ActivePlaybackPreparation>>>,
     preparation_slots: Arc<Semaphore>,
@@ -197,6 +198,7 @@ impl MediaServerState {
             token: Uuid::new_v4().to_string(),
             cache_directory: PathBuf::new(),
             playback_paths: Arc::new(RwLock::new(HashMap::new())),
+            artwork_paths: Arc::new(RwLock::new(HashMap::new())),
             compatibility_lock: Arc::new(AsyncMutex::new(())),
             playback_preparations: Arc::new(RwLock::new(HashMap::new())),
             preparation_slots: Arc::new(Semaphore::new(2)),
@@ -205,6 +207,41 @@ impl MediaServerState {
             live_transcode_slots: Arc::new(Semaphore::new(MAX_LIVE_TRANSCODES)),
             webview_dependency_error: Arc::new(OnceCell::new()),
         }
+    }
+
+    pub fn register_artwork(&self, item_id: &str, path: PathBuf) -> Result<String, AppError> {
+        validate_item_id(item_id)?;
+        validate_regular_media_file(&path)?;
+        if path.extension().and_then(OsStr::to_str) != Some("jpg") {
+            return Err(AppError::new(
+                "library_artwork_invalid",
+                "The generated Library artwork has an unexpected format.",
+            ));
+        }
+        let base_url = self.base_url.as_deref().ok_or_else(|| {
+            AppError::new(
+                "embedded_player_unavailable",
+                "The local media service is unavailable.",
+            )
+        })?;
+        let version = path
+            .file_name()
+            .and_then(OsStr::to_str)
+            .ok_or_else(|| {
+                AppError::new(
+                    "library_artwork_invalid",
+                    "The generated Library artwork has an invalid cache name.",
+                )
+            })?
+            .to_owned();
+        self.artwork_paths
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(item_id.to_owned(), path);
+        Ok(format!(
+            "{base_url}/artwork/{item_id}?token={}&v={version}",
+            self.token
+        ))
     }
 
     async fn ensure_webview_dependencies(&self) -> Result<(), AppError> {
@@ -1768,6 +1805,7 @@ pub fn start(database: Database, cache_directory: PathBuf) -> Result<MediaServer
         token: Uuid::new_v4().to_string(),
         cache_directory,
         playback_paths: Arc::new(RwLock::new(HashMap::new())),
+        artwork_paths: Arc::new(RwLock::new(HashMap::new())),
         compatibility_lock: Arc::new(AsyncMutex::new(())),
         playback_preparations: Arc::new(RwLock::new(HashMap::new())),
         preparation_slots: Arc::new(Semaphore::new(2)),
@@ -1890,9 +1928,11 @@ async fn handle_request(
             Err(status) => response(status, empty_body()),
         };
     }
+    let artwork_response = matches!(segments.as_slice(), ["artwork", _]);
     let resolved = match segments.as_slice() {
         ["media", item_id] => resolve_media_path(&state, item_id),
         ["image", item_id] => resolve_image_path(&state.database, item_id),
+        ["artwork", item_id] => resolve_artwork_path(&state, item_id),
         ["subtitle", item_id, encoded_name] => {
             resolve_subtitle_path(&state.database, item_id, encoded_name)
         }
@@ -1903,12 +1943,46 @@ async fn handle_request(
         Err(status) => return response(status, empty_body()),
     };
     match serve_file(&request, &path, content_type).await {
-        Ok(response) => response,
+        Ok(mut response) => {
+            if artwork_response {
+                response.headers_mut().insert(
+                    CACHE_CONTROL,
+                    hyper::header::HeaderValue::from_static("private, max-age=31536000, immutable"),
+                );
+            }
+            response
+        }
         Err(error) => {
             tracing::warn!(%error, "could not stream a library media file");
             response(StatusCode::INTERNAL_SERVER_ERROR, empty_body())
         }
     }
+}
+
+fn resolve_artwork_path(
+    state: &MediaServerState,
+    item_id: &str,
+) -> Result<(PathBuf, &'static str), StatusCode> {
+    Uuid::parse_str(item_id).map_err(|_| StatusCode::NOT_FOUND)?;
+    let item = state
+        .database
+        .get_library_item(item_id)
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+    if item.missing {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let path = state
+        .artwork_paths
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(item_id)
+        .cloned()
+        .ok_or(StatusCode::NOT_FOUND)?;
+    validate_regular_media_file(&path).map_err(|_| StatusCode::NOT_FOUND)?;
+    if path.extension().and_then(OsStr::to_str) != Some("jpg") {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    Ok((path, "image/jpeg"))
 }
 
 fn resolve_media_path(
@@ -3046,6 +3120,7 @@ mod tests {
                 active_item_id.clone(),
                 first,
             )]))),
+            artwork_paths: Arc::new(RwLock::new(HashMap::new())),
             compatibility_lock: Arc::new(AsyncMutex::new(())),
             playback_preparations: Arc::new(RwLock::new(HashMap::new())),
             preparation_slots: Arc::new(Semaphore::new(2)),
@@ -3101,6 +3176,7 @@ mod tests {
             token: "fixture-token".to_owned(),
             cache_directory: directory.path().join("playback-cache"),
             playback_paths: Arc::new(RwLock::new(HashMap::new())),
+            artwork_paths: Arc::new(RwLock::new(HashMap::new())),
             compatibility_lock: Arc::new(AsyncMutex::new(())),
             playback_preparations: Arc::new(RwLock::new(HashMap::new())),
             preparation_slots: Arc::new(Semaphore::new(2)),
@@ -3136,6 +3212,7 @@ mod tests {
             token: "fixture-token".to_owned(),
             cache_directory: cache_directory.clone(),
             playback_paths: Arc::new(RwLock::new(HashMap::new())),
+            artwork_paths: Arc::new(RwLock::new(HashMap::new())),
             compatibility_lock: Arc::new(AsyncMutex::new(())),
             playback_preparations: Arc::new(RwLock::new(HashMap::new())),
             preparation_slots: Arc::new(Semaphore::new(2)),
@@ -3188,6 +3265,7 @@ mod tests {
             token: "fixture-token".to_owned(),
             cache_directory: cache_directory.clone(),
             playback_paths: Arc::new(RwLock::new(HashMap::new())),
+            artwork_paths: Arc::new(RwLock::new(HashMap::new())),
             compatibility_lock: Arc::new(AsyncMutex::new(())),
             playback_preparations: Arc::new(RwLock::new(HashMap::new())),
             preparation_slots: Arc::new(Semaphore::new(2)),
@@ -3252,6 +3330,7 @@ mod tests {
             token: "fixture-token".to_owned(),
             cache_directory: directory.path().join("playback-cache"),
             playback_paths: Arc::new(RwLock::new(HashMap::new())),
+            artwork_paths: Arc::new(RwLock::new(HashMap::new())),
             compatibility_lock: Arc::new(AsyncMutex::new(())),
             playback_preparations: Arc::new(RwLock::new(HashMap::new())),
             preparation_slots: Arc::new(Semaphore::new(2)),
@@ -3294,6 +3373,7 @@ mod tests {
             token: "fixture-token".to_owned(),
             cache_directory: directory.path().join("playback-cache"),
             playback_paths: Arc::new(RwLock::new(HashMap::new())),
+            artwork_paths: Arc::new(RwLock::new(HashMap::new())),
             compatibility_lock: Arc::new(AsyncMutex::new(())),
             playback_preparations: Arc::new(RwLock::new(HashMap::new())),
             preparation_slots: Arc::new(Semaphore::new(2)),

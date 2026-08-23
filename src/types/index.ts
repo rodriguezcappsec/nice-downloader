@@ -611,6 +611,14 @@ export interface LibraryQueryResult {
   pageSize: number;
   totalPages: number;
 }
+export interface LibraryHomeSnapshot {
+  recent: LibraryQueryResult;
+  videos: LibraryQueryResult;
+  images: LibraryQueryResult;
+  continueWatching: LibraryPlaybackEntry[];
+  watchLater: LibraryItem[];
+  recentlyWatched: LibraryPlaybackEntry[];
+}
 
 export interface LibraryFacetRequest {
   sourceId?: string | null;

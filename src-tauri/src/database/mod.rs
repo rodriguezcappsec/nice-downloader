@@ -46,8 +46,8 @@ use std::{
     collections::{HashMap, HashSet},
     path::Path,
     sync::{
-        atomic::{AtomicBool, AtomicI64, Ordering},
-        Arc, Mutex,
+        atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering},
+        Arc, Mutex, MutexGuard,
     },
 };
 use uuid::Uuid;
@@ -85,6 +85,7 @@ const MIGRATION_0030: &str = include_str!("migrations/0030_library_semantic_tran
 const MIGRATION_0031: &str = include_str!("migrations/0031_post_download_recipes.sql");
 const MIGRATION_0032: &str = include_str!("migrations/0032_library_source_automation.sql");
 const MIGRATION_0033: &str = include_str!("migrations/0033_library_video_display.sql");
+const MIGRATION_0034: &str = include_str!("migrations/0034_library_performance.sql");
 const ENGINE_PREFERENCES_KEY: &str = "engine.preferences";
 const QUEUE_SETTINGS_KEY: &str = "queue.settings";
 const DESKTOP_PREFERENCES_KEY: &str = "desktop.preferences";
@@ -118,6 +119,8 @@ fn locked_library_filter_for(alias: &str) -> String {
 #[derive(Clone)]
 pub struct Database {
     connection: Arc<Mutex<Connection>>,
+    library_read_connections: Arc<Vec<Mutex<Connection>>>,
+    next_library_reader: Arc<AtomicUsize>,
     library_privacy_unlocked: Arc<AtomicBool>,
     library_privacy_last_activity_ms: Arc<AtomicI64>,
 }
@@ -232,6 +235,7 @@ impl Database {
             (31, MIGRATION_0031),
             (32, MIGRATION_0032),
             (33, MIGRATION_0033),
+            (34, MIGRATION_0034),
         ] {
             let migrated: bool = transaction.query_row(
                 "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = ?1)",
@@ -255,13 +259,41 @@ impl Database {
             [LIBRARY_PRIVACY_SETTINGS_KEY],
             |row| row.get::<_, bool>(0),
         )?;
+        let mut library_read_connections = Vec::with_capacity(2);
+        for _ in 0..2 {
+            let library_read_connection = Connection::open(path).map_err(|error| {
+                AppError::internal("could not open Library read connection", error)
+            })?;
+            library_read_connection
+                .pragma_update(None, "foreign_keys", "ON")
+                .map_err(|error| AppError::internal("could not configure Library reads", error))?;
+            library_read_connection
+                .pragma_update(None, "query_only", "ON")
+                .map_err(|error| AppError::internal("could not protect Library reads", error))?;
+            library_read_connection
+                .busy_timeout(std::time::Duration::from_secs(5))
+                .map_err(|error| {
+                    AppError::internal("could not configure Library read timeout", error)
+                })?;
+            library_read_connections.push(Mutex::new(library_read_connection));
+        }
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
+            library_read_connections: Arc::new(library_read_connections),
+            next_library_reader: Arc::new(AtomicUsize::new(0)),
             library_privacy_unlocked: Arc::new(AtomicBool::new(!privacy_configured)),
             library_privacy_last_activity_ms: Arc::new(AtomicI64::new(
                 Utc::now().timestamp_millis(),
             )),
         })
+    }
+
+    fn library_reader(&self) -> Result<MutexGuard<'_, Connection>, AppError> {
+        let index = self.next_library_reader.fetch_add(1, Ordering::Relaxed)
+            % self.library_read_connections.len();
+        self.library_read_connections[index]
+            .lock()
+            .map_err(|_| AppError::new("database_unavailable", "The media library is unavailable."))
     }
 
     pub fn save_job(
@@ -3030,9 +3062,7 @@ impl Database {
             }
             where_clause.push_str(LOCKED_LIBRARY_FILTER_SQL);
         }
-        let connection = self.connection.lock().map_err(|_| {
-            AppError::new("database_unavailable", "The media library is unavailable.")
-        })?;
+        let connection = self.library_reader()?;
         let total_items: i64 = connection.query_row(
             &format!(
                 "SELECT COUNT(*)
@@ -3058,7 +3088,7 @@ impl Database {
         let order_by = library_order_by(request.sort);
         let sql = format!(
             "SELECT media_library.id, path, title, source_url, thumbnail, duration_seconds, site,
-                    tags_json, metadata_json, missing, added_at, media_library.updated_at, source_id,
+                    tags_json, '{{}}' AS metadata_json, missing, added_at, media_library.updated_at, source_id,
                     relative_path, media_kind, file_size_bytes, modified_at_ms, width, height, fps,
                     video_codec, audio_codec, container, dynamic_range,
                     COALESCE(state, 'pending'), error, favorite, rating
@@ -3091,9 +3121,7 @@ impl Database {
         if let Some(source_id) = request.source_id.as_deref() {
             validate_uuid(source_id, "library source")?;
         }
-        let connection = self.connection.lock().map_err(|_| {
-            AppError::new("database_unavailable", "The media library is unavailable.")
-        })?;
+        let connection = self.library_reader()?;
         let privacy_condition = if self.is_library_privacy_locked() {
             LOCKED_LIBRARY_FILTER_SQL
         } else {
@@ -3588,9 +3616,7 @@ impl Database {
         limit: usize,
     ) -> Result<Vec<LibraryPlaybackEntry>, AppError> {
         validate_library_shelf_limit(limit)?;
-        let connection = self.connection.lock().map_err(|_| {
-            AppError::new("database_unavailable", "The media library is unavailable.")
-        })?;
+        let connection = self.library_reader()?;
         let privacy_filter = if self.is_library_privacy_locked() {
             LOCKED_LIBRARY_FILTER_SQL
         } else {
@@ -3766,9 +3792,7 @@ impl Database {
 
     pub fn list_library_watch_later(&self, limit: usize) -> Result<Vec<LibraryItem>, AppError> {
         validate_library_shelf_limit(limit)?;
-        let connection = self.connection.lock().map_err(|_| {
-            AppError::new("database_unavailable", "The media library is unavailable.")
-        })?;
+        let connection = self.library_reader()?;
         let privacy_filter = if self.is_library_privacy_locked() {
             LOCKED_LIBRARY_FILTER_SQL
         } else {
@@ -3800,9 +3824,7 @@ impl Database {
         limit: usize,
     ) -> Result<Vec<LibraryPlaybackEntry>, AppError> {
         validate_library_shelf_limit(limit)?;
-        let connection = self.connection.lock().map_err(|_| {
-            AppError::new("database_unavailable", "The media library is unavailable.")
-        })?;
+        let connection = self.library_reader()?;
         let privacy_filter = if self.is_library_privacy_locked() {
             LOCKED_LIBRARY_FILTER_SQL
         } else {
@@ -5185,6 +5207,17 @@ impl Database {
             })
         })
         .collect()
+    }
+
+    pub fn library_smart_view_counts(&self) -> Result<HashMap<String, usize>, AppError> {
+        let mut counts = HashMap::new();
+        for view in self.list_library_smart_views()? {
+            let request = library_query_from_smart_view(&view.query, 1, 1);
+            if let Ok(result) = self.query_library_items(request) {
+                counts.insert(view.id, result.total_items);
+            }
+        }
+        Ok(counts)
     }
 
     pub fn save_library_smart_view(
@@ -10476,7 +10509,7 @@ mod tests {
                 row.get(0)
             })
             .expect("recovered migration version");
-        assert_eq!(latest_version, 33);
+        assert_eq!(latest_version, 34);
         let has_playback: bool = connection
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'library_playback')",

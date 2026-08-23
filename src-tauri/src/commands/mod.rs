@@ -29,26 +29,27 @@ use crate::{
         BatchAnalysisResponse, BatchDownloadFailure, BatchDownloadResult, BrowserProfileInfo,
         DesktopPreferences, DesktopRuntimeStatus, DiskSpaceInfo, DownloadArchiveMatch, DownloadJob,
         DownloadState, EngineId, EngineInfo, EnginePreferences, ExportLibraryMomentsRequest,
-        GalleryItemList, LibraryArtworkCacheStatus, LibraryBulkAction, LibraryBulkMovePlan,
-        LibraryBulkMoveResult, LibraryCacheResult, LibraryChange, LibraryChapterSuggestion,
-        LibraryCollection, LibraryCompareSession, LibraryCurationDecision, LibraryCurationState,
-        LibraryDuplicateAnalysisJob, LibraryDuplicateGroup, LibraryDuplicateTrashResult,
-        LibraryFacetRequest, LibraryFacets, LibraryFileOperation, LibraryFileOperationPlan,
-        LibraryFileOperationResult, LibraryHealthSummary, LibraryImageSession, LibraryItem,
-        LibraryLocalInferenceJob, LibraryMediaKind, LibraryMediaStack, LibraryMoment,
+        GalleryItemList, LibraryArtworkCacheStatus, LibraryAvailabilityFilter, LibraryBulkAction,
+        LibraryBulkMovePlan, LibraryBulkMoveResult, LibraryCacheResult, LibraryChange,
+        LibraryChapterSuggestion, LibraryCollection, LibraryCompareSession,
+        LibraryCurationDecision, LibraryCurationState, LibraryDuplicateAnalysisJob,
+        LibraryDuplicateGroup, LibraryDuplicateTrashResult, LibraryFacetRequest, LibraryFacets,
+        LibraryFileOperation, LibraryFileOperationPlan, LibraryFileOperationResult,
+        LibraryFolderScope, LibraryHealthSummary, LibraryHomeSnapshot, LibraryImageSession,
+        LibraryItem, LibraryLocalInferenceJob, LibraryMediaKind, LibraryMediaStack, LibraryMoment,
         LibraryMontage, LibraryNearDuplicateMatch, LibraryPlaybackCacheStatus,
         LibraryPlaybackEntry, LibraryPlaybackPreflight, LibraryPlaybackSession,
         LibraryPlaybackState, LibraryQueryRequest, LibraryQueryResult, LibraryRichMetadata,
         LibraryScanJob, LibraryScanResult, LibrarySearchStatus, LibrarySemanticIndexStatus,
-        LibrarySemanticTranscriptMatch, LibrarySmartView, LibrarySource, LibrarySourceAutomation,
-        LibraryStoragePlan, LibraryThemeAnalysis, LibraryThemeIndexStatus, LibraryThemeJob,
-        LibraryThemeProviderStatus, LibraryThemeSettings, LibraryTranscriptIndexStatus,
-        LibraryTranscriptMatch, LibraryTranscriptionProviderStatus, LibraryVisualSimilarityJob,
-        LibraryVisualSimilarityMatch, LibraryVisualSimilarityStatus, LocalShareSession,
-        MediaAnalysis, NativePlaybackSession, NativePlaybackStatus, OnboardingStatus,
-        PostDownloadRecipe, PostDownloadRecipeRun, Preset, PreviewLibraryBulkMoveRequest,
-        PreviewLibraryFileOperationRequest, QueueSettings, QueueSnapshot,
-        SaveAuthenticationProfileRequest, SaveLibraryCollectionRequest,
+        LibrarySemanticTranscriptMatch, LibrarySmartView, LibrarySort, LibrarySource,
+        LibrarySourceAutomation, LibraryStoragePlan, LibraryThemeAnalysis, LibraryThemeIndexStatus,
+        LibraryThemeJob, LibraryThemeProviderStatus, LibraryThemeSettings,
+        LibraryTranscriptIndexStatus, LibraryTranscriptMatch, LibraryTranscriptionProviderStatus,
+        LibraryVisualSimilarityJob, LibraryVisualSimilarityMatch, LibraryVisualSimilarityStatus,
+        LocalShareSession, MediaAnalysis, NativePlaybackSession, NativePlaybackStatus,
+        OnboardingStatus, PostDownloadRecipe, PostDownloadRecipeRun, Preset,
+        PreviewLibraryBulkMoveRequest, PreviewLibraryFileOperationRequest, QueueSettings,
+        QueueSnapshot, SaveAuthenticationProfileRequest, SaveLibraryCollectionRequest,
         SaveLibraryCompareSessionRequest, SaveLibraryMediaStackRequest, SaveLibraryMomentRequest,
         SaveLibraryMontageRequest, SaveLibraryPlaybackRequest, SaveLibraryRichMetadataRequest,
         SaveLibrarySmartViewRequest, SaveLibrarySourceAutomationRequest, SaveLibrarySourceRequest,
@@ -71,6 +72,7 @@ use crate::{
     },
     visual_similarity::VisualSimilarityManager,
 };
+use std::collections::HashMap;
 use std::{collections::HashSet, sync::Arc};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::{sync::Semaphore, task::JoinSet};
@@ -198,6 +200,53 @@ pub fn query_library_items(
     request: LibraryQueryRequest,
 ) -> Result<LibraryQueryResult, AppError> {
     database.query_library_items(request)
+}
+
+#[tauri::command]
+pub fn get_library_smart_view_counts(
+    database: State<'_, Database>,
+) -> Result<HashMap<String, usize>, AppError> {
+    database.library_smart_view_counts()
+}
+
+#[tauri::command]
+pub fn get_library_home_snapshot(
+    database: State<'_, Database>,
+) -> Result<LibraryHomeSnapshot, AppError> {
+    let request = |media_kind| LibraryQueryRequest {
+        page: 1,
+        page_size: 12,
+        search: None,
+        source_id: None,
+        folder_source_id: None,
+        folder_path: None,
+        folder_scope: LibraryFolderScope::Tree,
+        media_kind,
+        resolution: None,
+        container: None,
+        duration: None,
+        date_added: None,
+        date_published: None,
+        availability: LibraryAvailabilityFilter::Available,
+        tags: Vec::new(),
+        creators: Vec::new(),
+        series: Vec::new(),
+        sites: Vec::new(),
+        theme: None,
+        rating: None,
+        collection_id: None,
+        favorite_only: false,
+        private_only: false,
+        sort: LibrarySort::Recent,
+    };
+    Ok(LibraryHomeSnapshot {
+        recent: database.query_library_items(request(None))?,
+        videos: database.query_library_items(request(Some(LibraryMediaKind::Video)))?,
+        images: database.query_library_items(request(Some(LibraryMediaKind::Image)))?,
+        continue_watching: database.list_continue_watching(12)?,
+        watch_later: database.list_library_watch_later(24)?,
+        recently_watched: database.list_recently_watched(12)?,
+    })
 }
 
 #[tauri::command]
@@ -1373,9 +1422,13 @@ pub fn remove_library_item(database: State<'_, Database>, id: String) -> Result<
 pub async fn get_library_artwork(
     app: AppHandle,
     library: State<'_, library::LibraryManager>,
+    media_server: State<'_, MediaServerState>,
     id: String,
 ) -> Result<Option<String>, AppError> {
-    library.artwork_data_url(&app, &id).await
+    let Some(path) = library.artwork_path(&app, &id).await? else {
+        return Ok(None);
+    };
+    media_server.register_artwork(&id, path).map(Some)
 }
 
 #[tauri::command]

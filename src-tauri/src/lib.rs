@@ -241,6 +241,8 @@ pub fn run() {
             commands::suggest_privacy_redactions,
             commands::list_library_items,
             commands::query_library_items,
+            commands::get_library_smart_view_counts,
+            commands::get_library_home_snapshot,
             commands::get_library_health_summary,
             commands::get_library_storage_plan,
             commands::get_library_facets,

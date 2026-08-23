@@ -16,6 +16,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button, Input } from "../../components/ui";
 import { formatBytes, formatDuration } from "../../lib/format";
+import { loadLibraryArtwork } from "../../lib/library-artwork";
 import { api, normalizeError } from "../../lib/tauri";
 import { useAppStore } from "../../stores/app-store";
 import type { LibraryBulkAction, LibraryCurationDecision, LibraryItem } from "../../types";
@@ -61,7 +62,7 @@ export function CurationPage() {
     let disposed = false;
     setArtwork(null);
     if (!current) return () => { disposed = true; };
-    void api.getLibraryArtwork(current.id)
+    void loadLibraryArtwork(current.id)
       .then((value) => { if (!disposed) setArtwork(value); })
       .catch(() => { if (!disposed) setArtwork(null); });
     return () => { disposed = true; };

@@ -66,6 +66,7 @@ mod linux {
         },
         time::{Duration, Instant},
     };
+    use tauri::{AppHandle, Emitter, Manager};
 
     const MPV_FORMAT_FLAG: c_int = 3;
     const MPV_FORMAT_DOUBLE: c_int = 5;
@@ -81,6 +82,7 @@ mod linux {
     const MPV_RENDER_UPDATE_FRAME: u64 = 1;
     const GL_FRAMEBUFFER_BINDING: u32 = 0x8CA6;
     const ACTION_TIMEOUT: Duration = Duration::from_secs(4);
+    const STATUS_EVENT: &str = "embedded-mpv-status";
     const PENDING_SURFACE_OPACITY: f64 = 0.001;
 
     #[derive(Clone)]
@@ -92,6 +94,17 @@ mod linux {
     struct Shared {
         status: Mutex<EmbeddedMpvStatus>,
         actions: Mutex<VecDeque<Action>>,
+        event_app: Mutex<Option<AppHandle>>,
+    }
+
+    impl Shared {
+        fn emit_status(&self) {
+            let status = self.status.lock().ok().map(|status| status.clone());
+            let app = self.event_app.lock().ok().and_then(|app| app.clone());
+            if let (Some(status), Some(app)) = (status, app) {
+                let _ = app.emit(STATUS_EVENT, status);
+            }
+        }
     }
 
     struct OpenRequest {
@@ -125,6 +138,7 @@ mod linux {
                         last_error: None,
                     }),
                     actions: Mutex::new(VecDeque::new()),
+                    event_app: Mutex::new(None),
                 }),
             }
         }
@@ -132,6 +146,9 @@ mod linux {
         pub fn install(&self, window: &WebviewWindow) -> Result<(), AppError> {
             let shared = Arc::clone(&self.shared);
             let database = self.database.clone();
+            if let Ok(mut event_app) = shared.event_app.lock() {
+                *event_app = Some(window.app_handle().clone());
+            }
             window
                 .with_webview(move |platform| {
                     if let Err(error) = install_overlay(platform.inner(), shared.clone(), database)
@@ -643,6 +660,7 @@ mod linux {
                 status.detail =
                     "Playing through embedded libmpv without a compatibility copy.".to_owned();
             }
+            self.shared.emit_status();
             area.queue_render();
             Ok(request.session)
         }
@@ -745,6 +763,7 @@ mod linux {
                     active.paused = paused;
                 }
             }
+            self.shared.emit_status();
         }
 
         fn finish(&mut self, area: &gtk::GLArea, ended: bool, error: Option<String>) {
@@ -797,6 +816,7 @@ mod linux {
                         .to_owned()
                 });
             }
+            self.shared.emit_status();
         }
 
         fn surface_matches_allocation(&self, area: &gtk::GLArea) -> bool {
