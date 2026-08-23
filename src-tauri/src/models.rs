@@ -931,6 +931,17 @@ pub struct LibraryQueryResult {
     pub total_pages: u32,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryHomeSnapshot {
+    pub recent: LibraryQueryResult,
+    pub videos: LibraryQueryResult,
+    pub images: LibraryQueryResult,
+    pub continue_watching: Vec<LibraryPlaybackEntry>,
+    pub watch_later: Vec<LibraryItem>,
+    pub recently_watched: Vec<LibraryPlaybackEntry>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LibraryFacetRequest {

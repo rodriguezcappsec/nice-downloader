@@ -21,7 +21,6 @@ use crate::{
     },
     transcripts,
 };
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use chrono::Utc;
 use notify::{EventKind, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
@@ -1004,8 +1003,11 @@ impl LibraryManager {
                     "The folder watcher stopped unexpectedly.",
                 ))?,
             };
+            let mut changed_paths = Vec::new();
             match first {
-                Ok(event) if watch_event_should_rescan(&event.kind) => {}
+                Ok(event) if watch_event_should_rescan(&event.kind) => {
+                    changed_paths.extend(event.paths);
+                }
                 Ok(_) => continue,
                 Err(error) => {
                     tracing::warn!(%error, source_id = %source.id, "library watcher reported an error");
@@ -1018,14 +1020,131 @@ impl LibraryManager {
                 _ = sleep(WATCH_DEBOUNCE) => {}
             }
             while let Ok(event) = receiver.try_recv() {
-                if let Err(error) = event {
-                    tracing::warn!(%error, source_id = %source.id, "library watcher reported an error");
+                match event {
+                    Ok(event) if watch_event_should_rescan(&event.kind) => {
+                        changed_paths.extend(event.paths);
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::warn!(%error, source_id = %source.id, "library watcher reported an error");
+                    }
                 }
             }
-            self.start_watched_scan(&app, &source.id, &token).await;
+            let handled_incrementally = if changed_paths.len() > 256 {
+                false
+            } else {
+                let manager = self.clone();
+                let changed_app = app.clone();
+                let changed_source = source.clone();
+                let changed_token = token.clone();
+                tokio::task::spawn_blocking(move || {
+                    manager.process_watched_paths(
+                        &changed_app,
+                        &changed_source,
+                        changed_paths,
+                        changed_token,
+                    )
+                })
+                .await
+                .map_err(|error| {
+                    AppError::internal("incremental Library watcher stopped", error)
+                })??
+            };
+            if !handled_incrementally {
+                self.start_watched_scan(&app, &source.id, &token).await;
+            }
         }
         tracing::info!(source_id = %source.id, "library source watcher stopped");
         Ok(())
+    }
+
+    fn process_watched_paths(
+        &self,
+        app: &AppHandle,
+        source: &LibrarySource,
+        paths: Vec<PathBuf>,
+        token: CancellationToken,
+    ) -> Result<bool, AppError> {
+        if paths.is_empty() {
+            return Ok(false);
+        }
+        let root = Path::new(&source.path);
+        let mut unique_paths = paths
+            .into_iter()
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        unique_paths.sort();
+        let mut pending_metadata = Vec::new();
+
+        for path in unique_paths {
+            if token.is_cancelled() {
+                return Ok(true);
+            }
+            let Ok(relative) = path.strip_prefix(root) else {
+                return Ok(false);
+            };
+            if relative.as_os_str().is_empty() || is_hidden(relative) {
+                continue;
+            }
+            let relative_text = relative.to_string_lossy().replace('\\', "/");
+            match std::fs::symlink_metadata(&path) {
+                Ok(metadata) if metadata.file_type().is_symlink() => continue,
+                Ok(metadata) if metadata.is_dir() => return Ok(false),
+                Ok(metadata) if metadata.is_file() => {
+                    let Some(kind) = media_kind_for_path(&path) else {
+                        if watched_companion_path_requires_reconciliation(&path) {
+                            return Ok(false);
+                        }
+                        continue;
+                    };
+                    if !source_accepts_kind(source.media_kind, kind)
+                        || !matches_patterns(
+                            &relative_text,
+                            &source.include_patterns,
+                            &source.exclude_patterns,
+                        )
+                    {
+                        continue;
+                    }
+                    let item = scanned_item(source, &path, relative_text, kind);
+                    let stored = self.index_scanned_item(app, source, &item)?;
+                    if stored.metadata_state == LibraryMetadataState::Pending {
+                        pending_metadata.push(stored.id.clone());
+                    }
+                    let _ = app.emit(ITEM_EVENT, &stored);
+                }
+                Ok(_) => continue,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    if media_kind_for_path(&path).is_none() {
+                        return Ok(false);
+                    }
+                    if let Some(item) = self
+                        .database
+                        .get_library_item_by_path(path.to_string_lossy().as_ref())?
+                    {
+                        self.mark_item_missing(app, &item.id)?;
+                    } else {
+                        // A removed directory can have a media-looking suffix. Fall back to
+                        // reconciliation when the changed path was not a cataloged file.
+                        return Ok(false);
+                    }
+                }
+                Err(_) => return Ok(false),
+            }
+        }
+
+        if !pending_metadata.is_empty() {
+            self.schedule_metadata_batch(app.clone(), pending_metadata, token);
+        }
+        self.database.update_library_source_scan_status(
+            &source.id,
+            LibrarySourceStatus::Online,
+            None,
+            false,
+        )?;
+        self.emit_source(app, &source.id);
+        Ok(true)
     }
 
     async fn start_watched_scan(
@@ -1057,11 +1176,11 @@ impl LibraryManager {
         }
     }
 
-    pub async fn artwork_data_url(
+    pub async fn artwork_path(
         &self,
         app: &AppHandle,
         item_id: &str,
-    ) -> Result<Option<String>, AppError> {
+    ) -> Result<Option<PathBuf>, AppError> {
         Uuid::parse_str(item_id).map_err(|_| {
             AppError::new(
                 "invalid_library_item",
@@ -1138,18 +1257,7 @@ impl LibraryManager {
                 .await?;
         }
         touch_cache_entry(&output);
-        let bytes = std::fs::read(&output)
-            .map_err(|error| AppError::internal("could not read cached artwork", error))?;
-        if bytes.len() > 2 * 1024 * 1024 {
-            return Err(AppError::new(
-                "library_artwork_too_large",
-                "The generated media artwork was unexpectedly large.",
-            ));
-        }
-        Ok(Some(format!(
-            "data:image/jpeg;base64,{}",
-            BASE64.encode(bytes)
-        )))
+        Ok(Some(output))
     }
 
     pub async fn clear_artwork_cache(
@@ -1733,6 +1841,18 @@ fn watch_event_should_rescan(kind: &EventKind) -> bool {
         kind,
         EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) | EventKind::Any
     )
+}
+
+fn watched_companion_path_requires_reconciliation(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    name.ends_with(".info.json")
+        || [".vtt", ".srt", ".ass", ".ssa"]
+            .iter()
+            .any(|extension| name.ends_with(extension))
 }
 
 #[derive(Debug, Deserialize)]
@@ -4192,6 +4312,15 @@ mod tests {
         )));
         assert!(!watch_event_should_rescan(&EventKind::Access(
             AccessKind::Read
+        )));
+        assert!(watched_companion_path_requires_reconciliation(Path::new(
+            "video.info.json"
+        )));
+        assert!(watched_companion_path_requires_reconciliation(Path::new(
+            "captions.VTT"
+        )));
+        assert!(!watched_companion_path_requires_reconciliation(Path::new(
+            "notes.txt"
         )));
     }
 

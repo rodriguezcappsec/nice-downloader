@@ -235,6 +235,10 @@ Media Health is a read-only database projection with no migration or derived hea
 
 Temporary-share QR rendering is lazy-loaded browser code operating only on the existing capability URL. It performs no network lookup and creates no additional authority: expiry, selected-ID authorization, byte-range serving, and session teardown remain wholly owned by `LocalShareManager`.
 
+## Library performance boundaries
+
+Catalog queries use a small read-only SQLite connection pool while writes remain serialized on the authoritative connection. Frontend invalidation separates catalog changes from playback activity, and Home and saved-view projections cross the Tauri boundary as consolidated responses. Artwork generation remains Rust-owned and fingerprinted, but cards receive tokenized loopback URLs so WebKit can cache and decode images without base64 IPC payloads. Watched-source event bursts update bounded individual file paths when safe and fall back to a complete source reconciliation for directory, ambiguous, or oversized changes.
+
 ## Remaining extension points
 
 The gallery-dl route can expand beyond the currently typed collection sites. Release builds stage pinned,

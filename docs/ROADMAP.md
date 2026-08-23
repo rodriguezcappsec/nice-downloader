@@ -1,5 +1,9 @@
 # Nice Downloader Roadmap
 
+## Milestone 36: video-manager performance
+
+Implemented on `perf/video-manager-throughput`: URL-based immutable artwork delivery with bounded shared frontend request caching; scoped catalog versus playback invalidation; consolidated Home and saved-view count commands; a WAL-backed two-reader Library query pool; covering and expression indexes for catalog filters and sorts; lightweight card query payloads; targeted watched-file updates with full reconciliation fallback; event-driven embedded-libmpv status plus throttled native-surface geometry synchronization; and on-demand loading for specialized workspaces. Full scans, privacy checks, existing pagination, playback fallbacks, and authoritative Rust state remain intact.
+
 ## Milestone 35: playback refinement and library optimization
 
 The Watch workspace now includes non-destructive per-video fit, zoom, pan, orientation, and picture tuning across WebView and embedded libmpv, with session-only defaults and optional privacy-aware per-video recall.

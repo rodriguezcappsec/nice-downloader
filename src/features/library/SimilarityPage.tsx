@@ -2,6 +2,7 @@ import { ExternalLink, GitCompareArrows, Images, LoaderCircle, RefreshCw, Search
 import { useEffect, useState, type ReactNode } from "react";
 import { Button, Input, Select } from "../../components/ui";
 import { formatBytes, formatDuration } from "../../lib/format";
+import { loadLibraryArtwork } from "../../lib/library-artwork";
 import { api, normalizeError } from "../../lib/tauri";
 import { useAppStore } from "../../stores/app-store";
 import type {
@@ -205,7 +206,7 @@ function Artwork({ item, large = false }: { item: LibraryItem; large?: boolean }
   const [url, setUrl] = useState<string | null>(null);
   useEffect(() => {
     let disposed = false;
-    void api.getLibraryArtwork(item.id).then((value) => !disposed && setUrl(value)).catch(() => {});
+    void loadLibraryArtwork(item.id).then((value) => !disposed && setUrl(value)).catch(() => {});
     return () => { disposed = true; };
   }, [item.id]);
   return <span className={`${large ? "aspect-video w-full" : "aspect-video w-16"} grid shrink-0 place-items-center overflow-hidden bg-[#0a0d12] text-white/25`}>{url ? <img className="h-full w-full object-cover" src={url} alt="" /> : <Images size={large ? 24 : 16} />}</span>;

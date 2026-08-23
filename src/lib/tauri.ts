@@ -53,6 +53,7 @@ import type {
   SubscriptionCheckResult,
   StartTransformationRequest,
   TransformationTask,
+  LibraryHomeSnapshot,
   LibraryItem,
   LibraryRichMetadata,
   LibraryHealthSummary,
@@ -212,6 +213,10 @@ export const api = {
   listLibraryItems: () => invoke<LibraryItem[]>("list_library_items"),
   queryLibraryItems: (request: LibraryQueryRequest) =>
     invoke<LibraryQueryResult>("query_library_items", { request }),
+  getLibrarySmartViewCounts: () =>
+    invoke<Record<string, number>>("get_library_smart_view_counts"),
+  getLibraryHomeSnapshot: () =>
+    invoke<LibraryHomeSnapshot>("get_library_home_snapshot"),
   getLibraryHealthSummary: () => invoke<LibraryHealthSummary>("get_library_health_summary"),
   getLibraryStoragePlan: () => invoke<LibraryStoragePlan>("get_library_storage_plan"),
   getLibraryFacets: (request: LibraryFacetRequest) =>
@@ -402,6 +407,8 @@ export const api = {
     invoke<NativePlaybackSession>("open_library_native_playback", { id, startAtSeconds }),
   closeLibraryNativePlayback: () => invoke<void>("close_library_native_playback"),
   getEmbeddedMpvStatus: () => invoke<EmbeddedMpvStatus>("get_embedded_mpv_status"),
+  onEmbeddedMpvStatus: (handler: (status: EmbeddedMpvStatus) => void): Promise<UnlistenFn> =>
+    listen<EmbeddedMpvStatus>("embedded-mpv-status", (event) => handler(event.payload)),
   openLibraryEmbeddedMpv: (id: string, bounds: EmbeddedMpvBounds, startAtSeconds?: number) =>
     invoke<EmbeddedMpvSession>("open_library_embedded_mpv", { id, bounds, startAtSeconds }),
   updateEmbeddedMpvBounds: (bounds: EmbeddedMpvBounds) =>

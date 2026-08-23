@@ -65,9 +65,10 @@ import {
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { memo, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { Button, Field, Input, Select, Textarea } from "../../components/ui";
 import { formatBytes, formatDuration } from "../../lib/format";
+import { invalidateLibraryArtwork, loadLibraryArtwork } from "../../lib/library-artwork";
 import { assessEmbeddedCompatibility, embeddedPlaybackFingerprint, formatMediaCodec } from "../../lib/media-compatibility";
 import { canOfferPlaybackFallback, createPlaybackError, EMBEDDED_PLAYBACK_TIMEOUT_MS } from "../../lib/playback";
 import { api, normalizeError } from "../../lib/tauri";
@@ -352,7 +353,8 @@ export function LibraryPage({ active = true, workspace = "library" }: { active?:
   const [artworkCacheStatus, setArtworkCacheStatus] = useState<LibraryArtworkCacheStatus | null>(null);
   const [queryLoading, setQueryLoading] = useState(true);
   const [libraryCatalogContextLoaded, setLibraryCatalogContextLoaded] = useState(false);
-  const [libraryRevision, setLibraryRevision] = useState(0);
+  const [catalogRevision, setCatalogRevision] = useState(0);
+  const [watchRevision, setWatchRevision] = useState(0);
   const [privacyStatus, setPrivacyStatus] = useState<LibraryPrivacyStatus | null>(null);
   const [privacyRules, setPrivacyRules] = useState<LibraryPrivacyRules | null>(null);
   const [privacyOnly, setPrivacyOnly] = useState(false);
@@ -360,6 +362,7 @@ export function LibraryPage({ active = true, workspace = "library" }: { active?:
   const [libraryAnnouncement, setLibraryAnnouncement] = useState("");
   const [libraryAlert, setLibraryAlert] = useState("");
   const refreshTimer = useRef<number | null>(null);
+  const watchRefreshTimer = useRef<number | null>(null);
   const scanAnnouncementSignatures = useRef<Map<string, string>>(new Map());
   const duplicateAnnouncementSignature = useRef("");
   const resultAnnouncementSignature = useRef("");
@@ -395,13 +398,15 @@ export function LibraryPage({ active = true, workspace = "library" }: { active?:
     };
     const update = (status: LibraryPrivacyStatus) => {
       if (disposed) return;
+      invalidateLibraryArtwork();
       setPrivacyStatus(status);
       loadRules(status);
       setSelectedItem(null);
       setWatchItem(null);
       setSelectedIds(new Set());
       setSelectionMode(false);
-      setLibraryRevision((value) => value + 1);
+      setCatalogRevision((value) => value + 1);
+      setWatchRevision((value) => value + 1);
     };
     void api.getLibraryPrivacyStatus().then((status) => {
       if (!disposed) {
@@ -625,7 +630,7 @@ export function LibraryPage({ active = true, workspace = "library" }: { active?:
 
   function minimizeWatching() {
     setWatchMinimized(true);
-    scheduleLibraryRefresh(0);
+    scheduleWatchRefresh(0);
     restoreFocus(null, "library-search");
   }
 
@@ -642,7 +647,7 @@ export function LibraryPage({ active = true, workspace = "library" }: { active?:
     setWatchItem(null);
     setPlaybackContext(null);
     setWatchMinimized(false);
-    scheduleLibraryRefresh(0);
+    scheduleWatchRefresh(0);
   }
 
   function openDetails(item: LibraryItem) {
@@ -775,17 +780,26 @@ export function LibraryPage({ active = true, workspace = "library" }: { active?:
     if (refreshTimer.current != null) window.clearTimeout(refreshTimer.current);
     refreshTimer.current = window.setTimeout(() => {
       refreshTimer.current = null;
-      setLibraryRevision((revision) => revision + 1);
+      setCatalogRevision((revision) => revision + 1);
+    }, delay);
+  }
+
+  function scheduleWatchRefresh(delay = 150) {
+    if (watchRefreshTimer.current != null) window.clearTimeout(watchRefreshTimer.current);
+    watchRefreshTimer.current = window.setTimeout(() => {
+      watchRefreshTimer.current = null;
+      setWatchRevision((revision) => revision + 1);
     }, delay);
   }
 
   useEffect(() => {
-    const refreshWatchShelves = () => scheduleLibraryRefresh(0);
+    const refreshWatchShelves = () => scheduleWatchRefresh(0);
+    const refreshCatalog = () => scheduleLibraryRefresh(0);
     window.addEventListener("nice-downloader:library-watch-state", refreshWatchShelves);
-    window.addEventListener("nice-downloader:library-items-changed", refreshWatchShelves);
+    window.addEventListener("nice-downloader:library-items-changed", refreshCatalog);
     return () => {
       window.removeEventListener("nice-downloader:library-watch-state", refreshWatchShelves);
-      window.removeEventListener("nice-downloader:library-items-changed", refreshWatchShelves);
+      window.removeEventListener("nice-downloader:library-items-changed", refreshCatalog);
     };
   }, []);
 
@@ -888,6 +902,7 @@ export function LibraryPage({ active = true, workspace = "library" }: { active?:
     return () => {
       disposed = true;
       if (refreshTimer.current != null) window.clearTimeout(refreshTimer.current);
+      if (watchRefreshTimer.current != null) window.clearTimeout(watchRefreshTimer.current);
       unlisteners.forEach((unlisten) => unlisten());
     };
   }, []);
@@ -987,7 +1002,7 @@ export function LibraryPage({ active = true, workspace = "library" }: { active?:
       if (!disposed) setWatchBrowseLoading(false);
     });
     return () => { disposed = true; };
-  }, [folderFilter, folderScope, libraryRevision, setError, sourceFilter, watchBrowsePage, watchDebouncedSearch, watchItem]);
+  }, [catalogRevision, folderFilter, folderScope, setError, sourceFilter, watchBrowsePage, watchDebouncedSearch, watchItem]);
 
   const libraryRequest = useMemo<LibraryQueryRequest>(() => {
     const folder = parseFolderFilter(folderFilter);
@@ -1036,25 +1051,18 @@ export function LibraryPage({ active = true, workspace = "library" }: { active?:
     }
     let disposed = false;
     setSmartViewCountsLoading(true);
-    void (async () => {
-      const nextCounts: Record<string, number> = {};
-      for (let index = 0; index < visibleSmartViews.length; index += 4) {
-        const group = visibleSmartViews.slice(index, index + 4);
-        await Promise.all(group.map(async (view) => {
-          try {
-            const result = await api.queryLibraryItems({ ...view.query, page: 1, pageSize: 1 });
-            nextCounts[view.id] = result.totalItems;
-          } catch {
-            // A stale saved rule must not prevent the rest of Library from loading.
-          }
-        }));
-        if (disposed) return;
-      }
-      setSmartViewCounts(nextCounts);
-      setSmartViewCountsLoading(false);
-    })();
+    void api.getLibrarySmartViewCounts()
+      .then((counts) => {
+        if (!disposed) setSmartViewCounts(counts);
+      })
+      .catch(() => {
+        if (!disposed) setSmartViewCounts({});
+      })
+      .finally(() => {
+        if (!disposed) setSmartViewCountsLoading(false);
+      });
     return () => { disposed = true; };
-  }, [active, libraryRevision, visibleSmartViews]);
+  }, [active, catalogRevision, visibleSmartViews]);
 
   useEffect(() => {
     if (!activeSmartViewId) return;
@@ -1086,52 +1094,22 @@ export function LibraryPage({ active = true, workspace = "library" }: { active?:
       if (!disposed) setQueryLoading(false);
     });
     return () => { disposed = true; };
-  }, [libraryRequest, libraryRevision, resultPage, setError]);
+  }, [catalogRevision, libraryRequest, resultPage, setError]);
 
   useEffect(() => {
     let disposed = false;
-    const homeRequest = (mediaKind: "video" | "image" | null): LibraryQueryRequest => ({
-      page: 1,
-      pageSize: 12,
-      search: null,
-      sourceId: null,
-      folderSourceId: null,
-      folderPath: null,
-      folderScope: "tree",
-      mediaKind,
-      resolution: null,
-      container: null,
-      duration: null,
-      dateAdded: null,
-      availability: "available",
-      tags: [],
-      creators: [],
-      series: [],
-      sites: [],
-      rating: null,
-      collectionId: null,
-      favoriteOnly: false,
-      sort: "recent",
-    });
-    void Promise.all([
-      api.queryLibraryItems(homeRequest(null)),
-      api.queryLibraryItems(homeRequest("video")),
-      api.queryLibraryItems(homeRequest("image")),
-      api.listContinueWatching(12),
-      api.listLibraryWatchLater(24),
-      api.listRecentlyWatched(12),
-    ]).then(([recent, videos, images, continuing, savedForLater, watched]) => {
+    void api.getLibraryHomeSnapshot().then((snapshot) => {
       if (!disposed) {
-        setRecentResult(recent);
-        setVideoResult(videos);
-        setImageResult(images);
-        setContinueWatching(continuing);
-        setWatchLater(savedForLater);
-        setRecentlyWatched(watched);
+        setRecentResult(snapshot.recent);
+        setVideoResult(snapshot.videos);
+        setImageResult(snapshot.images);
+        setContinueWatching(snapshot.continueWatching);
+        setWatchLater(snapshot.watchLater);
+        setRecentlyWatched(snapshot.recentlyWatched);
       }
     }).catch((error) => { if (!disposed) setError(normalizeError(error)); });
     return () => { disposed = true; };
-  }, [libraryRevision, setError]);
+  }, [catalogRevision, setError, watchRevision]);
 
   useEffect(() => {
     let disposed = false;
@@ -1147,7 +1125,7 @@ export function LibraryPage({ active = true, workspace = "library" }: { active?:
     })
       .catch((error) => { if (!disposed) setError(normalizeError(error)); });
     return () => { disposed = true; };
-  }, [availabilityFilter, libraryRevision, setError, sourceFilter]);
+  }, [availabilityFilter, catalogRevision, setError, sourceFilter]);
 
   useEffect(() => {
     let disposed = false;
@@ -1164,7 +1142,7 @@ export function LibraryPage({ active = true, workspace = "library" }: { active?:
       });
     }).catch((error) => { if (!disposed) setError(normalizeError(error)); });
     return () => { disposed = true; };
-  }, [libraryRevision, setError]);
+  }, [catalogRevision, setError]);
 
   useEffect(() => {
     if (!manageOpen) return;
@@ -1177,7 +1155,7 @@ export function LibraryPage({ active = true, workspace = "library" }: { active?:
       .then((next) => { if (!disposed) setManageItems(next); })
       .catch((error) => { if (!disposed) setError(normalizeError(error)); });
     return () => { disposed = true; };
-  }, [changes, duplicateGroups, libraryRevision, manageOpen, setError]);
+  }, [catalogRevision, changes, duplicateGroups, manageOpen, setError]);
 
 const sourceNames = useMemo(() => new Map(sources.map((source) => [source.id, source.name])), [sources]);
 const latestScanWarningCount = useMemo(() => {
@@ -1990,6 +1968,7 @@ const resultTitle = search.trim()
     setBusy(true);
     try {
       const result = await api.clearLibraryArtworkCache();
+      invalidateLibraryArtwork();
       await refreshArtworkCacheStatus();
       setNotice({ message: result.removedFiles > 0 ? `Cleared ${result.removedFiles} cached image${result.removedFiles === 1 ? "" : "s"} (${formatBytes(result.freedBytes)}).` : "The artwork cache is already empty.", view: "library" });
     } catch (error) {
@@ -2794,7 +2773,7 @@ function MediaCard({ item, sourceName, onSelect, progress, selectionMode = false
   );
 }
 
-function MediaArtwork({ item, eager = false }: { item: LibraryItem; eager?: boolean }) {
+const MediaArtwork = memo(function MediaArtwork({ item, eager = false }: { item: LibraryItem; eager?: boolean }) {
   const inlineArtwork = item.thumbnail?.startsWith("data:") ? item.thumbnail : null;
   const [artwork, setArtwork] = useState<string | null>(inlineArtwork);
   const [nearViewport, setNearViewport] = useState(eager);
@@ -2822,16 +2801,16 @@ function MediaArtwork({ item, eager = false }: { item: LibraryItem; eager?: bool
     setArtwork(inlineArtwork);
     if (inlineArtwork || item.missing || !nearViewport) return;
     let disposed = false;
-    void api.getLibraryArtwork(item.id)
+    void loadLibraryArtwork(item.id)
       .then((value) => { if (!disposed) setArtwork(value); })
       .catch((error) => { if (!disposed) console.warn(`Could not load artwork for ${item.id}`, error); });
     return () => { disposed = true; };
   }, [inlineArtwork, item.id, item.missing, nearViewport]);
-  if (artwork) return <div ref={artworkRoot} className="h-full w-full"><img className="h-full w-full object-cover transition duration-300 group-hover:scale-[1.025]" src={artwork} alt={`${item.title} artwork`} loading={eager ? "eager" : "lazy"} /></div>;
+  if (artwork) return <div ref={artworkRoot} className="h-full w-full"><img className="h-full w-full object-cover transition duration-300 group-hover:scale-[1.025]" src={artwork} alt={`${item.title} artwork`} loading={eager ? "eager" : "lazy"} decoding="async" /></div>;
   const variant = item.id.charCodeAt(0) % 3;
   const background = variant === 0 ? "from-[#1b2b45] via-[#172235] to-[#101419]" : variant === 1 ? "from-[#33291d] via-[#26231d] to-[#111417]" : "from-[#202b3a] via-[#1b252f] to-[#101419]";
   return <div ref={artworkRoot} className={`relative grid h-full w-full place-items-center bg-gradient-to-br ${background}`}><div className="absolute inset-0 opacity-[0.08] [background-image:radial-gradient(circle_at_center,white_1px,transparent_1px)] [background-size:18px_18px]" />{item.mediaKind === "image" ? <FileImage className="relative text-white/35" size={34} /> : <FileVideo className="relative text-white/35" size={34} />}</div>;
-}
+});
 
 function EmbeddedCompatibilityLabel({ item, preflight, variant = "panel" }: { item: LibraryItem; preflight?: LibraryPlaybackPreflight | null; variant?: "badge" | "overlay" | "panel" }) {
   const fingerprint = embeddedPlaybackFingerprint(item);
@@ -3128,6 +3107,7 @@ function WatchWorkspace({ item, sourceName, browseItems, browseTotal, browsePage
   const leanBackReturnFocus = useRef<HTMLElement | null>(null);
   const miniPlayerRef = useRef<HTMLElement | null>(null);
   const miniPlayerGesture = useRef<MiniPlayerGesture | null>(null);
+  const miniPlayerBoundsFrame = useRef(0);
   const [miniPlayerLayout, setMiniPlayerLayout] = useState<MiniPlayerLayout | null>(readMiniPlayerLayout);
 
   function enterLeanBack() {
@@ -3193,6 +3173,13 @@ function WatchWorkspace({ item, sourceName, browseItems, browseTotal, browsePage
   }, [compact]);
 
   useEffect(() => {
+    const scheduleBoundsSync = () => {
+      if (miniPlayerBoundsFrame.current) return;
+      miniPlayerBoundsFrame.current = window.requestAnimationFrame(() => {
+        miniPlayerBoundsFrame.current = 0;
+        window.dispatchEvent(new Event("nice-downloader:player-bounds-changed"));
+      });
+    };
     const finishGesture = (pointerId?: number) => {
       const gesture = miniPlayerGesture.current;
       if (!gesture || (pointerId != null && pointerId !== gesture.pointerId)) return;
@@ -3211,6 +3198,7 @@ function WatchWorkspace({ item, sourceName, browseItems, browseTotal, browsePage
           width: gesture.startFrame.width,
         }, gesture.startHeight);
         setMiniPlayerLayout(next);
+        scheduleBoundsSync();
         return;
       }
       const horizontalDelta = event.clientX - gesture.startClientX;
@@ -3228,6 +3216,7 @@ function WatchWorkspace({ item, sourceName, browseItems, browseTotal, browsePage
         y: gesture.startFrame.y + (gesture.startHeight - estimatedHeight) / 2,
         width,
       }, estimatedHeight));
+      scheduleBoundsSync();
     };
     const endGesture = (event: PointerEvent) => finishGesture(event.pointerId);
     window.addEventListener("pointermove", updateGesture, { passive: false });
@@ -3235,6 +3224,8 @@ function WatchWorkspace({ item, sourceName, browseItems, browseTotal, browsePage
     window.addEventListener("pointercancel", endGesture);
     return () => {
       finishGesture();
+      window.cancelAnimationFrame(miniPlayerBoundsFrame.current);
+      miniPlayerBoundsFrame.current = 0;
       window.removeEventListener("pointermove", updateGesture);
       window.removeEventListener("pointerup", endGesture);
       window.removeEventListener("pointercancel", endGesture);
@@ -3895,37 +3886,42 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
     if (!embeddedMpvSession) return;
     let disposed = false;
     let previouslyActive = true;
-    const refresh = () => {
-      void api.getEmbeddedMpvStatus()
-        .then((status) => {
-          if (disposed) return;
-          setEmbeddedMpvStatus(status);
-          if (status.active?.itemId === item.id) {
-            setEmbeddedMpvSession(status.active);
-            setCurrentPosition(status.active.positionSeconds);
-            setPlaybackDuration(status.active.durationSeconds);
-            setIsPlaying(!status.active.paused);
-            previouslyActive = true;
-          } else if (previouslyActive) {
-            previouslyActive = false;
-            setEmbeddedMpvSession(null);
-            setIsPlaying(false);
-            if (embeddedMpvStopRequested.current) {
-              embeddedMpvStopRequested.current = false;
-            } else if (status.lastError) {
-              setPlaybackError(createPlaybackError("embedded_mpv_runtime_failed", status.lastError));
-            } else {
-              window.setTimeout(() => onPlaybackEnded?.(), 0);
-            }
-          }
-        })
-        .catch(() => {});
+    let unlisten: (() => void) | undefined;
+    const applyStatus = (status: EmbeddedMpvStatus) => {
+      if (disposed) return;
+      setEmbeddedMpvStatus(status);
+      if (status.active?.itemId === item.id) {
+        setEmbeddedMpvSession(status.active);
+        setCurrentPosition(status.active.positionSeconds);
+        setPlaybackDuration(status.active.durationSeconds);
+        setIsPlaying(!status.active.paused);
+        previouslyActive = true;
+      } else if (previouslyActive) {
+        previouslyActive = false;
+        setEmbeddedMpvSession(null);
+        setIsPlaying(false);
+        if (embeddedMpvStopRequested.current) {
+          embeddedMpvStopRequested.current = false;
+        } else if (status.lastError) {
+          setPlaybackError(createPlaybackError("embedded_mpv_runtime_failed", status.lastError));
+        } else {
+          window.setTimeout(() => onPlaybackEnded?.(), 0);
+        }
+      }
     };
-    refresh();
-    const interval = window.setInterval(refresh, 250);
+    const refreshFallback = () => {
+      void api.getEmbeddedMpvStatus().then(applyStatus).catch(() => {});
+    };
+    refreshFallback();
+    void api.onEmbeddedMpvStatus(applyStatus).then((stop) => {
+      if (disposed) stop();
+      else unlisten = stop;
+    });
+    const interval = window.setInterval(refreshFallback, 2_000);
     return () => {
       disposed = true;
       window.clearInterval(interval);
+      unlisten?.();
     };
   }, [embeddedMpvSession?.itemId, item.id, onPlaybackEnded]);
 
@@ -3952,7 +3948,6 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
   useEffect(() => {
     if (!embeddedMpvSession) return;
     let disposed = false;
-    let frame = 0;
     let updateInFlight = false;
     let pendingBounds: EmbeddedMpvBounds | null = null;
     let lastSentSignature: string | null = null;
@@ -3994,35 +3989,33 @@ function EmbeddedVideoPlayer({ item, sourceName, compact = false, leanBack = fal
       flushBounds();
     };
 
-    const trackBounds = () => {
-      // ResizeObserver does not report position-only layout movement. Sampling the active
-      // surface keeps the GTK overlay aligned while still sending only changed rectangles.
-      syncBounds();
-      frame = window.requestAnimationFrame(trackBounds);
-    };
-
     const observer = new ResizeObserver(syncBounds);
     if (playbackSurfaceRef.current) observer.observe(playbackSurfaceRef.current);
     window.addEventListener("resize", syncBounds);
     window.addEventListener("scroll", syncBounds, true);
+    window.addEventListener("nice-downloader:player-bounds-changed", syncBounds);
     document.addEventListener("fullscreenchange", syncBounds);
     document.addEventListener("visibilitychange", syncBounds);
     window.visualViewport?.addEventListener("resize", syncBounds);
     window.visualViewport?.addEventListener("scroll", syncBounds);
     syncBounds();
-    frame = window.requestAnimationFrame(trackBounds);
+    // ResizeObserver does not report position-only movement. A low-frequency safety sample
+    // keeps the native GTK surface aligned during CSS transitions and mini-player dragging
+    // without forcing layout on every animation frame.
+    const positionSample = window.setInterval(syncBounds, compact ? 500 : 250);
     return () => {
       disposed = true;
-      window.cancelAnimationFrame(frame);
+      window.clearInterval(positionSample);
       observer.disconnect();
       window.removeEventListener("resize", syncBounds);
       window.removeEventListener("scroll", syncBounds, true);
+      window.removeEventListener("nice-downloader:player-bounds-changed", syncBounds);
       document.removeEventListener("fullscreenchange", syncBounds);
       document.removeEventListener("visibilitychange", syncBounds);
       window.visualViewport?.removeEventListener("resize", syncBounds);
       window.visualViewport?.removeEventListener("scroll", syncBounds);
     };
-  }, [embeddedMpvSession?.itemId]);
+  }, [compact, embeddedMpvSession?.itemId]);
 
   useEffect(() => {
     if (!nativeSession) return;
