@@ -670,6 +670,40 @@ impl Database {
         self.library_privacy_status()
     }
 
+    pub fn disable_library_privacy(
+        &self,
+        passphrase: &str,
+    ) -> Result<LibraryPrivacyStatus, AppError> {
+        let connection = self.connection.lock().map_err(|_| {
+            AppError::new(
+                "database_unavailable",
+                "Library privacy settings are unavailable.",
+            )
+        })?;
+        let record = load_library_privacy_settings_record(&connection)?.ok_or_else(|| {
+            AppError::new(
+                "library_privacy_not_configured",
+                "Library privacy protection is not configured.",
+            )
+        })?;
+        let candidate = derive_library_privacy_verifier(passphrase, &record.salt);
+        if !constant_time_equal(candidate.as_bytes(), record.verifier.as_bytes()) {
+            return Err(AppError::new(
+                "library_privacy_disable_failed",
+                "The Library privacy passphrase did not match.",
+            ));
+        }
+        connection.execute(
+            "DELETE FROM settings WHERE key = ?1",
+            [LIBRARY_PRIVACY_SETTINGS_KEY],
+        )?;
+        drop(connection);
+        self.library_privacy_unlocked.store(true, Ordering::SeqCst);
+        self.library_privacy_last_activity_ms
+            .store(0, Ordering::SeqCst);
+        self.library_privacy_status()
+    }
+
     pub fn lock_library_privacy(&self) -> Result<LibraryPrivacyStatus, AppError> {
         if self.library_privacy_status()?.configured {
             self.library_privacy_unlocked.store(false, Ordering::SeqCst);
@@ -11535,6 +11569,68 @@ mod tests {
         assert!(summary.issues.iter().any(|issue| {
             issue.item_id == healthy.id && issue.kinds.contains(&LibraryHealthIssueKind::Changed)
         }));
+    }
+
+    #[test]
+    fn disabling_library_privacy_requires_passphrase_and_preserves_rules() {
+        let directory = tempdir().expect("temporary directory");
+        let database =
+            Database::open(&directory.path().join("disable-privacy.sqlite3")).expect("database");
+        let private_item = database
+            .upsert_library_item(&media_stack_test_item(
+                directory.path(),
+                "Retained private video",
+                LibraryMediaKind::Video,
+            ))
+            .expect("private item");
+
+        database
+            .configure_library_privacy("correct horse battery staple", 15)
+            .expect("configure privacy");
+        database
+            .set_library_items_private(vec![private_item.id.clone()], true)
+            .expect("private item rule");
+        database.lock_library_privacy().expect("lock privacy");
+
+        assert_eq!(
+            database
+                .disable_library_privacy("wrong passphrase")
+                .expect_err("wrong passphrase is rejected")
+                .code,
+            "library_privacy_disable_failed"
+        );
+        let still_configured = database
+            .library_privacy_status()
+            .expect("configured status");
+        assert!(still_configured.configured);
+        assert!(still_configured.locked);
+
+        let disabled = database
+            .disable_library_privacy("correct horse battery staple")
+            .expect("disable privacy");
+        assert!(!disabled.configured);
+        assert!(!disabled.locked);
+        assert_eq!(disabled.private_item_count, 1);
+        assert_eq!(
+            database
+                .list_library_privacy_rules()
+                .expect("retained privacy rules")
+                .item_ids,
+            vec![private_item.id.clone()]
+        );
+        assert_eq!(
+            database.list_library_items().expect("visible items").len(),
+            1
+        );
+
+        database
+            .configure_library_privacy("replacement passphrase", 30)
+            .expect("enable privacy again");
+        database.lock_library_privacy().expect("lock privacy again");
+        assert!(database
+            .list_library_items()
+            .expect("locked items")
+            .is_empty());
     }
 
     #[test]

@@ -1540,6 +1540,21 @@ pub async fn unlock_library_privacy(
 }
 
 #[tauri::command]
+pub async fn disable_library_privacy(
+    app: AppHandle,
+    database: State<'_, Database>,
+    passphrase: String,
+) -> Result<LibraryPrivacyStatus, AppError> {
+    let database = database.inner().clone();
+    let status =
+        tauri::async_runtime::spawn_blocking(move || database.disable_library_privacy(&passphrase))
+            .await
+            .map_err(|error| AppError::internal("Library privacy disable task failed", error))??;
+    let _ = app.emit("library-privacy-changed", status.clone());
+    Ok(status)
+}
+
+#[tauri::command]
 pub fn lock_library_privacy(
     app: AppHandle,
     database: State<'_, Database>,
