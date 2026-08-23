@@ -1,43 +1,132 @@
-# Nice Downloader
+<p align="center">
+  <img src="src-tauri/icons/icon.png" width="104" alt="Nice Downloader app icon">
+</p>
 
-Nice Downloader is a private desktop media hub and download manager for Linux.
-It brings downloaded media and existing local folders into a
-browse-first library, while providing a task-focused interface over established
-download tools such as
-[yt-dlp](https://github.com/yt-dlp/yt-dlp),
-[FFmpeg](https://ffmpeg.org/),
-[gallery-dl](https://github.com/mikf/gallery-dl), and
-[aria2](https://aria2.github.io/) instead of reimplementing media extraction.
+<h1 align="center">Nice Downloader</h1>
 
-The app opens into Media home, where videos and images are searchable and ready
-to open in the system player or viewer. Downloading has its own workspace for
-URL analysis, quality selection, active transfers, queue management, history,
-and subscriptions. Rust owns engine execution, scanning, queue state,
-cancellation, filesystem access, and SQLite persistence; the React frontend
-never executes shell commands.
+<p align="center">
+  <strong>Your media, on your disks, in a library worth browsing.</strong>
+  <br>
+  A private, local-first streaming library and download manager for Linux.
+</p>
 
-> Nice Downloader is an independent project. Download only media you are
-> authorized to access, and follow the terms and laws that apply to you.
+<p align="center">
+  <a href="https://github.com/rodriguezcappsec/nice-downloader/actions/workflows/ci.yml"><img alt="CI status" src="https://img.shields.io/github/actions/workflow/status/rodriguezcappsec/nice-downloader/ci.yml?branch=main&amp;style=flat-square&amp;label=CI"></a>
+  <a href="https://github.com/rodriguezcappsec/nice-downloader/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/rodriguezcappsec/nice-downloader?display_name=tag&amp;sort=semver&amp;style=flat-square"></a>
+  <img alt="Linux only" src="https://img.shields.io/badge/platform-Linux-c99746?style=flat-square">
+  <img alt="Local first" src="https://img.shields.io/badge/library-local--first-282522?style=flat-square">
+  <img alt="Tauri 2" src="https://img.shields.io/badge/Tauri-2-24c8db?style=flat-square">
+</p>
 
-## Download
+<p align="center">
+  <a href="#installation">Install</a> ·
+  <a href="#what-it-can-do">Features</a> ·
+  <a href="#adaptive-linux-playback">Playback</a> ·
+  <a href="#supported-sources">Supported sources</a> ·
+  <a href="#development">Development</a>
+</p>
 
-Builds are available from [GitHub Releases](https://github.com/rodriguezcappsec/nice-downloader/releases)
-and from successful release workflows under
-[GitHub Actions](https://github.com/rodriguezcappsec/nice-downloader/actions).
+> [!IMPORTANT]
+> Nice Downloader is Linux-only and under active development. It does not bypass DRM or grant permission to download media. Download only content you are authorized to access and follow the terms and laws that apply to you.
 
-| Platform | Package | Use case |
+## Why Nice Downloader
+
+Downloaded media tends to disappear into folders. Nice Downloader turns those folders into a warm, artwork-driven media room without uploading the collection or asking you to adopt a new storage scheme.
+
+| Library-first | Download-capable | Local by design |
 | --- | --- | --- |
-| Linux x86-64 | `Nice_Downloader-x86_64.AppImage` | Portable build for most Linux distributions |
-| Debian/Ubuntu x86-64 | `Nice Downloader_0.1.0_amd64.deb` | Installed application-menu integration |
+| Continue Watching, Watch Later, playlists, rich details, search, filters, and visual shelves make a local collection pleasant to use. | Analyze links, choose a simple download intention, manage active and scheduled work, and automate repeat workflows. | Rust owns filesystem and process access. Media stays where it is, originals are not silently replaced, and optional intelligence runs against local services. |
 
-### Linux AppImage
+Nice Downloader is an orchestration layer over mature media tools—primarily [yt-dlp](https://github.com/yt-dlp/yt-dlp), [FFmpeg](https://ffmpeg.org/), [gallery-dl](https://github.com/mikf/gallery-dl), [aria2](https://aria2.github.io/), and curl—rather than an attempt to reimplement their extractors and codecs.
+
+## What it can do
+
+### Build a private streaming library
+
+- Index multiple folders and removable drives without moving or rewriting source media.
+- Browse artwork-first Home shelves for Continue Watching, Watch Later, recent activity, videos, images, playlists, and collections.
+- Search ordinary metadata, rich sidecar metadata, tags, creators, series, sites, transcript cues, and saved smart views.
+- Filter and sort a paginated Library by folder, availability, format, duration, resolution, rating, favorite state, publication data, and other indexed metadata.
+- Watch video, inspect full-resolution images, resume playback, use a persistent movable mini-player, and enter a large-control lean-back mode.
+- Manage subtitles, transcript seeking, chapter and highlight suggestions, timestamped moments, loop ranges, frame previews, screenshots, and per-video picture adjustments.
+- Create ordered local playlists, maintain Watch Later, mark items watched, and optionally continue with non-looping autoplay.
+
+### Download without losing control
+
+- Analyze a URL before downloading and review its real title, artwork, creator, duration, formats, codecs, resolution, frame rate, HDR information, and estimated size when available.
+- Start with Recommended, Best Quality, Compatibility, Smallest, or Audio Only; reveal codec, container, subtitle, authentication, SponsorBlock, filename, and other expert controls only when needed.
+- Analyze batches, expand bounded playlists, select individual gallery files, and reuse validated download presets.
+- Monitor Active, Queue, Scheduled, Completed, and Failed work in one Downloads workspace with progress, speed, ETA, retries, pause/resume where supported, cancellation, and startup recovery.
+- Prevent accidental duplicates with destination-aware archive records and verify completed media with ffprobe when available.
+- Schedule archive-aware channel or playlist subscriptions and attach typed post-download automation recipes.
+
+### Organize, understand, and transform media
+
+- Review Library changes, missing files, metadata status, compatibility risks, cache use, and storage pressure from focused maintenance workspaces.
+- Apply tags, favorites, ratings, collections, metadata overrides, and custom artwork without changing the underlying media.
+- Preview Move, Copy, and Rename operations before execution; undo supported operations and send exact duplicates to the platform Trash through a separately confirmed cleanup flow.
+- Compare two to four videos or images, save video comparison sessions, and export review notes.
+- Find exact duplicates, review near-duplicates, and build a local visual-similarity index.
+- Use an optional local vision model to discover evidence-backed themes across selected videos, folders, or a bounded sample of the Library.
+- Build montages, extract audio, create optimized H.264/AAC versions, export privacy-redacted derivatives, and run other cancellable FFmpeg transformations while preserving originals.
+- Temporarily share an explicitly selected set of media over the local network with an expiring capability link and locally generated QR code.
+
+### Stay comfortable and in control
+
+- Use dark, light, high-contrast, and reduced-motion presentation modes with interface scaling and visible keyboard focus.
+- Open global media and workspace search with `Ctrl+K`, start a download with `Ctrl+N`, open Settings with `Ctrl+,`, or press `?` for the shortcut guide.
+- Keep downloads visible in the background through the application shell and optional system-tray behavior.
+- Lock selected sources, folders, or individual records behind app-level privacy rules, with automatic relocking and a searchable private-media manager after unlock.
+- Back up and merge supported Library metadata, organization, playlists, moments, comparisons, and derived workspace state without copying the media itself.
+
+## Adaptive Linux playback
+
+Nice Downloader does not claim that one HTML `<video>` element can decode every file. It uses a layered playback strategy so most local videos that FFmpeg can decode remain watchable without first waiting for a complete converted copy.
+
+| Order | Playback path | What happens |
+| --- | --- | --- |
+| 1 | **Direct WebView playback** | The original file is served through a tokenized loopback byte-range endpoint and rendered by WebKitGTK/GStreamer. No media conversion occurs. |
+| 2 | **HLS compatibility stream** | If preflight predicts trouble, or direct playback fails or stalls, FFmpeg creates temporary H.264/AAC segments while the video plays. |
+| 3 | **Fragmented MP4 compatibility stream** | If HLS cannot become ready, FFmpeg streams a temporary fragmented H.264/AAC MP4 feed without creating a completed playback file. |
+| 4 | **Recovery choices** | Embedded libmpv where available, a native mpv window, cached compatibility files, and the system player remain explicit alternatives. |
+
+Seeking a temporary compatibility stream starts a fresh authorization at the requested source timestamp. Progress, resume state, subtitles, and transcript jumps continue to use the original video's logical timeline. Temporary streams are cancelled and cleaned up when released; the original file is unchanged.
+
+Cached compatibility files still serve useful recovery cases:
+
+- A lossless Matroska stream-copy can preserve AV1 and audio while avoiding WebKitGTK timing behavior seen with some MP4/M4V/MOV files.
+- An explicitly approved H.264/AAC copy can recover a file that the available streaming and native paths still cannot render reliably.
+- Large or re-encoded copies require confirmation. Cache use and clearing remain visible in Settings.
+
+Release AppImages include a curated GStreamer plugin set with its matching plugin scanner. Development and native distribution builds use the host GStreamer runtime. For broad host playback support and the optional mpv fallback:
+
+```bash
+# Arch Linux
+sudo pacman -S --needed gst-plugins-good gst-libav mpv
+
+# Debian or Ubuntu
+sudo apt install gstreamer1.0-plugins-good gstreamer1.0-libav mpv
+```
+
+`gst-plugins-good` provides the required audio-output element; `gst-libav` broadens codec coverage. Corrupt files, encrypted media, DRM, unavailable decoders, or formats FFmpeg itself cannot decode can still fail.
+
+## Installation
+
+Published Linux artifacts are available from [GitHub Releases](https://github.com/rodriguezcappsec/nice-downloader/releases). Tagged builds are produced by the [Linux release workflow](https://github.com/rodriguezcappsec/nice-downloader/actions/workflows/release-linux.yml).
+
+| Package | Best for |
+| --- | --- |
+| `Nice_Downloader-x86_64.AppImage` | Portable use on most x86-64 Linux distributions |
+| `Nice Downloader_<version>_amd64.deb` | Installed desktop integration on Debian and Ubuntu |
+
+### AppImage
 
 ```bash
 chmod +x Nice_Downloader-x86_64.AppImage
 ./Nice_Downloader-x86_64.AppImage
 ```
 
-If FUSE is unavailable, use:
+If FUSE is unavailable:
 
 ```bash
 ./Nice_Downloader-x86_64.AppImage --appimage-extract-and-run
@@ -49,174 +138,77 @@ If FUSE is unavailable, use:
 sudo apt install "./Nice Downloader_0.1.0_amd64.deb"
 ```
 
-## Features
+## Engine profiles
 
-- Media-first home with visual shelves, source shortcuts, search, local artwork,
-  and video/image browsing
-- Non-destructive indexing for multiple local or external-drive folders
-- Structured media analysis with title, thumbnail, uploader, duration, site,
-  formats, codecs, resolution, FPS, HDR, and estimated size when available
-- Simplified Best, 2160p, 1440p, 1080p, 720p, 480p, and audio-only choices
-- Quality, compatibility, and size-oriented format recommendations
-- Live progress, transferred bytes, speed, ETA, and current operation
-- Rust-owned persistent queue with concurrency controls, reordering,
-  cancellation, pause/resume where supported, retries, and startup recovery
-- Batch URL analysis and bounded playlist expansion
-- Subtitles, metadata, thumbnails, chapters, audio quality, codec preferences,
-  output containers, filename templates, and reusable presets
-- Searchable download history, duplicate prevention, and output verification
-- Local media library with hierarchical folder filters, stable paginated sorting,
-  FTS search, creator/series workspaces, related media, dynamic saved views,
-  multi-value creator/series/site/tag and published-date discovery, sidecar
-  metadata overrides, custom artwork, collections, change review, exact-duplicate analysis,
-  recoverable Trash cleanup, previewable Move/Copy/Rename with Undo, and metadata
-  backup/restore
-- Integrated Watch workspace with embedded playback, resume positions,
-  Continue Watching, subtitle tracks, searchable paginated browsing, and an
-  persistent in-app mini player; compatibility copies require informed consent
-  and have visible cache controls, with an explicit system-player fallback
-- Dedicated two-to-four-video comparison grid with independent controls,
-  single-audio focus, optional audio mixing, shared synchronization controls,
-  compatibility consent per tile, and system-player fallbacks
-- Timestamped moments and clip ranges with notes, color markers, one-click
-  seeking, cancellable FFmpeg clip exports, and cached storyboard navigation
-- Persistent named comparison sessions restore video order, positions, speeds,
-  audio focus, multi-audio intent, and review notes; moment notes export as Markdown or CSV
-- Two-to-four-image comparison studio with synchronized zoom/pan plus two-image
-  overlay and split reveal modes
-- Persistent media-version stacks for originals, edits, alternates, and generated
-  copies, plus durable rapid-curation decisions in version 5 backup/restore
-- Keyboard-first Review Library workflow and filter-driven automatic collections
-- Integrated full-resolution image viewer with zoom, pan, rotation, keyboard
-  browsing, slideshows, and explicit system-viewer fallback
-- Scheduled playlist/channel subscriptions with archive-aware deduplication
-- FFmpeg-powered media transformations with progress and cancellation
-- Per-site browser-cookie, browser-profile, and proxy preferences
-- Managed yt-dlp and gallery-dl versions with checksum verification, pinning,
-  update checks, and rollback
-- Dark/light themes, system tray behavior, diagnostics, and desktop notifications
-- Keyboard workspace commands, shortcut help, interface scaling, reduced motion,
-  high contrast, and assistive-technology status announcements
+Nice Downloader supports two Linux package profiles:
 
-- Persistent Watch Later, private Recently Watched history, watched/reset
-  controls, and optional non-looping Autoplay
-- Ordered local video playlists with Play all, add/remove/reorder controls,
-  non-looping Up next, and backup/restore
+- **Standard** is the recommended release profile. It includes verified, pinned yt-dlp, FFmpeg, ffprobe, and gallery-dl sidecars.
+- **Slim** contains no bundled engine binaries. It uses compatible app-managed or system-installed executables and is intended for users and distributions that prefer to manage those tools separately.
 
-## Site and engine support
+Settings → Engines & diagnostics identifies each active executable as **Managed**, **Bundled**, or **System**, reports its version, and explains missing requirements.
 
-Ordinary media URLs are routed to yt-dlp, including YouTube, TikTok, X/Twitter,
-Instagram, Reddit, Twitch, Vimeo, and other sites supported by the installed
-yt-dlp version. Site behavior can change without an application update.
+| Engine | Standard | Slim | Purpose |
+| --- | --- | --- | --- |
+| `yt-dlp` | Bundled | Required | URL analysis and ordinary media extraction |
+| `ffmpeg` | Bundled | Required | Merging, transformations, artwork, and adaptive playback |
+| `ffprobe` | Bundled | Optional | Media inspection and completed-output verification |
+| `gallery-dl` | Bundled | Optional | Supported gallery and Bunkr workflows |
+| `aria2c` | System optional | System optional | Preferred resumable direct HTTP transfer |
+| `curl` | System fallback | System fallback | Direct HTTP transfer when aria2c is unavailable |
 
-Nice Downloader also provides:
+Engine binaries generated by `npm run engines:prepare` are ignored by Git. Release CI assembles them from URLs and SHA-256 digests pinned in [`engines.lock.json`](engines.lock.json).
 
-- Bunkr album inspection and direct media pages, plus Imgur albums/galleries, Flickr albums/galleries, and Pinterest boards through gallery-dl, with individual-file selection, durable per-file progress, and failed-file retry
-- Resumable direct HTTP downloads through aria2c, with curl as a fallback
-- Explicit and signed HLS/DASH manifests through yt-dlp, with clear VOD/live, DRM, encryption-key, and parse diagnostics
-- Reddit share-link canonicalization and a limited public-embed fallback when
-  Reddit blocks its API for the current IP address
+## Supported sources
 
-## Media engines
+Ordinary media URLs are routed through the installed yt-dlp version, including commonly supported sites such as YouTube, TikTok, X/Twitter, Instagram, Reddit, Twitch, and Vimeo. Extractor behavior can change independently of Nice Downloader, so a site that works today may require a newer engine tomorrow.
 
-Nice Downloader has two package profiles. The recommended **standard** build
-includes the pinned core engines. The **Slim** build contains no engine
-binaries and instead uses compatible app-managed or system-installed tools.
-Under **Settings → Engines & diagnostics**, every discovered executable is
-identified as Managed, Bundled, or System; missing required tools are explained
-there as well.
+Nice Downloader also has typed workflows for:
 
-Published standard builds ship verified, pinned copies of the core engines and show their versions under
-**Settings → Engines & diagnostics**. Development builds also detect managed
-engines, `PATH`, and standard user bin folders.
+- Bunkr albums and direct media pages, with bounded inspection, individual-file selection, durable per-file progress, and failed-file retry.
+- Imgur albums and galleries, Flickr albums and galleries, and Pinterest boards through gallery-dl.
+- Resumable direct HTTP files through aria2c, with curl as a fallback.
+- Explicit or signed HLS and DASH VOD manifests through yt-dlp, with separate diagnostics for live streams, DRM, inaccessible encryption keys, malformed manifests, and unavailable media.
+- Reddit share-link canonicalization and a limited public-embed fallback when Reddit blocks its API for the current IP address.
 
-| Engine | Requirement | Purpose |
-| --- | --- | --- |
-| `yt-dlp` | Standard: bundled; Slim: required | Analysis and media extraction |
-| `ffmpeg` | Standard: bundled; Slim: required | Audio/video merging and post-processing |
-| `ffprobe` | Standard: bundled; Slim: optional | Output verification and media inspection |
-| `gallery-dl` | Standard: bundled; Slim: optional | Bunkr and future gallery integrations |
-| `aria2c` | Optional | Preferred direct HTTP transfer engine |
-| `curl` | Optional fallback | Direct HTTP transfers when aria2c is unavailable |
+Authentication-sensitive sites can use an opt-in browser-cookie profile. Nice Downloader sends only the selected browser and validated profile intent to yt-dlp; cookie contents do not pass through the React frontend.
 
-`aria2c` remains an optional system accelerator; curl is used when available.
-Developers can stage the pinned sidecars with `npm run engines:prepare`. The
-generated binaries are ignored by Git and assembled by release CI from the
-checksummed sources in `engines.lock.json`.
+## Getting started
 
-### Linux embedded playback
+1. Launch Nice Downloader and complete engine and privacy onboarding.
+2. Add one or more existing media folders under **Library**, or open **New Download** and paste an HTTP or HTTPS media URL.
+3. Select **Analyze** to retrieve real metadata and available formats before downloading.
+4. Choose a simple download intention, destination, and any optional advanced controls.
+5. Start the download and follow it under **Downloads**.
+6. Browse completed and existing media from **Home** or **Library**.
 
-The integrated player uses WebKitGTK's GStreamer runtime. Nice Downloader
-checks for `autoaudiosink` before opening a video and keeps **Open in system
-player** available when the embedded runtime or a codec is missing. AV1 MP4
-tracks with fractional timing that WebKitGTK can misinterpret are prepared as
-a bounded, cached FFmpeg Matroska stream-copy. This routes the unchanged AV1
-and audio streams through GStreamer's reliable Matroska timing path without
-re-encoding or modifying the original file; the first embedded play may take
-a moment while the compatibility copy is created. Before creating an uncached
-copy, the player explains why it is needed, shows its estimated size and free
-space, and offers **Create copy and play**, **Open original in system player**,
-or **Cancel**. Settings can keep this behavior on Ask, make ordinary copies
-automatic, or prevent automatic creation; copies of 2 GiB or larger are always
-confirmed. Compatibility cache usage and clearing are available under
-Settings > Desktop and accessibility.
+For a site that requires a signed-in session, open **Settings → Network & cookies**, select a browser in which you are already authenticated, optionally select a profile, save, and analyze the URL again. Close the browser first if its cookie database is locked.
 
-Nice Downloader also detects an optional system `mpv` installation. Copy-consent
-and embedded-playback error screens offer **Play with native mpv**, which opens
-the original cataloged file through mpv's FFmpeg decoders without creating a
-compatibility copy. Rust resolves the path from the catalog UUID, launches mpv
-without shell interpolation or user configuration, tracks one native session,
-and synchronizes its resume position back to the Library. On Wayland, mpv owns a
-separate native window because foreign-surface embedding is not portable.
+## Privacy and security
 
-If WebKitGTK still rejects the lossless AV1 timing copy, the player offers a
-separate H.264/AAC MP4 fallback. This second-stage copy requires explicit
-confirmation because it re-encodes video, may take several minutes, and may be
-larger. It is never created by the Automatic stream-copy preference.
+Nice Downloader is local-first, but “local-first” does not mean “never uses the network”: downloads contact the source you provide, engine update checks contact their configured vendors, and temporary LAN sharing deliberately serves selected media to devices that possess its capability link.
 
-Release AppImages include a curated GStreamer playback plugin set and its
-matching plugin scanner. This prevents the bundled GStreamer core from hiding
-or mixing with incompatible host plugins. Native development and distribution
-packages continue to use the operating system's GStreamer runtime:
+Security boundaries implemented by the application include:
 
-```bash
-# Arch Linux
-sudo pacman -S --needed gst-plugins-good gst-libav mpv
+- React receives typed Tauri commands, not a generic shell or arbitrary filesystem API.
+- URLs, filenames, metadata, proxy intent, and output paths are treated as untrusted input.
+- Engine processes are started with argument arrays instead of shell-string interpolation.
+- Playback, artwork, and image-viewer endpoints accept catalog IDs behind process-scoped tokens instead of frontend-supplied paths.
+- Diagnostic exports sanitize URLs, headers, proxy details, cookie data, and other sensitive fields.
+- Browser-cookie access is opt-in; managed cookie files and browser data stay backend-only.
+- Local theme discovery and optional privacy-region suggestions use a fixed loopback Ollama service. Sampled analysis images are temporary and bounded.
+- Temporary LAN shares are memory-only, time-limited, catalog-ID scoped, and stopped when the application exits. An authorized recipient can still retain bytes they receive.
+- Destructive duplicate cleanup is separate from analysis, revalidates evidence, and uses recoverable platform Trash rather than exposing permanent deletion.
 
-# Debian or Ubuntu
-sudo apt install gstreamer1.0-plugins-good gstreamer1.0-libav mpv
-```
+> [!WARNING]
+> Private Library locking is application-level hiding, not disk encryption. Locked records are excluded from application search, playback activity, analysis, backups, and sharing, but the original files and local SQLite database remain readable to someone with filesystem access.
 
-`gst-plugins-good` supplies the required audio-output element. `gst-libav` is
-recommended for broader codec support. Compatibility-copy consent is requested
-only after the runtime check succeeds; missing plugins do not trigger a
-pointless H.264 copy.
-
-## Quick start
-
-1. Launch Nice Downloader and complete the engine/privacy onboarding.
-2. Open **New Download** and paste an HTTP or HTTPS media URL.
-3. Select **Analyze** to inspect the media without downloading it.
-4. Choose quality, container, destination, and any advanced options.
-5. Start the download and monitor it from **Downloads** or **Queue**.
-6. Open completed items from **History** or **Library**.
-
-## Authentication and cookies
-
-Some sites reject anonymous requests or require an authenticated session. Open
-**Settings → Network & cookies**, select the browser in which you are already
-signed in, optionally choose a profile, save, and analyze the URL again.
-
-Close the browser first if its cookie database is locked. Nice Downloader does
-not send cookie contents to the frontend and does not log them. Browser-cookie
-access is opt-in, and managed cookie files remain backend-only.
+Do not include cookies, proxy credentials, private URLs, authentication headers, or unsanitized diagnostics in bug reports.
 
 ## Troubleshooting
 
 ### An engine is not detected
 
-Confirm it runs from a terminal, then select **Detect again** under
-**Settings → Engines & diagnostics**:
+Open **Settings → Engines & diagnostics** and select **Detect again**. For a Slim or development build, confirm the required tools run in a terminal:
 
 ```bash
 yt-dlp --version
@@ -226,38 +218,34 @@ ffprobe -version
 
 ### A site returns 403, login, or rate-limit errors
 
-Update yt-dlp, retry with the appropriate browser-cookie profile, and review the
-sanitized diagnostic details. A browser user agent alone does not replace valid
-cookies, and IP-based blocks may require waiting or using a permitted network.
+Update the relevant engine, retry with an appropriate browser-cookie profile, and inspect the sanitized diagnostic details. A browser user agent does not replace valid cookies, and an IP-based block may require waiting or using a network path permitted by the site.
 
-### AppImage fails on Arch Linux
+### Embedded playback still fails
 
-Public release artifacts should be built by the Ubuntu GitHub Actions runner.
-For a local Arch build, install Bubblewrap and use the repository workaround:
+Confirm the GStreamer packages listed under [Adaptive Linux playback](#adaptive-linux-playback) are installed when running from source or a native package. The player automatically tries temporary HLS and fragmented MP4 compatibility streams; its recovery panel can then offer libmpv, a cached H.264/AAC copy, native mpv, or the system player depending on availability.
+
+### An AppImage built on Arch fails during packaging
+
+Public artifacts are built by the Ubuntu release workflow. For a local Arch build, install Bubblewrap and use the repository wrapper:
 
 ```bash
-sudo pacman -S bubblewrap
+sudo pacman -S --needed bubblewrap
 npm run tauri:build:appimage:arch
 ```
 
-See [Release and Distribution](docs/RELEASING.md) for details.
+See [Release and Distribution](docs/RELEASING.md) for the reason this wrapper is necessary.
 
 ## Development
 
-### Common requirements
+### Requirements
 
 - Node.js 22 or newer
-- Current stable Rust toolchain
+- Current stable Rust toolchain with rustfmt and Clippy
 - Git
-- Python 3 with virtual-environment support
-- Internet access for the first npm/Cargo build and bundled-engine staging
+- Python 3 with virtual-environment support for bundled gallery-dl staging
+- Internet access for the first npm/Cargo install and bundled-engine preparation
 
-Python is only needed to turn the pinned gallery-dl wheel into a standalone
-sidecar. End users of release packages do not need Python.
-
-### Linux build tools
-
-Debian/Ubuntu build host:
+Debian or Ubuntu build host:
 
 ```bash
 sudo apt update
@@ -276,9 +264,6 @@ sudo pacman -S --needed base-devel curl wget file openssl webkit2gtk-4.1 \
   gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad gst-libav
 ```
 
-Building an AppImage locally on Arch additionally requires `bubblewrap`; use
-the documented `tauri:build:appimage:arch` command below.
-
 ### Run from source
 
 ```bash
@@ -286,47 +271,9 @@ npm ci
 npm run tauri:dev
 ```
 
-Development mode can discover engines from `PATH`. To test the same verified
-sidecars shipped in releases, run `npm run engines:prepare` first.
+Development mode can discover compatible engines from app-managed storage, `PATH`, and standard user binary directories. Run `npm run engines:prepare` first when you need to test the exact pinned sidecars used by the Standard profile.
 
-### Standard and Slim build profiles
-
-Build the standard package, including verified pinned engines, with:
-
-```bash
-npm run tauri:build:bundled
-```
-
-Build an engine-free package with:
-
-```bash
-npm run tauri:build:slim
-```
-
-Both commands accept Tauri bundle arguments after `--`. The base Tauri config
-is intentionally engine-free, and the standard command merges the separate
-bundled-engine resource config. This prevents locally prepared engine files
-from leaking into a Slim package.
-
-### Bundled engines and network downloads
-
-Release builds must stage their engine payload before Tauri bundles the app:
-
-```bash
-npm run engines:prepare
-```
-
-This downloads the pinned Linux x86-64 yt-dlp, FFmpeg, ffprobe, and gallery-dl
-inputs, verifies every SHA-256 digest from `engines.lock.json`, uses `unzip`,
-and builds gallery-dl with the pinned PyInstaller version. Downloads are cached under
-`.cache/bundled-engines/`; generated executables under
-`src-tauri/resources/engines/` are intentionally not committed.
-
-The first Tauri package build may also download `linuxdeploy`. The build does
-not install missing operating-system
-packages automatically.
-
-Validation commands:
+### Validate changes
 
 ```bash
 npm run typecheck
@@ -336,39 +283,48 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 cargo test --manifest-path src-tauri/Cargo.toml --all-targets --no-fail-fast
 ```
 
-Build packages:
+Playwright shell coverage is also available:
 
 ```bash
-# Linux x86-64 standard DEB and AppImage
+npm run test:e2e
+```
+
+### Build Linux packages
+
+```bash
+# Standard profile with bundled engines
+npm run tauri:build:bundled
+
+# Engine-free profile
+npm run tauri:build:slim
+
+# Individual Debian packages
 npm run tauri:build:bundled -- --bundles deb
-npm run tauri:build:appimage:arch
-
-# Linux x86-64 engine-free packages
 npm run tauri:build:slim -- --bundles deb
-npm run tauri:build:slim -- --bundles appimage
 
-# Arch Linux AppImage workaround (also stages engines)
+# Arch-safe AppImages
 sudo pacman -S --needed bubblewrap
 npm run tauri:build:appimage:arch
 npm run tauri:build:appimage:arch:slim
-
 ```
 
-Build outputs are written below
-`src-tauri/target/release/`, with installers under `bundle/`. Read
-[Architecture](docs/ARCHITECTURE.md), [UX](docs/UX.md), and the
-[Roadmap](docs/ROADMAP.md) before changing subsystem boundaries.
+The base [`src-tauri/tauri.conf.json`](src-tauri/tauri.conf.json) is intentionally engine-free. [`src-tauri/tauri.bundled.conf.json`](src-tauri/tauri.bundled.conf.json) is merged only for the Standard profile, preventing stale locally prepared engines from leaking into Slim artifacts. Generated binaries and build artifacts are not committed.
 
-## Security
+## Project documentation
 
-URLs, filenames, metadata, and output paths are treated as untrusted input.
-Engine processes are started with argument arrays rather than shell command
-strings. Please do not include cookies, proxy credentials, private URLs, or
-authentication headers in bug reports. Sanitized diagnostic exports are the
-preferred starting point for support requests.
+- [`AGENTS.md`](AGENTS.md) — repository conventions, safety boundaries, and validation expectations
+- [Architecture](docs/ARCHITECTURE.md) — subsystem ownership, persistence, process, playback, and security boundaries
+- [Bundled engines](docs/BUNDLED_ENGINES.md) — Standard and Slim engine profiles
+- [Local AI themes](docs/LOCAL_AI_THEMES.md) — optional VLM setup and theme-analysis behavior
+- [Media organizer](docs/MEDIA_ORGANIZER.md) — Library design, invariants, and delivered milestones
+- [Accessibility QA](docs/ACCESSIBILITY_QA.md) — keyboard, focus, contrast, motion, and assistive-technology checks
+- [Library profiling](docs/LIBRARY_PROFILING.md) — repeatable large-library performance methodology
+- [Release and Distribution](docs/RELEASING.md) — Linux packaging and release checks
+- [UX](docs/UX.md) — interaction and progressive-disclosure principles
+- [Roadmap](docs/ROADMAP.md) — delivered milestones and remaining work
+
+Read the architecture and UX documentation before changing subsystem boundaries. Rust entry points should remain narrow, engines must receive argument arrays rather than shell strings, and the frontend must not gain direct process authority.
 
 ## License
 
-No open-source license has been added yet. Until a `LICENSE` file is published,
-the source is available for inspection but no general permission to copy,
-modify, or redistribute it is granted.
+No open-source license has been added yet. Until a `LICENSE` file is published, the source is available for inspection, but no general permission to copy, modify, or redistribute it is granted.
