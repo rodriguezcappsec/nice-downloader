@@ -1,8 +1,9 @@
 # Release and Distribution
 
-Tagged `v*` revisions build Linux AppImage and DEB artifacts. Nice Downloader
-does not publish or support Windows or macOS builds. Run CI first; artifacts
-are intentionally unsigned until project-owned credentials are configured.
+Tagged `v*` revisions build Slim Linux AppImage and DEB artifacts without
+bundled download or media engines. Nice Downloader does not publish or support
+Windows or macOS builds. Run CI first; artifacts are intentionally unsigned
+until project-owned credentials are configured.
 
 ## Local release checks
 
@@ -19,7 +20,7 @@ npm run tauri:build:appimage:arch:slim
 npm run tauri:build:slim -- --bundles deb
 ```
 
-`tauri:build` aliases the standard bundled profile. Tagged releases currently publish that profile. The Slim command is an explicit distribution option and must remain engine-resource-free; inspect its package contents before publishing a Slim artifact. See `docs/BUNDLED_ENGINES.md` for profile behavior.
+`tauri:build` aliases the self-contained Bundled profile for explicit local builds. Tagged releases publish the Slim profile. Slim packages must remain engine-resource-free; inspect their package contents before publishing. See `docs/BUNDLED_ENGINES.md` for profile behavior.
 
 On Arch Linux, an unrelated unreadable symlink below `/usr/bin` can crash
 `linuxdeploy`, and the bundled `strip` may not understand modern `.relr.dyn`

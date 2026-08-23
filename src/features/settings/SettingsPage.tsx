@@ -362,7 +362,7 @@ export function SettingsPage() {
             </div>
           ) : null}
         </div>
-        <p className="mt-3 text-xs leading-5 text-muted">Managed files are checked against vendor-published SHA-256 manifests, version-tested, and retained for one-click rollback. Release packages provide bundled engine baselines.</p>
+        <p className="mt-3 text-xs leading-5 text-muted">Managed files are checked against vendor-published SHA-256 manifests, version-tested, and retained for one-click rollback. Slim releases use managed or system engines; explicit Bundled builds include packaged baselines.</p>
       </section>
 
       <section>

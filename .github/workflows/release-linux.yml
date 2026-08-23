@@ -14,22 +14,31 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: 22, cache: npm }
-      - uses: actions/setup-python@v5
-        with: { python-version: "3.12" }
       - uses: dtolnay/rust-toolchain@stable
-      - run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libgstreamer1.0-dev patchelf pkg-config python3-venv unzip gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav gstreamer1.0-pulseaudio
+      - run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libgstreamer1.0-dev patchelf pkg-config gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav gstreamer1.0-pulseaudio
       - run: npm ci
-      - name: Prepare verified bundled engines
-        run: npm run engines:prepare
-      - name: Build bundled Debian package
-        run: npm run tauri:build:bundled:prepared -- --bundles deb
-      - name: Build AppImage
-        run: npm run tauri:build:appimage:arch
-        env:
-          NICE_DOWNLOADER_ENGINES_PREPARED: "1"
+      - name: Build Slim Debian package
+        run: npm run tauri:build:slim -- --bundles deb
+      - name: Label Slim Debian package
+        shell: bash
+        run: |
+          shopt -s nullglob
+          packages=(src-tauri/target/release/bundle/deb/*.deb)
+          if (( ${#packages[@]} != 1 )); then
+            echo "error: expected exactly one Slim Debian package, found ${#packages[@]}" >&2
+            exit 1
+          fi
+          package_contents="$(dpkg-deb --contents "${packages[0]}")"
+          if grep -Fq '/engines/' <<<"$package_contents"; then
+            echo "error: Slim Debian package unexpectedly contains bundled engines" >&2
+            exit 1
+          fi
+          mv -- "${packages[0]}" "${packages[0]%.deb}-slim.deb"
+      - name: Build Slim AppImage
+        run: npm run tauri:build:appimage:arch:slim
       - uses: actions/upload-artifact@v4
         with:
-          name: nice-downloader-linux-${{ github.ref_name }}
+          name: nice-downloader-linux-slim-${{ github.ref_name }}
           path: |
             src-tauri/target/release/bundle/appimage/*.AppImage
             src-tauri/target/release/bundle/deb/*.deb
