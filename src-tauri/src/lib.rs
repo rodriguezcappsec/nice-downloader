@@ -1,3 +1,6 @@
+#[cfg(not(target_os = "linux"))]
+compile_error!("Nice Downloader supports Linux only.");
+
 mod authentication;
 mod chapter_suggestions;
 mod commands;

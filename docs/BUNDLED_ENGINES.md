@@ -23,9 +23,7 @@ On Arch Linux, use `npm run tauri:build:appimage:arch` for the standard AppImage
 
 The base `src-tauri/tauri.conf.json` intentionally contains no engine resources. `src-tauri/tauri.bundled.conf.json` is merged only for the standard profile. This prevents a stale local `resources/engines/` directory from accidentally entering a Slim package.
 
-The preparation script supports Linux x86_64 and Windows x86_64. It downloads the official standalone yt-dlp executable, extracts pinned FFmpeg/ffprobe archives, and builds gallery-dl into a one-file PyInstaller executable. The build machine therefore needs Python, venv support, and, on Linux, `unzip`; end users do not.
-
-The Windows portable distribution requires the executable together with its adjacent `engines/` directory. Moving only `nice-downloader.exe` removes the bundled baseline; the NSIS installer places both automatically.
+The preparation script supports Linux x86_64 only. It downloads the official standalone yt-dlp executable, extracts pinned FFmpeg/ffprobe archives, and builds gallery-dl into a one-file PyInstaller executable. The build machine therefore needs Python, venv support, and `unzip`; end users do not.
 
 Both profiles use the same runtime and resolve engines in this order:
 

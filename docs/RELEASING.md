@@ -1,8 +1,8 @@
 # Release and Distribution
 
-Tagged `v*` revisions build Linux AppImage/DEB and Windows NSIS artifacts in
-separate GitHub Actions workflows. Run CI first; artifacts are intentionally
-unsigned until project-owned credentials are configured.
+Tagged `v*` revisions build Linux AppImage and DEB artifacts. Nice Downloader
+does not publish or support Windows or macOS builds. Run CI first; artifacts
+are intentionally unsigned until project-owned credentials are configured.
 
 ## Local release checks
 
@@ -38,9 +38,7 @@ and installs the project AppRun launcher before generating the final image. The
 output is written to `src-tauri/target/release/bundle/appimage/`.
 
 Test AppImages on Ubuntu and Arch-based hosts. AppImage requires compatible
-FUSE setup or extraction via `--appimage-extract-and-run`. The Windows workflow
-produces an NSIS `setup.exe`; test installation, WebView2 bootstrap, PATH engine
-discovery, cancellation, and Unicode paths on a real Windows runner.
+FUSE setup or extraction via `--appimage-extract-and-run`.
 
 ## Flatpak foundation
 
@@ -53,10 +51,8 @@ submission to Flathub.
 
 - Configure Tauri updater/signing keys in repository secrets and publish
   public-key metadata.
-- Obtain a Windows Authenticode certificate and sign both the executable and
-  NSIS installer.
 - Decide the Linux artifact signing and checksum publication policy.
-- Execute release smoke tests on clean Arch, Ubuntu, and Windows machines.
+- Execute release smoke tests on clean Arch and Ubuntu machines.
 - Produce an SBOM and archive exact engine versions/checksums per release.
 
 Never commit private keys, cookie files, proxy credentials, or signing

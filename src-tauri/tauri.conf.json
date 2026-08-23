@@ -32,7 +32,7 @@
     "targets": ["deb", "appimage"],
     "category": "Utility",
     "shortDescription": "Private desktop media hub and download manager",
-    "longDescription": "A Linux-first local media library and desktop orchestration layer for yt-dlp, FFmpeg, gallery-dl, aria2c, and curl.",
-    "icon": ["icons/icon.png", "icons/icon.ico"]
+    "longDescription": "A Linux-only local media library and desktop orchestration layer for yt-dlp, FFmpeg, gallery-dl, aria2c, and curl.",
+    "icon": ["icons/icon.png"]
   }
 }
