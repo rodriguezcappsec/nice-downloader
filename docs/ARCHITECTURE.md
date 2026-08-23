@@ -162,7 +162,11 @@ The libmpv experiment documented in `docs/experiments/libmpv-gtk.md` proves AV1 
 Linux AppImages stage a curated GStreamer plugin set and matching
 `gst-plugin-scanner` before the final `linuxdeploy` dependency pass. A small
 AppRun wrapper pins WebKitGTK to that packaged runtime rather than mixing the
-bundled GStreamer core with host plugins from another distribution. Rust checks
+bundled GStreamer core with host plugins from another distribution.
+The final AppDir excludes `libwayland-client` so WebKitGTK resolves that
+ABI-stable graphics boundary from the host instead of overriding a newer
+compositor and driver stack with the Ubuntu build host's copy.
+Rust checks
 the required audio-output element before compatibility preflight, so a missing
 runtime is reported before any copy consent. React retains the typed error code
 and offers H.264 fallback only for decode or readiness failures.

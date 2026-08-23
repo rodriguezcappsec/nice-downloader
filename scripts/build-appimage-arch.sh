@@ -139,6 +139,29 @@ if [[ "$build_profile" == "slim" && -d "$engine_dir" ]]; then
   exit 1
 fi
 
+# libwayland-client is part of the host graphics boundary. Bundling the Ubuntu
+# runner's copy can make WebKitGTK fail to create an EGL display on newer Linux
+# distributions, leaving an otherwise healthy Tauri window completely white.
+# Keep WebKitGTK and the curated GStreamer runtime packaged, but resolve this
+# ABI-stable client library from the host alongside its compositor and drivers.
+wayland_client_library="$(
+  find "$app_dir/usr/lib" -maxdepth 2 \( -type f -o -type l \) \
+    -name 'libwayland-client.so*' -print -quit
+)"
+if [[ -n "$wayland_client_library" ]]; then
+  find "$app_dir/usr/lib" -maxdepth 2 \( -type f -o -type l \) \
+    -name 'libwayland-client.so*' -delete
+  echo "Excluded bundled libwayland-client so AppImage uses the host graphics boundary."
+fi
+
+if [[ -n "$(
+  find "$app_dir/usr/lib" -maxdepth 2 \( -type f -o -type l \) \
+    -name 'libwayland-client.so*' -print -quit
+)" ]]; then
+  echo "error: bundled libwayland-client remained in the AppDir" >&2
+  exit 1
+fi
+
 if [[ ! -x "$app_dir/AppRun" ]]; then
   echo "error: linuxdeploy did not create the AppDir launcher" >&2
   exit 1

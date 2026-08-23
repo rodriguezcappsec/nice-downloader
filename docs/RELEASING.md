@@ -36,6 +36,8 @@ mask only that path inside the build process's mount namespace. It does not
 change system permissions.
 The AppImage wrapper stages a curated GStreamer playback plugin set and matching
 scanner, reruns `linuxdeploy` so their shared-library dependencies are included,
+excludes the build host's `libwayland-client` so WebKitGTK uses the target host's
+graphics boundary,
 and installs the project AppRun launcher before generating the final image. The
 output is written to `src-tauri/target/release/bundle/appimage/`.
 
