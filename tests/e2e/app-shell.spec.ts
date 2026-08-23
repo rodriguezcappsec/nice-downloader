@@ -20,6 +20,22 @@ test("global keyboard shortcuts preserve navigation and focus", async ({ page })
   await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
 });
 
+test("Slim engine setup exposes distro-specific commands", async ({ page }) => {
+  await page.keyboard.press("Control+,");
+  await page.getByRole("tab", { name: "Engines & diagnostics" }).click();
+
+  await expect(page.getByRole("heading", { name: "System engine setup" })).toBeVisible();
+  await expect(page.getByRole("tabpanel")).toContainText("sudo apt install yt-dlp ffmpeg");
+  await expect(page.getByRole("button", { name: /copy required engines command/i })).toBeVisible();
+
+  await page.getByRole("tab", { name: "Arch Linux" }).click();
+  await expect(page.getByRole("tabpanel")).toContainText("sudo pacman -S --needed yt-dlp ffmpeg");
+
+  await page.getByRole("tab", { name: "Fedora" }).click();
+  await expect(page.getByRole("tabpanel")).toContainText("sudo dnf install yt-dlp ffmpeg-free");
+  await expect(page.getByRole("tabpanel")).toContainText("RPM Fusion");
+});
+
 test("command search opens and closes with focus restoration", async ({ page }) => {
   const trigger = page.getByRole("button", { name: /^Search/ });
   await trigger.focus();

@@ -26,6 +26,7 @@ import { Button, Field, Input, Select } from "../../components/ui";
 import { useAppStore } from "../../stores/app-store";
 import { api, normalizeError } from "../../lib/tauri";
 import { formatBytes } from "../../lib/format";
+import { EngineSetupGuide } from "./EngineSetupGuide";
 import type {
   BrowserCookieSource,
   AuthenticationProfile,
@@ -314,6 +315,7 @@ export function SettingsPage() {
           </div>
         </div>
       ) : null}
+      <EngineSetupGuide />
       <section className="mb-8">
         <div className="mb-3 flex items-center gap-2">
           <DownloadCloud size={17} className="text-muted" />
