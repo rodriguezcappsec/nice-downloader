@@ -67,13 +67,14 @@ pub async fn detect_all() -> Vec<EngineInfo> {
 }
 
 async fn detect(definition: EngineDefinition) -> EngineInfo {
-    let path = match crate::engines::managed::resolve(definition.executable) {
-        Some(path) => path,
+    let resolved = match crate::engines::managed::resolve_with_source(definition.executable) {
+        Some(resolved) => resolved,
         None => {
             return EngineInfo {
                 id: definition.id,
                 display_name: definition.display_name.to_owned(),
                 installed: false,
+                source: None,
                 executable_path: None,
                 version: None,
                 required: definition.required,
@@ -101,6 +102,7 @@ async fn detect(definition: EngineDefinition) -> EngineInfo {
             };
         }
     };
+    let path = resolved.path;
 
     let version = read_version(&path, definition.version_arg).await;
     let capabilities = match definition.id {
@@ -148,6 +150,7 @@ async fn detect(definition: EngineDefinition) -> EngineInfo {
         id: definition.id,
         display_name: definition.display_name.to_owned(),
         installed: true,
+        source: Some(resolved.source),
         executable_path: Some(path.to_string_lossy().into_owned()),
         version: version.clone(),
         required: definition.required,

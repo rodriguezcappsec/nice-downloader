@@ -21,7 +21,7 @@ jobs:
       - name: Prepare verified bundled engines
         run: npm run engines:prepare
       - name: Build portable executable
-        run: npm run tauri:build -- --no-bundle
+        run: npm run tauri:build:bundled:prepared -- --no-bundle
       - uses: actions/upload-artifact@v4
         with:
           name: nice-downloader-windows-portable-${{ github.ref_name }}
@@ -34,7 +34,7 @@ jobs:
         run: |
           $attempts = 3
           for ($attempt = 1; $attempt -le $attempts; $attempt++) {
-            npm run tauri:build -- --bundles nsis
+            npm run tauri:build:bundled:prepared -- --bundles nsis
             if ($LASTEXITCODE -eq 0) { exit 0 }
             if ($attempt -eq $attempts) { exit $LASTEXITCODE }
             Write-Warning "NSIS packaging attempt $attempt failed; retrying in 15 seconds."

@@ -1,4 +1,5 @@
 import {
+  AlertTriangle,
   CheckCircle2,
   CircleX,
   Cookie,
@@ -81,6 +82,7 @@ export function SettingsPage() {
   const [candidate, setCandidate] = useState<EngineUpdateCandidate | null>(null);
   const [managing, setManaging] = useState<EngineId | null>(null);
   const [settingsTab, setSettingsTab] = useState<"access" | "profiles" | "privacy" | "desktop" | "engines">("access");
+  const missingRequiredEngines = engines.filter((engine) => engine.required && !engine.installed);
 
   useEffect(() => {
     void api.listManagedEngines().then(setManaged).catch((error) => setError(normalizeError(error)));
@@ -301,6 +303,17 @@ export function SettingsPage() {
       {settingsTab === "desktop" ? <DesktopSettings /> : null}
 
       {settingsTab === "engines" ? <>
+      {missingRequiredEngines.length > 0 ? (
+        <div className="mb-6 flex items-start gap-3 rounded-[11px] border border-amber-400/25 bg-amber-400/[0.07] p-4" role="status">
+          <AlertTriangle className="mt-0.5 shrink-0 text-amber-400" size={18} />
+          <div>
+            <h2 className="text-sm font-semibold text-ink">Required tools are missing</h2>
+            <p className="mt-1 text-xs leading-5 text-muted">
+              This may be a Slim build. Install {missingRequiredEngines.map((engine) => engine.displayName).join(" and ")} through your operating system, or install a verified managed version when offered below. Then select Detect again.
+            </p>
+          </div>
+        </div>
+      ) : null}
       <section className="mb-8">
         <div className="mb-3 flex items-center gap-2">
           <DownloadCloud size={17} className="text-muted" />
@@ -368,6 +381,7 @@ export function SettingsPage() {
                   <div className="flex items-center gap-2">
                     <h3 className="text-sm font-semibold">{engine.displayName}</h3>
                     {engine.required ? <span className="rounded-[4px] bg-accent/10 px-1.5 py-0.5 text-[9px] font-semibold tracking-[0.04em] text-accent">Required</span> : null}
+                    {engine.source ? <span className="rounded-[4px] border border-line/70 px-1.5 py-0.5 text-[9px] font-semibold tracking-[0.04em] text-muted">{engine.source === "managed" ? "Managed" : engine.source === "bundled" ? "Bundled" : "System"}</span> : null}
                   </div>
                   <p className="mt-1 truncate font-mono text-xs text-muted">{engine.executablePath || engine.statusMessage}</p>
                 </div>
@@ -393,7 +407,7 @@ export function SettingsPage() {
           ))}
           {!loading && engines.length === 0 ? <div className="p-5 text-sm text-muted">No engine status is available.</div> : null}
         </div>
-        <p className="mt-3 text-xs leading-5 text-muted">Resolution order: managed update, bundled baseline, then PATH and standard user executable folders. The executable path above shows the active source.</p>
+        <p className="mt-3 text-xs leading-5 text-muted">Resolution order: managed update, bundled baseline when present, then PATH and standard user executable folders. Slim builds omit the bundled baseline.</p>
         <div className="panel-shadow mt-5 flex items-center justify-between rounded-[10px] border border-line/60 bg-panel/70 p-4">
           <div><h3 className="text-sm font-semibold">Support diagnostics</h3><p className="mt-1 text-xs text-muted">Export engine status and sanitized recent errors. URLs, cookies, proxy values, and profile names are excluded.</p></div>
           <Button variant="secondary" onClick={() => void exportDiagnostics()}>Export diagnostics</Button>

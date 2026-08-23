@@ -62,6 +62,7 @@ The frontend never receives a generic command-execution primitive. Tauri capabil
 - `features/downloads`: live jobs and cancellation.
 - `features/history`: completed-download records.
 - `features/settings`: engine discovery, optional capability status, and typed site-access preferences.
+- Packaging has explicit standard and Slim profiles. The standard profile merges verified engine resources at bundle time; the base Tauri configuration stays resource-free so Slim packages cannot accidentally capture locally prepared engines. Runtime discovery and application behavior remain shared, and engine status reports whether each executable is managed, bundled, or system-provided.
 - `stores`: Zustand state synchronized from Tauri commands/events.
 - `types`: TypeScript mirrors of the command/event contracts.
 

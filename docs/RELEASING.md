@@ -13,9 +13,13 @@ npm run build
 cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 cargo test --manifest-path src-tauri/Cargo.toml --all-targets --no-fail-fast
-npm run tauri:build -- --bundles deb
+npm run tauri:build:bundled -- --bundles deb
 npm run tauri:build:appimage:arch
+npm run tauri:build:appimage:arch:slim
+npm run tauri:build:slim -- --bundles deb
 ```
+
+`tauri:build` aliases the standard bundled profile. Tagged releases currently publish that profile. The Slim command is an explicit distribution option and must remain engine-resource-free; inspect its package contents before publishing a Slim artifact. See `docs/BUNDLED_ENGINES.md` for profile behavior.
 
 On Arch Linux, an unrelated unreadable symlink below `/usr/bin` can crash
 `linuxdeploy`, and the bundled `strip` may not understand modern `.relr.dyn`

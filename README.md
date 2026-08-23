@@ -129,16 +129,23 @@ Nice Downloader also provides:
 
 ## Media engines
 
-Release builds ship verified, pinned copies of the core engines and show their versions under
+Nice Downloader has two package profiles. The recommended **standard** build
+includes the pinned core engines. The **Slim** build contains no engine
+binaries and instead uses compatible app-managed or system-installed tools.
+Under **Settings → Engines & diagnostics**, every discovered executable is
+identified as Managed, Bundled, or System; missing required tools are explained
+there as well.
+
+Published standard builds ship verified, pinned copies of the core engines and show their versions under
 **Settings → Engines & diagnostics**. Development builds also detect managed
 engines, `PATH`, and standard user bin folders.
 
 | Engine | Requirement | Purpose |
 | --- | --- | --- |
-| `yt-dlp` | Bundled | Analysis and media extraction |
-| `ffmpeg` | Bundled | Audio/video merging and post-processing |
-| `ffprobe` | Bundled | Output verification and media inspection |
-| `gallery-dl` | Bundled | Bunkr and future gallery integrations |
+| `yt-dlp` | Standard: bundled; Slim: required | Analysis and media extraction |
+| `ffmpeg` | Standard: bundled; Slim: required | Audio/video merging and post-processing |
+| `ffprobe` | Standard: bundled; Slim: optional | Output verification and media inspection |
+| `gallery-dl` | Standard: bundled; Slim: optional | Bunkr and future gallery integrations |
 | `aria2c` | Optional | Preferred direct HTTP transfer engine |
 | `curl` | Optional fallback | Direct HTTP transfers when aria2c is unavailable |
 
@@ -311,6 +318,25 @@ npm run tauri:dev
 Development mode can discover engines from `PATH`. To test the same verified
 sidecars shipped in releases, run `npm run engines:prepare` first.
 
+### Standard and Slim build profiles
+
+Build the standard package, including verified pinned engines, with:
+
+```bash
+npm run tauri:build:bundled
+```
+
+Build an engine-free package with:
+
+```bash
+npm run tauri:build:slim
+```
+
+Both commands accept Tauri bundle arguments after `--`. The base Tauri config
+is intentionally engine-free, and the standard command merges the separate
+bundled-engine resource config. This prevents locally prepared engine files
+from leaking into a Slim package.
+
 ### Bundled engines and network downloads
 
 Release builds must stage their engine payload before Tauri bundles the app:
@@ -343,21 +369,27 @@ cargo test --manifest-path src-tauri/Cargo.toml --all-targets --no-fail-fast
 Build packages:
 
 ```bash
-# Linux x86-64: stage verified engines, then build DEB and AppImage
-npm run engines:prepare
-npm run tauri:build -- --bundles deb
+# Linux x86-64 standard DEB and AppImage
+npm run tauri:build:bundled -- --bundles deb
 npm run tauri:build:appimage:arch
+
+# Linux x86-64 engine-free packages
+npm run tauri:build:slim -- --bundles deb
+npm run tauri:build:slim -- --bundles appimage
 
 # Arch Linux AppImage workaround (also stages engines)
 sudo pacman -S --needed bubblewrap
 npm run tauri:build:appimage:arch
+npm run tauri:build:appimage:arch:slim
 
 # Windows PowerShell on a Windows x86-64 host
-npm run engines:prepare
-npm run tauri:build -- --bundles nsis
+npm run tauri:build:bundled -- --bundles nsis
 
 # Windows portable executable and adjacent engines/ directory
-npm run tauri:build -- --no-bundle
+npm run tauri:build:bundled -- --no-bundle
+
+# Windows engine-free installer
+npm run tauri:build:slim -- --bundles nsis
 ```
 
 Do not distribute the Windows portable `.exe` by itself; include the adjacent

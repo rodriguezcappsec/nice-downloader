@@ -30,6 +30,7 @@ export interface EngineInfo {
   id: "ytDlp" | "ffmpeg" | "ffprobe" | "galleryDl" | "aria2" | "curl";
   displayName: string;
   installed: boolean;
+  source?: "managed" | "bundled" | "system" | null;
   executablePath?: string | null;
   version?: string | null;
   required: boolean;
