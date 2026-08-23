@@ -17,7 +17,7 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       - uses: dtolnay/rust-toolchain@stable
-      - run: sudo apt-get update && sudo apt-get install -y bubblewrap libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf pkg-config python3-venv unzip gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav gstreamer1.0-pulseaudio
+      - run: sudo apt-get update && sudo apt-get install -y bubblewrap libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libgstreamer1.0-dev patchelf pkg-config python3-venv unzip gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav gstreamer1.0-pulseaudio
       - run: npm ci
       - name: Prepare verified bundled engines
         run: npm run engines:prepare

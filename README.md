@@ -250,7 +250,8 @@ Debian or Ubuntu build host:
 ```bash
 sudo apt update
 sudo apt install build-essential curl wget file libssl-dev \
-  libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf pkg-config \
+  libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libgstreamer1.0-dev \
+  patchelf pkg-config \
   python3 python3-venv unzip gstreamer1.0-tools gstreamer1.0-plugins-base \
   gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
   gstreamer1.0-libav gstreamer1.0-pulseaudio

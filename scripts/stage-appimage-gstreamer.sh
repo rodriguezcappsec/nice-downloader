@@ -16,11 +16,17 @@ for executable in gst-inspect-1.0 pkg-config; do
   fi
 done
 
+if ! pkg-config --exists gstreamer-1.0; then
+  echo "error: GStreamer development metadata is required to stage AppImage playback support" >&2
+  echo "Install libgstreamer1.0-dev on Debian or Ubuntu." >&2
+  exit 1
+fi
+
 plugin_source="$(pkg-config --variable=pluginsdir gstreamer-1.0)"
 scanner_directory="$(pkg-config --variable=pluginscannerdir gstreamer-1.0)"
 scanner_source="$scanner_directory/gst-plugin-scanner"
 
-if [[ ! -d "$plugin_source" || ! -x "$scanner_source" ]]; then
+if [[ -z "$plugin_source" || -z "$scanner_directory" || ! -d "$plugin_source" || ! -x "$scanner_source" ]]; then
   echo "error: the GStreamer plugin directory or plugin scanner is unavailable" >&2
   exit 1
 fi
