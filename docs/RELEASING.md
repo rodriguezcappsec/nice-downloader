@@ -30,8 +30,10 @@ sudo pacman -S bubblewrap
 npm run tauri:build:appimage:arch
 ```
 
-The script sets `NO_STRIP=1` and masks an unreadable `/var/lib/searxng` only in
-the build process's mount namespace. It does not change system permissions.
+The script sets `NO_STRIP=1` and runs `linuxdeploy` directly on ordinary build
+hosts. When it detects an unreadable `/var/lib/searxng`, it uses Bubblewrap to
+mask only that path inside the build process's mount namespace. It does not
+change system permissions.
 The AppImage wrapper stages a curated GStreamer playback plugin set and matching
 scanner, reruns `linuxdeploy` so their shared-library dependencies are included,
 and installs the project AppRun launcher before generating the final image. The

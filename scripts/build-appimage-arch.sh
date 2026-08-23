@@ -19,12 +19,6 @@ if [[ "$build_profile" == "bundled" && "${NICE_DOWNLOADER_ENGINES_PREPARED:-0}" 
   npm run engines:prepare || exit $?
 fi
 
-if ! command -v bwrap >/dev/null 2>&1; then
-  echo "error: bubblewrap (bwrap) is required for the AppImage build" >&2
-  echo "Install it with: sudo pacman -S bubblewrap" >&2
-  exit 1
-fi
-
 echo "Preparing the $build_profile AppImage directory with Tauri..."
 echo "Note: Tauri's first linuxdeploy pass may fail on Arch; this script will continue from the generated AppDir."
 (
@@ -88,37 +82,55 @@ trap restore_engines EXIT
 # native AppRun first; the project wrapper is installed after this scan.
 rm -f "$app_dir/AppRun.linuxdeploy"
 
-mask_directory="$(mktemp -d "${TMPDIR:-/tmp}/nice-downloader-searxng-mask.XXXXXX")"
+mask_directory=""
 cleanup_mask() {
-  rmdir "$mask_directory" 2>/dev/null || true
+  if [[ -n "$mask_directory" ]]; then
+    rmdir "$mask_directory" 2>/dev/null || true
+  fi
 }
 trap 'restore_engines; cleanup_mask' EXIT
 
-bwrap_args=(
-  --ro-bind / /
-  --dev-bind /dev /dev
-  --proc /proc
-  --bind /tmp /tmp
-  --bind "$bundle_dir" "$bundle_dir"
+linuxdeploy_command=(
+  /usr/bin/env
+  APPIMAGE_EXTRACT_AND_RUN=1
+  NO_STRIP=1
+  "$linuxdeploy"
+  --appimage-extract-and-run
+  --verbosity 1
+  --appdir "$app_dir"
 )
 
 # linuxdeploy scans /usr/bin and can descend into host-specific symlinks.
 # Mask an unreadable local service directory only inside this build namespace.
 if [[ -e /var/lib/searxng && ! -r /var/lib/searxng ]]; then
-  bwrap_args+=(--ro-bind "$mask_directory" /var/lib/searxng)
-fi
+  if ! command -v bwrap >/dev/null 2>&1; then
+    echo "error: bubblewrap (bwrap) is required to mask unreadable /var/lib/searxng" >&2
+    echo "Install it with: sudo pacman -S bubblewrap" >&2
+    exit 1
+  fi
 
-echo "Running linuxdeploy with the packaged playback runtime..."
-(
-  cd "$bundle_dir"
-  bwrap "${bwrap_args[@]}" -- /usr/bin/env \
-    APPIMAGE_EXTRACT_AND_RUN=1 \
-    NO_STRIP=1 \
-    "$linuxdeploy" \
-    --appimage-extract-and-run \
-    --verbosity 1 \
-    --appdir "$app_dir"
-)
+  mask_directory="$(mktemp -d "${TMPDIR:-/tmp}/nice-downloader-searxng-mask.XXXXXX")"
+  bwrap_args=(
+    --ro-bind / /
+    --dev-bind /dev /dev
+    --proc /proc
+    --bind /tmp /tmp
+    --bind "$bundle_dir" "$bundle_dir"
+    --ro-bind "$mask_directory" /var/lib/searxng
+  )
+
+  echo "Running linuxdeploy with the packaged playback runtime in an isolated filesystem view..."
+  (
+    cd "$bundle_dir"
+    bwrap "${bwrap_args[@]}" -- "${linuxdeploy_command[@]}"
+  )
+else
+  echo "Running linuxdeploy with the packaged playback runtime..."
+  (
+    cd "$bundle_dir"
+    "${linuxdeploy_command[@]}"
+  )
+fi
 
 restore_engines
 
